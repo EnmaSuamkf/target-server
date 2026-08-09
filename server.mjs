@@ -15,6 +15,7 @@
  *   TARGET_SERVER_DB    (default ./target-server.db)
  */
 import { createServer } from "node:http";
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import * as path from "node:path";
@@ -34,7 +35,8 @@ import {
 const PORT = Number.parseInt(process.env.PORT ?? "8900", 10);
 const HOST = process.env.HOST ?? "127.0.0.1";
 const INGEST_TOKEN = process.env.TARGET_INGEST_TOKEN ?? "";
-const PUBLIC_DIR = fileURLToPath(new URL("./public", import.meta.url));
+// The dashboard is a Vite build (see ui/): `npm run build` emits it here.
+const PUBLIC_DIR = fileURLToPath(new URL("./public/dist", import.meta.url));
 const MAX_BODY_BYTES = 5 * 1024 * 1024;
 
 open(); // initialise the schema up front
@@ -121,11 +123,29 @@ const STATIC_TYPES = {
 	".svg": "image/svg+xml",
 };
 
+/** The dashboard ships as source; without a build there is nothing to serve. */
+function dashboardIsBuilt() {
+	return existsSync(path.join(PUBLIC_DIR, "index.html"));
+}
+
 async function serveStatic(res, urlPath) {
 	const rel = urlPath === "/" ? "index.html" : urlPath.replace(/^\/+/, "");
 	// Contain path traversal within PUBLIC_DIR.
 	const filePath = path.resolve(PUBLIC_DIR, rel);
 	if (!filePath.startsWith(PUBLIC_DIR)) return sendJson(res, 403, { error: "forbidden" });
+	if (!dashboardIsBuilt()) {
+		// The API is up and ingest works; only the UI is missing. Say so in the
+		// browser instead of a bare 404 nobody can act on.
+		res.writeHead(503, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+		res.end(
+			"<!doctype html><meta charset=utf-8><title>Dashboard not built</title>" +
+				'<body style="font:16px/1.6 system-ui;margin:3rem auto;max-width:40rem;padding:0 1rem">' +
+				"<h1>Dashboard not built</h1><p>The API is running — only the UI bundle is missing. Build it once:</p>" +
+				'<pre style="background:#f4f4f5;padding:1rem;border-radius:6px">npm run ui:install\nnpm run build</pre>' +
+				"<p>Then reload this page.</p>",
+		);
+		return;
+	}
 	try {
 		const buf = await readFile(filePath);
 		const ext = path.extname(filePath).toLowerCase();
@@ -196,6 +216,7 @@ server.listen(PORT, HOST, () => {
 	log(`dashboard:  http://${HOST}:${PORT}/`);
 	log(`ingest:     POST http://${HOST}:${PORT}/ingest`);
 	log(INGEST_TOKEN ? "ingest auth: Bearer token REQUIRED" : "ingest auth: open (set TARGET_INGEST_TOKEN to require one)");
+	if (!dashboardIsBuilt()) log("WARNING: dashboard not built — run `npm run ui:install && npm run build` (the API works regardless)");
 });
 
 export { server };

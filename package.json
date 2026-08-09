@@ -9,6 +9,10 @@
   },
   "scripts": {
     "start": "node server.mjs",
-    "test": "node --test"
+    "test": "node --test",
+    "ui:install": "npm --prefix ui install",
+    "build": "npm --prefix ui run build",
+    "ui:dev": "npm --prefix ui run dev",
+    "typecheck": "npm --prefix ui run typecheck"
   }
 }
