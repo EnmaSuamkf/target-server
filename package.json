@@ -1,0 +1,14 @@
+{
+  "name": "target-server",
+  "version": "0.1.0",
+  "description": "Central report server + React dashboard for The Target Project. Receives activity batches from Target instances (the report-to-server client) and visualises workflows, steps, usage and errors.",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test"
+  }
+}
