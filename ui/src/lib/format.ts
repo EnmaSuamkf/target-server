@@ -1,0 +1,37 @@
+/** Display helpers shared by the tables, the feed and the step canvas. */
+
+export function timeAgo(iso: string | null | undefined): string {
+	if (!iso) return "-";
+	const s = Math.max(0, (Date.now() - Date.parse(iso)) / 1000);
+	if (s < 60) return `${Math.floor(s)}s ago`;
+	if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+	if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+	return `${Math.floor(s / 86400)}d ago`;
+}
+
+/** Token counts, compact: 15234 → "15k", 464 → "464". */
+export function compactTokens(n: number | null | undefined): string {
+	if (n == null) return "0";
+	if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
+	if (n >= 1000) return `${(n / 1000).toFixed(1).replace(/\.0$/, "")}k`;
+	return String(n);
+}
+
+/** Step durations: under a minute in seconds, over it as "2m 5s". */
+export function formatDuration(ms: number): string {
+	const s = Math.round(ms / 1000);
+	if (s < 60) return `${s}s`;
+	return `${Math.floor(s / 60)}m ${s % 60}s`;
+}
+
+/** `datetime-local` values are local; the API compares ISO (UTC) strings. */
+export function localToIso(value: string): string | null {
+	if (!value) return null;
+	const ms = Date.parse(value);
+	return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
+}
+
+/** First 8 chars of a uuid — how every id is shown in the tables. */
+export function shortId(id: string): string {
+	return id.slice(0, 8);
+}

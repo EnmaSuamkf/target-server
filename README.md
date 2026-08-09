@@ -8,16 +8,26 @@ Wire contract it implements: `docs/report-server.es.html` §7 in the target repo
 
 ## Requirements
 
-- Node.js **≥ 24** (uses `node:sqlite`, no external dependencies — nothing to
-  `npm install`).
+- Node.js **≥ 24**. The server itself has **no dependencies** (`node:sqlite` and
+  other builtins); only the dashboard has a build step (React + Vite, in `ui/`).
 
 ## Run
 
 ```bash
+npm run ui:install        # once: installs the dashboard's dependencies
+npm run build             # once per UI change: ui/src → public/dist
 npm start                 # or: node server.mjs
 ```
 
 Then open the dashboard at **http://127.0.0.1:8900/**.
+
+The API (`/ingest`, `/api/*`, `/health`) works without building the UI — the
+server only needs `public/dist` to serve the dashboard, and says so in the
+browser if it is missing.
+
+While working on the dashboard, `npm run ui:dev` serves it on
+**http://127.0.0.1:5174/** with hot reload, proxying `/api`, `/health` and
+`/ingest` to the running server on 8900 (override with `VITE_SERVER_ORIGIN`).
 
 Configuration (env vars):
 
@@ -92,8 +102,27 @@ validation and the dashboard API.
 
 ## Dashboard
 
-`public/` is a React 18 SPA with **no CDN and no build step**: React/ReactDOM are
-vendored in `public/vendor/`, and `public/app.js` uses `React.createElement`
-directly, so nothing is transpiled in the browser and it works fully offline. It
-polls the JSON API every few seconds and shows KPIs, the instance fleet,
-event/version breakdowns and a live event feed.
+`ui/` is a **React 19 + TypeScript + Vite** single-page app, laid out like the
+target repo's `hub/ui`:
+
+```
+ui/
+  index.html  vite.config.ts  tsconfig.json  package.json
+  src/
+    main.tsx  App.tsx              # shell: top bar, KPIs, panels
+    api/types.ts                   # the shapes server.mjs returns
+    api/kinds.ts                   # event kind → label + tooltip + badge tone
+    hooks/useApi.ts                # GET + poll, keeps data across refreshes
+    lib/format.ts                  # timeAgo / compactTokens / durations
+    components/                    # FilterBar, WorkflowsTable, StepCanvas,
+                                   # WorkflowDetail, EventFeed, Badges, Bars…
+    styles/global.css
+```
+
+`npm run build` type-checks (`tsc --noEmit`, strict) and emits the bundle to
+`public/dist/`, which `server.mjs` serves as static files. The build output is
+gitignored — clone, `npm run ui:install && npm run build`, and you have it.
+
+The app polls the JSON API every 4s and shows KPIs, the workflow table (with a
+per-workflow step canvas), the instance fleet, event/version breakdowns and a
+live event feed.
