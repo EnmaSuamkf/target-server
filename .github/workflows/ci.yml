@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  server:
+    name: Server tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      # The server itself is dependency-free (node:sqlite, node:http), so this
+      # only materialises the lockfile's dev tooling — but `npm ci` still has to
+      # run for `npm test` to see a consistent tree.
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test
+        run: npm test
+
+  dashboard:
+    name: Dashboard typecheck and build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: ui
+
+      # `npm run build` in ui/ is `tsc --noEmit && vite build`, so this proves
+      # the dashboard both typechecks and actually compiles — the canvas is
+      # React + TS, and a build that only typechecks would miss a broken import.
+      - name: Build
+        run: npm run build
+        working-directory: ui
