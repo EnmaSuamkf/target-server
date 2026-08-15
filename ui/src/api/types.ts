@@ -85,9 +85,23 @@ export interface WorkflowRow {
 	stepsTotal: number;
 	tokens: { input: number; output: number };
 	status: WorkflowStatus;
+	/**
+	 * Whether this row's shape came from a `workflow.plan` snapshot. Without one
+	 * the server is folding lifecycle events, which cannot describe steps that
+	 * never ran — so the canvas would be drawing a guess, and says so instead.
+	 */
+	hasPlan?: boolean;
 }
 
-/** One step, reconstructed from `step.added` + the lifecycle events. */
+/**
+ * One step, from the `workflow.plan` snapshot where there is one, falling back
+ * to a fold of `step.added` + the lifecycle events.
+ *
+ * The fields below `hasAcceptanceCriteria` are what the canvas lays out from —
+ * they are only fully populated from a snapshot. `WorkflowStep` structurally
+ * satisfies `CanvasStep` (see lib/canvasLayout.ts), which is what lets the
+ * server reuse the hub's geometry verbatim instead of approximating it.
+ */
 export interface WorkflowStep {
 	stepId: string;
 	orderIndex: number | null;
@@ -101,6 +115,15 @@ export interface WorkflowStep {
 	judged: "pass" | "fail" | null;
 	manualReview: boolean;
 	hasAcceptanceCriteria: boolean;
+	/** "context" for the hub-owned context step, "task" for everything else. */
+	kind?: "context" | "task";
+	/** Which job a `running` step is on — "judge" is what turns the circle on. */
+	phase?: "exec" | "judge";
+	acceptanceCriteria?: string | null;
+	useSubagent?: boolean;
+	manualRun?: boolean;
+	maxRetries?: number | null;
+	selected?: boolean;
 }
 
 /** `GET /api/workflows/:id`. */

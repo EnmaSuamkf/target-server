@@ -236,8 +236,26 @@ export function stats({ kind = null, instanceId = null, workflowId = null, user 
 	const workflows = d
 		.prepare(`SELECT COUNT(DISTINCT workflow_id) AS n FROM events ${and("workflow_id IS NOT NULL")}`)
 		.get(...ev.params).n;
+	// Steps that are failed NOW, not every failure ever recorded. A step that
+	// failed and was then re-run successfully is not a standing failure, but
+	// counting `step.failed` rows made it one permanently — the dashboard kept
+	// reporting a failure for a workflow whose every step had since passed.
+	// So: per step, keep only its latest lifecycle event, then count the failures.
+	// A lifecycle event with no `step_id` can't be grouped with its siblings, so
+	// it partitions by its own event id — it is its own one-event step, which
+	// keeps the old counting for anything that doesn't identify its step.
 	const failures = d
-		.prepare(`SELECT COUNT(*) AS n FROM events ${and("kind = 'step.failed'")}`)
+		.prepare(
+			`SELECT COUNT(*) AS n FROM (
+			   SELECT kind AS final_kind,
+			          ROW_NUMBER() OVER (
+			            PARTITION BY workflow_id, COALESCE(json_extract(data, '$.step_id'), id)
+			            ORDER BY received_at DESC, rowid DESC
+			          ) AS rn
+			   FROM events
+			   ${and("kind IN ('step.added','step.started','step.waiting','step.done','step.failed')")}
+			 ) WHERE rn = 1 AND final_kind = 'step.failed'`,
+		)
 		.get(...ev.params).n;
 	const byKind = d
 		.prepare(`SELECT kind, COUNT(*) AS n FROM events ${ev.where} GROUP BY kind ORDER BY n DESC`)
@@ -258,14 +276,9 @@ export function stats({ kind = null, instanceId = null, workflowId = null, user 
 		.prepare(`SELECT DISTINCT json_extract(data, '$.sandbox') AS s FROM events WHERE json_extract(data, '$.sandbox') IS NOT NULL ORDER BY s`)
 		.all()
 		.map((r) => r.s);
-	const usage = d
-		.prepare(
-			`SELECT
-			   COALESCE(SUM(json_extract(data,'$.input_tokens')),0)  AS input,
-			   COALESCE(SUM(json_extract(data,'$.output_tokens')),0) AS output
-			 FROM events ${and("kind = 'usage.snapshot'")}`,
-		)
-		.get(...ev.params);
+	// Last snapshot per session, summed — see `latestUsageTotals` for why summing
+	// the snapshots themselves multiplies the real spend.
+	const usage = latestUsageTotals(and("kind = 'usage.snapshot'"), ev.params);
 	return {
 		totalEvents,
 		totalInstances,
@@ -281,10 +294,116 @@ export function stats({ kind = null, instanceId = null, workflowId = null, user 
 
 // --- Workflow aggregation (the workflow-centric dashboard views) ------------
 //
-// The hub reports a workflow as a STREAM of events (§7): workflow.created
-// opens it, step.added records the plan (the step list), step.started/done/
-// failed/judged track execution. The views below fold that stream back into
-// one row per workflow (the list) or one row per step (the detail).
+// The hub reports a workflow two ways, and the difference matters:
+//
+//  - as a STREAM of events (§7): workflow.created opens it, step.added records
+//    the plan, step.started/done/failed/judged track execution. The stream is
+//    the TIMELINE — durations, token attribution, what happened when. It cannot
+//    be trusted to describe the present, because a single dropped event leaves
+//    its last word standing forever (a finished step stuck reading `running`),
+//    and edits/removals/reorders were never in the stream at all.
+//
+//  - as a `workflow.plan` SNAPSHOT: the whole step list, with every field the
+//    operator's canvas lays out from, re-sent whenever the plan changes. This
+//    is the PRESENT, and it self-heals — a lost event is corrected by the next
+//    snapshot rather than living forever.
+//
+// So: the snapshot wins wherever it exists, and the stream fold below stays as
+// the fallback for a hub too old to send one.
+
+/**
+ * The newest `workflow.plan` per workflow id. Rows come oldest-first so the
+ * last write per workflow IS the latest; a snapshot that won't parse is simply
+ * not a snapshot, and that workflow falls back to the event fold.
+ */
+function latestPlans(workflowIds) {
+	if (workflowIds.length === 0) return new Map();
+	const rows = open()
+		.prepare(
+			`SELECT workflow_id AS wf, data, received_at AS at
+			 FROM events
+			 WHERE kind = 'workflow.plan' AND workflow_id IN (${workflowIds.map(() => "?").join(",")})
+			 ORDER BY received_at ASC, rowid ASC`,
+		)
+		.all(...workflowIds);
+	const out = new Map();
+	for (const r of rows) {
+		try {
+			const data = JSON.parse(r.data ?? "{}");
+			if (Array.isArray(data.steps)) out.set(r.wf, { ...data, receivedAt: r.at });
+		} catch {
+			// Unparseable snapshot: leave whatever earlier one we had.
+		}
+	}
+	return out;
+}
+
+/** A plan's task steps — the context step is real, but it is not one of the N. */
+function planTaskSteps(plan) {
+	return plan ? plan.steps.filter((s) => s && s.kind !== "context") : null;
+}
+
+/**
+ * Token totals, counted correctly.
+ *
+ * A `usage.snapshot` carries the RUNNING TOTAL of its Claude session, not that
+ * step's own spend — the hub re-reads the whole transcript each time. Summing
+ * the snapshots therefore counts every earlier turn again on every step: a
+ * three-step workflow reporting 1600 → 1872 → 1932 was displayed as 5404 when
+ * it had actually spent 1932, and the error grows with every step.
+ *
+ * The right total is the LAST snapshot per session, summed across sessions —
+ * sessions are genuinely separate spends, snapshots within one are not.
+ *
+ * `extraWhere`/`params` scope it to whatever the caller is totalling (one
+ * workflow, or a filtered dashboard).
+ */
+function latestUsageTotals(extraWhere, params) {
+	const row = open()
+		.prepare(
+			`SELECT COALESCE(SUM(t.input), 0) AS input, COALESCE(SUM(t.output), 0) AS output
+			 FROM (
+			   SELECT json_extract(data, '$.input_tokens')  AS input,
+			          json_extract(data, '$.output_tokens') AS output,
+			          ROW_NUMBER() OVER (
+			            PARTITION BY workflow_id, COALESCE(session_id, '')
+			            ORDER BY received_at DESC, rowid DESC
+			          ) AS rn
+			   FROM events
+			   ${extraWhere}
+			 ) t
+			 WHERE t.rn = 1`,
+		)
+		.get(...params);
+	return { input: row?.input ?? 0, output: row?.output ?? 0 };
+}
+
+/** Per-workflow token totals, same counting rule as `latestUsageTotals`. */
+function usageByWorkflow(workflowIds) {
+	if (workflowIds.length === 0) return new Map();
+	const rows = open()
+		.prepare(
+			`SELECT t.workflow_id AS wf,
+			        COALESCE(SUM(t.input), 0)  AS input,
+			        COALESCE(SUM(t.output), 0) AS output
+			 FROM (
+			   SELECT workflow_id,
+			          json_extract(data, '$.input_tokens')  AS input,
+			          json_extract(data, '$.output_tokens') AS output,
+			          ROW_NUMBER() OVER (
+			            PARTITION BY workflow_id, COALESCE(session_id, '')
+			            ORDER BY received_at DESC, rowid DESC
+			          ) AS rn
+			   FROM events
+			   WHERE kind = 'usage.snapshot'
+			     AND workflow_id IN (${workflowIds.map(() => "?").join(",")})
+			 ) t
+			 WHERE t.rn = 1
+			 GROUP BY t.workflow_id`,
+		)
+		.all(...workflowIds);
+	return new Map(rows.map((r) => [r.wf, { input: r.input, output: r.output }]));
+}
 
 /**
  * One aggregate row per workflow_id over the events matching the identity/date
@@ -308,8 +427,6 @@ function workflowAggregates({ instanceId = null, user = null, agent = null, sand
 			        SUM(e.kind = 'step.done')    AS stepsDone,
 			        SUM(e.kind = 'step.failed')  AS stepsFailed,
 			        MAX(CASE WHEN e.kind LIKE 'step.%' THEN CAST(json_extract(e.data, '$.order_index') AS INTEGER) END) AS maxOrder,
-			        COALESCE(SUM(CASE WHEN e.kind = 'usage.snapshot' THEN json_extract(e.data, '$.input_tokens') END), 0)  AS tokensIn,
-			        COALESCE(SUM(CASE WHEN e.kind = 'usage.snapshot' THEN json_extract(e.data, '$.output_tokens') END), 0) AS tokensOut,
 			        (SELECT json_extract(c.data, '$.name') FROM events c
 			          WHERE c.workflow_id = e.workflow_id AND c.kind IN ('workflow.created', 'workflow.updated')
 			            AND json_extract(c.data, '$.name') IS NOT NULL
@@ -361,18 +478,17 @@ function workflowAggregates({ instanceId = null, user = null, agent = null, sand
 	const running = new Set();
 	const reopened = new Set(); // terminal status + a newer pending step → draft
 	const TERMINAL = new Set(["completed", "failed", "cancelled"]);
+	const latest = new Map(); // workflowId → Map(stepId → {kind, at})
 	if (rows.length > 0) {
 		const life = d
 			.prepare(
-				`SELECT workflow_id AS wf, json_extract(data, '$.step_id') AS sid, kind, received_at AS at
+				`SELECT workflow_id AS wf, COALESCE(json_extract(data, '$.step_id'), id) AS sid, kind, received_at AS at
 				 FROM events
-				 WHERE kind IN ('step.added', 'step.started', 'step.done', 'step.failed')
+				 WHERE kind IN ('step.added', 'step.started', 'step.waiting', 'step.done', 'step.failed')
 				   AND workflow_id IN (${rows.map(() => "?").join(",")})
-				   AND json_extract(data, '$.step_id') IS NOT NULL
 				 ORDER BY received_at ASC, rowid ASC`,
 			)
 			.all(...rows.map((r) => r.workflowId));
-		const latest = new Map(); // workflowId → Map(stepId → {kind, at})
 		for (const r of life) {
 			let perStep = latest.get(r.wf);
 			if (!perStep) latest.set(r.wf, (perStep = new Map()));
@@ -406,29 +522,61 @@ function workflowAggregates({ instanceId = null, user = null, agent = null, sand
 		}
 	}
 
-	return rows.map((r) => ({
-		workflowId: r.workflowId,
-		name: r.name ?? r.workflowId.slice(0, 8),
-		user: (r.instanceId && displayNames.get(r.instanceId)) || null,
-		instanceId: r.instanceId,
-		agent: r.agent ?? null,
-		sandbox: r.sandbox ?? null,
-		image: r.image ?? null,
-		firstSeenAt: r.firstSeenAt,
-		lastActivityAt: r.lastActivityAt,
-		stepsAdded: r.stepsAdded,
-		stepsStarted: r.stepsStarted,
-		stepsDone: r.stepsDone,
-		stepsFailed: r.stepsFailed,
-		// The plan size the progress bar divides by. step.added only exists for
-		// steps created after the hub reported them, and started/done only cover
-		// steps that already ran — but any step event's order_index pins the list
-		// length from below (order 4 ⇒ at least 5 steps), which also covers a
-		// pending step whose lifecycle events haven't arrived yet.
-		stepsTotal: Math.max(r.stepsAdded, (r.maxOrder ?? -1) + 1, r.stepsStarted, r.stepsDone + r.stepsFailed),
-		tokens: { input: r.tokensIn, output: r.tokensOut },
-		status: running.has(r.workflowId) ? "running" : reopened.has(r.workflowId) ? "draft" : (r.statusTo ?? "draft"),
-	}));
+	const plans = latestPlans(rows.map((r) => r.workflowId));
+	const usage = usageByWorkflow(rows.map((r) => r.workflowId));
+
+	return rows.map((r) => {
+		const plan = plans.get(r.workflowId) ?? null;
+		const planSteps = planTaskSteps(plan);
+		// Counting from the per-step LATEST lifecycle event, not from raw event
+		// totals. A step that failed and was then re-run successfully is one done
+		// step, not one done and one failed — summing `kind = 'step.failed'` rows
+		// made an old, superseded failure permanent on the dashboard. Same reason
+		// the plan length can't be a count of `step.started`: retries re-start the
+		// same step, and that inflated the progress bar's denominator for good.
+		const perStep = latest.get(r.workflowId) ?? new Map();
+		const settled = { done: 0, failed: 0 };
+		for (const { kind } of perStep.values()) {
+			if (kind === "step.done") settled.done++;
+			else if (kind === "step.failed") settled.failed++;
+		}
+		const stepsDone = planSteps ? planSteps.filter((s) => s.status === "done").length : settled.done;
+		const stepsFailed = planSteps ? planSteps.filter((s) => s.status === "failed").length : settled.failed;
+		return {
+			workflowId: r.workflowId,
+			name: plan?.name ?? r.name ?? r.workflowId.slice(0, 8),
+			user: (r.instanceId && displayNames.get(r.instanceId)) || null,
+			instanceId: r.instanceId,
+			agent: r.agent ?? null,
+			sandbox: r.sandbox ?? null,
+			image: r.image ?? null,
+			firstSeenAt: r.firstSeenAt,
+			lastActivityAt: r.lastActivityAt,
+			stepsAdded: r.stepsAdded,
+			stepsStarted: r.stepsStarted,
+			stepsDone,
+			stepsFailed,
+			// The plan size the progress bar divides by. A snapshot answers it
+			// outright. Without one: distinct step ids seen in lifecycle events, and
+			// any step's order_index pins the length from below (order 4 ⇒ at least
+			// 5 steps), which covers a pending step that hasn't run yet.
+			stepsTotal: planSteps
+				? planSteps.length
+				: Math.max(r.stepsAdded, (r.maxOrder ?? -1) + 1, perStep.size, stepsDone + stepsFailed),
+			tokens: usage.get(r.workflowId) ?? { input: 0, output: 0 },
+			// The snapshot is the present tense and wins outright: the hub emits it
+			// after the status transition it reflects, so it is never staler.
+			status: plan
+				? plan.status
+				: running.has(r.workflowId)
+					? "running"
+					: reopened.has(r.workflowId)
+						? "draft"
+						: (r.statusTo ?? "draft"),
+			/** Whether this row's shape came from a snapshot — the canvas needs one. */
+			hasPlan: !!planSteps,
+		};
+	});
 }
 
 /**
@@ -441,15 +589,22 @@ export function listWorkflows({ instanceId = null, user = null, agent = null, sa
 }
 
 /**
- * The workflow-centric detail: the step list folded from the event stream, the
- * workflow's summary row (full history), and its recent events.
+ * The workflow-centric detail: the step list, the workflow's summary row (full
+ * history), and its recent events.
  *
- * Step reconstruction: the latest step.added per step_id carries the plan
- * (description, order_index, review flags); the latest lifecycle event carries
- * the run state — failed if step.failed, done if step.done, running if
- * step.started with no settle after it, pending when only step.added exists.
- * Steps known only from lifecycle events (created before the hub reported
- * step.added) are included with whatever those events say about them.
+ * The step list comes from the newest `workflow.plan` snapshot when there is
+ * one, because that is the only source that describes the workflow as it IS —
+ * including the steps that have never run, the ones that were edited or
+ * reordered after the fact, the hub-owned context step, and the flags the
+ * canvas draws from (subagent, acceptance criteria, retry budget, selection).
+ *
+ * The event fold still runs, and still supplies what a snapshot structurally
+ * cannot: how long each step took, and what its judge said. The two are merged
+ * per step id — plan for shape and state, events for history.
+ *
+ * With no snapshot (a hub too old to send one) the fold is the whole answer,
+ * exactly as before: the latest step.added per step_id carries the plan; the
+ * latest lifecycle event carries the run state.
  */
 export function workflowDetail(workflowId) {
 	const d = open();
@@ -460,7 +615,7 @@ export function workflowDetail(workflowId) {
 			`SELECT kind, data, created_at AS createdAt
 			 FROM events
 			 WHERE workflow_id = ?
-			   AND kind IN ('step.added', 'step.started', 'step.done', 'step.failed', 'step.judged')
+			   AND kind IN ('step.added', 'step.started', 'step.waiting', 'step.done', 'step.failed', 'step.judged')
 			 ORDER BY received_at ASC, rowid ASC`,
 		)
 		.all(workflowId);
@@ -479,22 +634,32 @@ export function workflowDetail(workflowId) {
 		if (!acc) {
 			acc = {
 				stepId,
+				kind: "task",
 				orderIndex: null,
 				description: null,
 				status: "pending",
+				phase: "exec",
 				statusAt: null,
 				durationMs: null,
 				retryCount: null,
+				maxRetries: null,
 				startedAt: null,
 				finishedAt: null,
 				judged: null,
 				manualReview: false,
 				hasAcceptanceCriteria: false,
+				acceptanceCriteria: null,
+				useSubagent: true,
+				selected: true,
 				seq: steps.size,
 			};
 			steps.set(stepId, acc);
 		}
 		if (typeof data.order_index === "number") acc.orderIndex = data.order_index;
+		if (typeof data.max_retries === "number") acc.maxRetries = data.max_retries;
+		// `use_subagent` has always ridden along in step.started and was simply
+		// never read — the canvas needs it to know whether to draw the box.
+		if (typeof data.use_subagent === "boolean") acc.useSubagent = data.use_subagent;
 		// Rows arrive oldest-first, so each kind overwrites what it knows and the
 		// latest event of that kind wins.
 		if (r.kind === "step.added") {
@@ -503,7 +668,19 @@ export function workflowDetail(workflowId) {
 			acc.hasAcceptanceCriteria = data.has_acceptance_criteria === true;
 		} else if (r.kind === "step.started") {
 			acc.status = "running";
+			// Which job is in flight: exec, or the judge evaluating the result. This
+			// is what lights the judge circle instead of the card.
+			acc.phase = data.phase === "judge" ? "judge" : "exec";
 			acc.statusAt = r.createdAt;
+			if (typeof data.acceptance_criteria === "string" && data.acceptance_criteria) {
+				acc.acceptanceCriteria = data.acceptance_criteria;
+				acc.hasAcceptanceCriteria = true;
+			}
+		} else if (r.kind === "step.waiting") {
+			// The manual-review gate: the run finished, a human has to sign it off.
+			acc.status = "waiting";
+			acc.statusAt = r.createdAt;
+			acc.manualReview = true;
 		} else if (r.kind === "step.done" || r.kind === "step.failed") {
 			acc.status = r.kind === "step.done" ? "done" : "failed";
 			acc.statusAt = r.createdAt;
@@ -519,12 +696,50 @@ export function workflowDetail(workflowId) {
 			}
 		} else if (r.kind === "step.judged") {
 			acc.judged = data.ok === true ? "pass" : "fail";
+			if (typeof data.acceptance_criteria === "string" && data.acceptance_criteria) {
+				acc.acceptanceCriteria = data.acceptance_criteria;
+				acc.hasAcceptanceCriteria = true;
+			}
 		}
 	}
 
-	const orderedSteps = [...steps.values()]
+	const folded = [...steps.values()]
 		.sort((a, b) => (a.orderIndex ?? Number.MAX_SAFE_INTEGER) - (b.orderIndex ?? Number.MAX_SAFE_INTEGER) || a.seq - b.seq)
 		.map(({ seq, ...step }) => step);
+
+	const plan = latestPlans([workflowId]).get(workflowId) ?? null;
+	const byId = new Map(folded.map((s) => [s.stepId, s]));
+	// Plan for shape and present state; fold for the history a snapshot can't
+	// carry (durations, the judge's verdict, when the status last moved).
+	const orderedSteps = plan
+		? plan.steps
+				.filter((s) => s && typeof s.step_id === "string")
+				.map((s) => {
+					const past = byId.get(s.step_id) ?? {};
+					return {
+						stepId: s.step_id,
+						kind: s.kind === "context" ? "context" : "task",
+						orderIndex: typeof s.order_index === "number" ? s.order_index : null,
+						description: s.description ?? past.description ?? null,
+						status: s.status ?? "pending",
+						phase: s.phase === "judge" ? "judge" : "exec",
+						statusAt: past.statusAt ?? null,
+						durationMs: past.durationMs ?? null,
+						retryCount: typeof s.retry_count === "number" ? s.retry_count : (past.retryCount ?? null),
+						maxRetries: typeof s.max_retries === "number" ? s.max_retries : (past.maxRetries ?? null),
+						startedAt: s.started_at ?? past.startedAt ?? null,
+						finishedAt: s.finished_at ?? past.finishedAt ?? null,
+						judged: past.judged ?? null,
+						manualReview: s.manual_review === true,
+						hasAcceptanceCriteria: !!s.acceptance_criteria,
+						acceptanceCriteria: s.acceptance_criteria ?? null,
+						useSubagent: s.use_subagent !== false,
+						manualRun: s.manual_run === true,
+						selected: s.selected === true,
+					};
+				})
+				.sort((a, b) => (a.orderIndex ?? Number.MAX_SAFE_INTEGER) - (b.orderIndex ?? Number.MAX_SAFE_INTEGER))
+		: folded;
 
 	return {
 		workflow: summary,
