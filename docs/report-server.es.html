@@ -628,11 +628,38 @@ X-Target-Version: 0.2.0
             <tr><td><code>step.failed</code></td><td><code>step_id</code>, <code>order_index</code>, <code>phase</code>, <code>duration_ms</code>, <code>retry_count</code>, <code>max_retries</code>, <code>error</code> (§7.3)</td></tr>
             <tr><td><code>step.waiting</code></td><td><code>step_id</code>, <code>order_index</code>, <code>reason: "manual_review"</code></td></tr>
             <tr><td><code>step.judged</code></td><td><code>step_id</code>, <code>ok</code> (bool), <code>acceptance_criteria</code>, y si <code>ok=false</code> el <code>error</code> con <code>reason</code> del veredicto</td></tr>
-            <tr><td><code>usage.snapshot</code></td><td><code>input_tokens</code>, <code>output_tokens</code>, <code>cache_read</code>, <code>cache_creation</code>, <code>cost_usd</code>, <code>compacted</code> (bool)</td></tr>
+            <tr><td><code>usage.snapshot</code></td><td><code>input_tokens</code> (<strong>total</strong>: nuevo + cache_creation + cache_read), <code>output_tokens</code>, <code>input_tokens_uncached</code>, <code>cache_creation</code>, <code>cache_read</code>, <code>context_tokens</code>, <code>context_window</code>, <code>context_pct</code>, <code>model</code>, <code>turns</code>, <code>includes_subagents</code> (bool), <code>compacted</code> (bool), <code>cost_usd</code></td></tr>
             <tr><td><code>conversation.snapshot</code></td><td><code>turns</code>, <code>mode</code> (<code>digest|full</code>), <code>digest</code> o <code>messages[]</code> según privacidad</td></tr>
             <tr><td><code>heartbeat</code></td><td><code>version</code>, <code>os</code>, <code>uptime_ms</code>, <code>workflows_total</code>, <code>queue_pending</code></td></tr>
           </tbody>
         </table>
+      </div>
+
+      <div class="callout">
+        <span class="tag">Compatibilidad de <code>usage.snapshot</code></span>
+        <p>
+          Los hubs antiguos enviaban en <code>input_tokens</code> solo el input
+          <em>no cacheado</em>. Con prompt caching activo eso es un error de
+          redondeo: una sesión real reportó <code>416</code> ahí frente a
+          <code>16.015.192</code> tokens realmente enviados, y el tile
+          «INPUT TOKENS» del dashboard mostraba 416 donde el cliente del operador
+          decía «in 16.0M».
+        </p>
+        <p>
+          El servidor lo corrige <strong>en lectura</strong>, sin migrar nada
+          (<code>normalizeUsageSnapshot</code> en <code>db.mjs</code>): si el
+          payload trae <code>input_tokens_uncached</code> o
+          <code>context_window</code> es del formato nuevo y su
+          <code>input_tokens</code> ya es el total, se pasa tal cual; si no,
+          el total es <code>input_tokens + cache_creation + cache_read</code>.
+          Sumar las partes al formato nuevo contaría ~16M dos veces.
+        </p>
+        <p>
+          Los snapshots son <strong>acumulativos</strong> por sesión (el hub
+          relee el transcript entero), así que las sumas del dashboard toman el
+          <strong>último</strong> snapshot de cada sesión y suman entre sesiones,
+          nunca los snapshots entre sí.
+        </p>
       </div>
 
       <h3>7.3 &nbsp;El objeto <code>error</code> (lo que faltaba)</h3>

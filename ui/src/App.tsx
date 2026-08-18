@@ -20,7 +20,7 @@ import { TargetMark } from "./components/TargetMark.tsx";
 import { WorkflowDetail } from "./components/WorkflowDetail.tsx";
 import { WorkflowsTable } from "./components/WorkflowsTable.tsx";
 import { useApi } from "./hooks/useApi.ts";
-import { localToIso } from "./lib/format.ts";
+import { compactNumber, localToIso } from "./lib/format.ts";
 
 const POLL_MS = 4000;
 
@@ -131,8 +131,20 @@ export function App() {
 					<Kpi label="Instances" value={stats ? stats.totalInstances : "..."} />
 					<Kpi label="Workflows" value={stats ? stats.workflows : "..."} />
 					<Kpi label="Step failures" value={stats ? stats.failures : "..."} tone={stats && stats.failures ? "danger" : ""} />
-					<Kpi label="Input tokens" value={stats ? stats.usage.inputTokens.toLocaleString() : "..."} />
-					<Kpi label="Output tokens" value={stats ? stats.usage.outputTokens.toLocaleString() : "..."} />
+					{/* Input is the FULL input — new + cache creation + cache read — which
+					    is what the operator's client reports as "in". The compact hint
+					    below each is the client's own abbreviation, so the two can be
+					    read against each other without arithmetic. */}
+					<Kpi
+						label="Input tokens"
+						value={stats ? stats.usage.inputTokens.toLocaleString() : "..."}
+						hint={stats ? compactNumber(stats.usage.inputTokens) : null}
+					/>
+					<Kpi
+						label="Output tokens"
+						value={stats ? stats.usage.outputTokens.toLocaleString() : "..."}
+						hint={stats ? compactNumber(stats.usage.outputTokens) : null}
+					/>
 				</div>
 
 				<div className="panel">

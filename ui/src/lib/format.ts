@@ -17,6 +17,20 @@ export function compactTokens(n: number | null | undefined): string {
 	return String(n);
 }
 
+/**
+ * The operator's client's own abbreviation: `202014` → `202.0k`, `16015192` →
+ * `16.0M`. Deliberately NOT `compactTokens` above, which drops a trailing `.0`
+ * ("16M"): the usage readout exists to be compared with what the client prints,
+ * so it has to agree character for character, one decimal and all. Same rule as
+ * the hub's `compactNumber` (hub/ui/src/lib/format.ts).
+ */
+export function compactNumber(n: number | null | undefined): string {
+	if (n == null || !Number.isFinite(n)) return "0";
+	if (Math.abs(n) >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+	if (Math.abs(n) >= 1000) return `${(n / 1000).toFixed(1)}k`;
+	return String(Math.round(n));
+}
+
 /** Step durations: under a minute in seconds, over it as "2m 5s". */
 export function formatDuration(ms: number): string {
 	const s = Math.round(ms / 1000);

@@ -1,9 +1,10 @@
 import { useState } from "react";
 import type { WorkflowDetailResponse } from "../api/types.ts";
-import { shortId } from "../lib/format.ts";
+import { compactNumber, shortId } from "../lib/format.ts";
 import { AgentBadge, SandboxBadge, StatusBadge } from "./Badges.tsx";
 import { EventFeed } from "./EventFeed.tsx";
 import { StepCanvas } from "./StepCanvas.tsx";
+import { UsageMeter } from "./UsageMeter.tsx";
 import { WorkflowCanvas } from "./WorkflowCanvas.tsx";
 
 interface WorkflowDetailProps {
@@ -21,6 +22,10 @@ interface WorkflowDetailProps {
  * whole point of reporting the plan. The list is the same steps read as a
  * record: numbers, durations, one row at a time, which is what you want when
  * you are reading a finished run rather than watching a live one.
+ *
+ * Under them comes the token usage, one meter per Claude session, printed the
+ * way the operator's own client prints it — the point of reporting usage at all
+ * is that the two agree.
  */
 export function WorkflowDetail({ detail, error, onClose }: WorkflowDetailProps) {
 	const [view, setView] = useState<"canvas" | "list">("canvas");
@@ -31,6 +36,10 @@ export function WorkflowDetail({ detail, error, onClose }: WorkflowDetailProps) 
 	// a snapshot the canvas would quietly omit everything still ahead of the
 	// cursor. Better to say the hub is too old than to draw half a workflow.
 	const canDrawCanvas = w.hasPlan !== false;
+	// A server older than the usage readout sends no `usage` at all; treat that
+	// the same as a workflow that never reported a snapshot.
+	const usage = detail.usage;
+	const sessions = usage?.sessions ?? [];
 	return (
 		<>
 			<div className="wf-detail-head">
@@ -74,6 +83,24 @@ export function WorkflowDetail({ detail, error, onClose }: WorkflowDetailProps) 
 					steps that never ran are not in the event stream. Update the reporting Target instance, or use the
 					list view.
 				</div>
+			)}
+
+			<h3>Token usage</h3>
+			{sessions.length === 0 ? (
+				<div className="empty">No usage snapshots reported for this workflow.</div>
+			) : (
+				<>
+					{sessions.length > 1 ? (
+						<div className="panel-note">
+							{`${sessions.length} sessions · in ${compactNumber(usage?.inputTokens ?? 0)} · out ${compactNumber(usage?.outputTokens ?? 0)} in total`}
+						</div>
+					) : null}
+					<div className="usage-list">
+						{sessions.map((u) => (
+							<UsageMeter key={u.sessionId ?? u.receivedAt} usage={u} />
+						))}
+					</div>
+				</>
 			)}
 
 			<h3>Recent events</h3>
