@@ -344,6 +344,76 @@ function planTaskSteps(plan) {
 }
 
 /**
+ * A `usage.snapshot` payload, read the way the operator's own client reads it.
+ *
+ * The hub used to report only the bare `input_tokens` field, which counts the
+ * UNCACHED input alone. With prompt caching on that is a rounding error: one
+ * real session reported 416 there against 16,015,192 tokens actually sent, and
+ * this dashboard's INPUT TOKENS tile duly said 416 where the client said
+ * "in 16.0M". Newer hubs send the full total under `input_tokens` and keep the
+ * parts beside it (`input_tokens_uncached` / `cache_creation` / `cache_read`),
+ * plus the context window, the model and the turn count the client prints.
+ *
+ * The old rows already carry `cache_read` and `cache_creation`, so history is
+ * correctable on READ — no migration, and nothing a client once sent is
+ * rewritten:
+ *
+ *   old shape → input_tokens + cache_creation + cache_read
+ *   new shape → input_tokens, untouched (re-adding the parts would count
+ *               ~16M of it twice)
+ *
+ * A payload is new-shape when it carries a field only the new hub sends:
+ * `input_tokens_uncached` or `context_window`.
+ */
+export function isNewUsageShape(data) {
+	return !!data && (data.input_tokens_uncached != null || data.context_window != null);
+}
+
+/** One `usage.snapshot` payload → the camelCase shape the dashboard reads. */
+export function normalizeUsageSnapshot(data) {
+	const d = data ?? {};
+	const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+	const isNew = isNewUsageShape(d);
+	const cacheCreation = num(d.cache_creation);
+	const cacheRead = num(d.cache_read);
+	const uncached = isNew ? num(d.input_tokens_uncached) : num(d.input_tokens);
+	const inputTokens = isNew ? num(d.input_tokens) : uncached + cacheCreation + cacheRead;
+	const contextTokens = num(d.context_tokens);
+	const contextWindow = num(d.context_window);
+	return {
+		inputTokens,
+		outputTokens: num(d.output_tokens),
+		inputTokensUncached: uncached,
+		cacheCreation,
+		cacheRead,
+		contextTokens,
+		contextWindow,
+		contextPct:
+			typeof d.context_pct === "number" ? d.context_pct : contextWindow > 0 ? (100 * contextTokens) / contextWindow : 0,
+		model: typeof d.model === "string" ? d.model : null,
+		turns: num(d.turns),
+		includesSubagents: d.includes_subagents === true,
+		compacted: d.compacted === true,
+		costUsd: typeof d.cost_usd === "number" ? d.cost_usd : null,
+	};
+}
+
+/**
+ * `normalizeUsageSnapshot`'s input rule as a SQL expression, so the aggregate
+ * sums below correct history in the same place SQLite is already summing it.
+ * Kept beside the JS version on purpose — `test/usage.test.mjs` asserts the two
+ * agree on the same fixtures, which is what stops them drifting apart.
+ */
+const INPUT_TOKENS_SQL = `CASE
+			            WHEN json_extract(data, '$.input_tokens_uncached') IS NOT NULL
+			              OR json_extract(data, '$.context_window') IS NOT NULL
+			            THEN COALESCE(json_extract(data, '$.input_tokens'), 0)
+			            ELSE COALESCE(json_extract(data, '$.input_tokens'), 0)
+			               + COALESCE(json_extract(data, '$.cache_creation'), 0)
+			               + COALESCE(json_extract(data, '$.cache_read'), 0)
+			          END`;
+
+/**
  * Token totals, counted correctly.
  *
  * A `usage.snapshot` carries the RUNNING TOTAL of its Claude session, not that
@@ -363,8 +433,8 @@ function latestUsageTotals(extraWhere, params) {
 		.prepare(
 			`SELECT COALESCE(SUM(t.input), 0) AS input, COALESCE(SUM(t.output), 0) AS output
 			 FROM (
-			   SELECT json_extract(data, '$.input_tokens')  AS input,
-			          json_extract(data, '$.output_tokens') AS output,
+			   SELECT ${INPUT_TOKENS_SQL} AS input,
+			          COALESCE(json_extract(data, '$.output_tokens'), 0) AS output,
 			          ROW_NUMBER() OVER (
 			            PARTITION BY workflow_id, COALESCE(session_id, '')
 			            ORDER BY received_at DESC, rowid DESC
@@ -378,6 +448,47 @@ function latestUsageTotals(extraWhere, params) {
 	return { input: row?.input ?? 0, output: row?.output ?? 0 };
 }
 
+/**
+ * One workflow's usage, per session, the way the client states it.
+ *
+ * Same counting rule as `latestUsageTotals` — the LAST snapshot of each session
+ * — but it keeps the snapshots whole instead of summing them down to two
+ * numbers, because the context meter, the turn count and the model belong to a
+ * session and cannot be added up across several. Newest session first.
+ */
+export function workflowUsage(workflowId) {
+	const rows = open()
+		.prepare(
+			`SELECT t.session_id AS sessionId, t.data AS data, t.received_at AS receivedAt
+			 FROM (
+			   SELECT session_id, data, received_at,
+			          ROW_NUMBER() OVER (
+			            PARTITION BY COALESCE(session_id, '')
+			            ORDER BY received_at DESC, rowid DESC
+			          ) AS rn
+			   FROM events
+			   WHERE kind = 'usage.snapshot' AND workflow_id = ?
+			 ) t
+			 WHERE t.rn = 1
+			 ORDER BY t.received_at DESC`,
+		)
+		.all(workflowId);
+	const sessions = rows.map((r) => {
+		let data = {};
+		try {
+			data = JSON.parse(r.data ?? "{}");
+		} catch {
+			data = {};
+		}
+		return { sessionId: r.sessionId ?? null, receivedAt: r.receivedAt, ...normalizeUsageSnapshot(data) };
+	});
+	return {
+		inputTokens: sessions.reduce((n, s) => n + s.inputTokens, 0),
+		outputTokens: sessions.reduce((n, s) => n + s.outputTokens, 0),
+		sessions,
+	};
+}
+
 /** Per-workflow token totals, same counting rule as `latestUsageTotals`. */
 function usageByWorkflow(workflowIds) {
 	if (workflowIds.length === 0) return new Map();
@@ -388,8 +499,8 @@ function usageByWorkflow(workflowIds) {
 			        COALESCE(SUM(t.output), 0) AS output
 			 FROM (
 			   SELECT workflow_id,
-			          json_extract(data, '$.input_tokens')  AS input,
-			          json_extract(data, '$.output_tokens') AS output,
+			          ${INPUT_TOKENS_SQL} AS input,
+			          COALESCE(json_extract(data, '$.output_tokens'), 0) AS output,
 			          ROW_NUMBER() OVER (
 			            PARTITION BY workflow_id, COALESCE(session_id, '')
 			            ORDER BY received_at DESC, rowid DESC
@@ -744,6 +855,10 @@ export function workflowDetail(workflowId) {
 	return {
 		workflow: summary,
 		steps: orderedSteps,
+		// The per-session readout the operator's own client prints. The tokens on
+		// `summary` are the same spend rolled into two numbers; this is what lets
+		// the two be compared line for line.
+		usage: workflowUsage(workflowId),
 		events: recentEvents({ workflowId, limit: 50 }),
 	};
 }

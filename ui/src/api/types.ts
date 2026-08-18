@@ -126,10 +126,47 @@ export interface WorkflowStep {
 	selected?: boolean;
 }
 
+/**
+ * One session's `usage.snapshot`, normalised by the server
+ * (`normalizeUsageSnapshot` in db.mjs). `inputTokens` is the FULL input —
+ * uncached + cache creation + cache read — which is the number the operator's
+ * client prints as "in"; the bare uncached field is kept as
+ * `inputTokensUncached` for anyone who wants the breakdown.
+ *
+ * The context/model fields are only populated by hubs new enough to send them;
+ * older snapshots report zeros there and the meter says so.
+ */
+export interface UsageSession {
+	sessionId: string | null;
+	receivedAt: string;
+	inputTokens: number;
+	outputTokens: number;
+	inputTokensUncached: number;
+	cacheCreation: number;
+	cacheRead: number;
+	contextTokens: number;
+	contextWindow: number;
+	contextPct: number;
+	model: string | null;
+	turns: number;
+	includesSubagents: boolean;
+	compacted: boolean;
+	costUsd: number | null;
+}
+
+/** A workflow's spend: the latest snapshot per session, plus their totals. */
+export interface WorkflowUsage {
+	inputTokens: number;
+	outputTokens: number;
+	sessions: UsageSession[];
+}
+
 /** `GET /api/workflows/:id`. */
 export interface WorkflowDetailResponse {
 	workflow: WorkflowRow;
 	steps: WorkflowStep[];
+	/** Optional only for servers older than the usage readout. */
+	usage?: WorkflowUsage;
 	events: EventRow[];
 }
 
