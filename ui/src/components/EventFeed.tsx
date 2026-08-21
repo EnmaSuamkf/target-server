@@ -1,6 +1,7 @@
 import type { EventRow } from "../api/types.ts";
 import { shortId, timeAgo } from "../lib/format.ts";
 import { KindBadge } from "./Badges.tsx";
+import { EventPayload } from "./EventPayload.tsx";
 
 /** The live event stream, newest first. */
 export function EventFeed({ events }: { events: EventRow[] | null }) {
@@ -19,7 +20,7 @@ export function EventFeed({ events }: { events: EventRow[] | null }) {
 							{shortId(e.instanceId)}
 							{e.workflowId ? ` · wf ${shortId(e.workflowId)}` : ""}
 						</div>
-						{e.data && Object.keys(e.data).length > 0 ? <div className="data">{JSON.stringify(e.data)}</div> : null}
+						<EventPayload kind={e.kind} data={e.data} />
 					</div>
 				</div>
 			))}

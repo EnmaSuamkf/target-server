@@ -114,8 +114,10 @@ ui/
     api/kinds.ts                   # event kind → label + tooltip + badge tone
     hooks/useApi.ts                # GET + poll, keeps data across refreshes
     lib/format.ts                  # timeAgo / compactTokens / durations
+    lib/eventSummary.ts            # event payload → headline + facts (prose, not JSON)
     components/                    # FilterBar, WorkflowsTable, StepCanvas,
-                                   # WorkflowDetail, EventFeed, Badges, Bars…
+                                   # WorkflowDetail, EventFeed, EventPayload,
+                                   # Badges, Bars…
     styles/global.css
 ```
 
@@ -126,3 +128,11 @@ gitignored — clone, `npm run ui:install && npm run build`, and you have it.
 The app polls the JSON API every 4s and shows KPIs, the workflow table (with a
 per-workflow step canvas), the instance fleet, event/version breakdowns and a
 live event feed.
+
+Event payloads are rendered as prose, not JSON: each event gets a headline
+sentence ("Step 2 finished in 17s", "in 18.6k · out 83 · 1.9% of 1.0M context"),
+the free text it carries (a step description, an acceptance criterion, an error
+message), its remaining fields as labelled facts, and — for `workflow.plan` —
+its steps as a list you can open. The raw JSON stays one click away under "Raw
+payload", so nothing the summary leaves out is lost. `lib/eventSummary.ts` owns
+that mapping; kinds it has never seen still get every scalar labelled.

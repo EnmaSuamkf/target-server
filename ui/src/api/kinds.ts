@@ -23,6 +23,14 @@ export const KIND_INFO: Record<string, KindInfo> = {
 		label: "Workflow status changed",
 		tip: "The workflow moved to a new state (running, completed, failed, cancelled...).",
 	},
+	"workflow.plan": {
+		label: "Plan snapshot",
+		tip: "The workflow's whole plan as it stands right now: name, status and every step with its state. This is what lets the dashboard draw the canvas faithfully.",
+	},
+	"workflow.removed": {
+		label: "Workflow removed",
+		tip: "The user deleted the workflow from their hub.",
+	},
 	"workflow.failed": {
 		label: "Workflow failed",
 		tip: "The workflow run aborted with an error.",
@@ -42,6 +50,10 @@ export const KIND_INFO: Record<string, KindInfo> = {
 	"step.failed": {
 		label: "Step failed",
 		tip: "A step ended with an error (the message travels in the event payload).",
+	},
+	"step.waiting": {
+		label: "Step waiting",
+		tip: "A step is queued and waiting - either for its turn, or for the user to run it by hand.",
 	},
 	"step.judged": {
 		label: "Step reviewed",
