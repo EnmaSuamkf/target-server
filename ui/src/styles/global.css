@@ -402,7 +402,65 @@ tbody tr.wf-row--selected, tbody tr.wf-row--selected:hover { background: var(--a
 .event:last-child { border-bottom: none; }
 .event .when { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--text-subtle); padding-top: 2px; }
 .event .meta { color: var(--text-muted); font-size: var(--text-xs); margin-top: var(--space-1); }
-.event .data {
+
+/* --- event payload, read as prose ---
+ *
+ * The payload used to be one JSON line. It is now a headline sentence, the
+ * event's own words, its scalars as labelled facts, and (for plan snapshots)
+ * the steps — with the raw JSON kept behind a disclosure so nothing is lost. */
+
+.ev-payload { margin-top: var(--space-2); display: grid; gap: var(--space-2); justify-items: start; }
+.ev-headline { font-size: var(--text-sm); color: var(--gray-800); font-weight: 500; }
+.ev-headline--info { color: var(--info-700); }
+.ev-headline--success { color: var(--success-700); }
+.ev-headline--warn { color: var(--warn-700); }
+.ev-headline--danger { color: var(--danger-700); }
+.ev-text {
+	margin: 0;
+	font-size: var(--text-sm);
+	color: var(--gray-700);
+	border-left: 2px solid var(--border-strong);
+	padding-left: var(--space-3);
+	word-break: break-word;
+}
+
+/* Facts: label over value, wrapping into as many columns as fit. */
+.ev-facts { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-4); margin: 0; }
+.ev-fact { display: grid; gap: 1px; min-width: 0; }
+.ev-fact dt { font-size: 0.6875rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-subtle); }
+.ev-fact dd { margin: 0; font-size: var(--text-xs); color: var(--gray-700); word-break: break-word; }
+.ev-fact dd.mono { font-family: var(--font-mono); }
+
+/* Plan snapshot: collapsed to its counts, open to its steps. */
+.ev-plan, .ev-raw { width: 100%; }
+.ev-plan > summary, .ev-raw > summary {
+	cursor: pointer;
+	font-size: var(--text-xs);
+	color: var(--text-muted);
+	list-style-position: outside;
+}
+.ev-plan > summary:hover, .ev-raw > summary:hover { color: var(--accent-700); }
+.ev-plan-list { list-style: none; margin: var(--space-2) 0 0; padding: 0; display: grid; gap: var(--space-1); }
+.ev-plan-step {
+	display: grid;
+	grid-template-columns: 8px 3.5rem minmax(0, 1fr);
+	align-items: baseline;
+	gap: var(--space-2);
+	font-size: var(--text-xs);
+}
+.ev-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--gray-300); align-self: center; }
+.ev-dot--running { background: var(--info-500); animation: pulse 1.6s ease-in-out infinite; }
+.ev-dot--done { background: var(--success-500); }
+.ev-dot--failed { background: var(--danger-500); }
+.ev-plan-num { color: var(--text-subtle); font-weight: 600; }
+.ev-plan-desc { color: var(--gray-700); word-break: break-word; }
+/* Trails the description instead of floating off at the right margin, so it
+ * reads as part of the same sentence. */
+.ev-plan-note { color: var(--text-subtle); white-space: nowrap; margin-left: var(--space-2); }
+.ev-plan-note::before { content: "· "; }
+
+/* Raw JSON: the old view, kept one click away. */
+.ev-raw .data {
 	font-family: var(--font-mono);
 	font-size: var(--text-xs);
 	color: var(--gray-600);
@@ -412,7 +470,9 @@ tbody tr.wf-row--selected, tbody tr.wf-row--selected:hover { background: var(--a
 	padding: var(--space-2) var(--space-3);
 	white-space: pre-wrap;
 	word-break: break-word;
-	margin-top: var(--space-2);
+	margin: var(--space-2) 0 0;
+	max-height: 260px;
+	overflow: auto;
 }
 
 .empty { color: var(--text-subtle); font-size: var(--text-sm); padding: var(--space-4) 0; }

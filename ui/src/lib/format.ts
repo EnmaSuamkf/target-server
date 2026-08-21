@@ -31,11 +31,19 @@ export function compactNumber(n: number | null | undefined): string {
 	return String(Math.round(n));
 }
 
-/** Step durations: under a minute in seconds, over it as "2m 5s". */
+/**
+ * Durations: under a minute in seconds, then "2m 5s", then "3h 49m" — an
+ * instance's uptime is hours long, and "229m 20s" is a number you have to do
+ * arithmetic on before it means anything.
+ */
 export function formatDuration(ms: number): string {
 	const s = Math.round(ms / 1000);
 	if (s < 60) return `${s}s`;
-	return `${Math.floor(s / 60)}m ${s % 60}s`;
+	if (s < 3600) return `${Math.floor(s / 60)}m ${s % 60}s`;
+	const h = Math.floor(s / 3600);
+	const m = Math.floor((s % 3600) / 60);
+	if (h < 24) return `${h}h ${m}m`;
+	return `${Math.floor(h / 24)}d ${h % 24}h`;
 }
 
 /** `datetime-local` values are local; the API compares ISO (UTC) strings. */
