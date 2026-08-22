@@ -124,6 +124,17 @@ export interface WorkflowStep {
 	manualRun?: boolean;
 	maxRetries?: number | null;
 	selected?: boolean;
+	/** Sticky notes reconstructed from step.note.* events. */
+	notes?: StepNote[];
+}
+
+export type StepNoteTheme = "warning" | "success" | "neutral";
+
+export interface StepNote {
+	id: string;
+	theme: StepNoteTheme;
+	content: string;
+	updatedAt?: string | null;
 }
 
 /**
