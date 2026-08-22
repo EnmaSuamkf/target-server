@@ -52,6 +52,7 @@ export function SandboxBadge({ sandbox, image }: { sandbox: string | null; image
 const STATUS_TONES: Record<string, string> = {
 	running: "badge badge--info",
 	completed: "badge badge--success",
+	waiting: "badge badge--attention",
 	done: "badge badge--success",
 	failed: "badge badge--danger",
 	draft: "badge badge--neutral",

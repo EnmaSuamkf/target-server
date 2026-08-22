@@ -717,6 +717,55 @@ export function listWorkflows({ instanceId = null, user = null, agent = null, sa
  * exactly as before: the latest step.added per step_id carries the plan; the
  * latest lifecycle event carries the run state.
  */
+/** Fold sticky-note events into per-step note lists (latest state wins). */
+function foldStepNotes(workflowId) {
+	const rows = open()
+		.prepare(
+			`SELECT kind, data, created_at AS createdAt
+			 FROM events
+			 WHERE workflow_id = ?
+			   AND kind IN ('step.note.added', 'step.note.modified', 'step.note.deleted')
+			 ORDER BY received_at ASC, rowid ASC`,
+		)
+		.all(workflowId);
+	/** stepId → noteId → note */
+	const byStep = new Map();
+	for (const r of rows) {
+		let data;
+		try {
+			data = JSON.parse(r.data ?? "{}");
+		} catch {
+			continue;
+		}
+		const stepId = typeof data.step_id === "string" ? data.step_id : null;
+		const noteId = typeof data.note_id === "string" ? data.note_id : null;
+		if (!stepId || !noteId) continue;
+		let notes = byStep.get(stepId);
+		if (!notes) {
+			notes = new Map();
+			byStep.set(stepId, notes);
+		}
+		if (r.kind === "step.note.deleted") {
+			notes.delete(noteId);
+			continue;
+		}
+		const theme = data.theme === "warning" || data.theme === "success" ? data.theme : "neutral";
+		let content = typeof data.content === "string" ? data.content : null;
+		if (!content && typeof data.content_len === "number") {
+			content = `(${data.content_len} characters — reported before note text was included)`;
+		}
+		notes.set(noteId, { id: noteId, theme, content: content ?? "", updatedAt: r.createdAt });
+	}
+	const out = new Map();
+	for (const [stepId, notes] of byStep) {
+		out.set(
+			stepId,
+			[...notes.values()].filter((n) => n.content !== ""),
+		);
+	}
+	return out;
+}
+
 export function workflowDetail(workflowId) {
 	const d = open();
 	const summary = workflowAggregates({ workflowId })[0];
@@ -852,9 +901,15 @@ export function workflowDetail(workflowId) {
 				.sort((a, b) => (a.orderIndex ?? Number.MAX_SAFE_INTEGER) - (b.orderIndex ?? Number.MAX_SAFE_INTEGER))
 		: folded;
 
+	const notesByStep = foldStepNotes(workflowId);
+	const stepsWithNotes = orderedSteps.map((s) => ({
+		...s,
+		notes: notesByStep.get(s.stepId) ?? [],
+	}));
+
 	return {
 		workflow: summary,
-		steps: orderedSteps,
+		steps: stepsWithNotes,
 		// The per-session readout the operator's own client prints. The tokens on
 		// `summary` are the same spend rolled into two numbers; this is what lets
 		// the two be compared line for line.

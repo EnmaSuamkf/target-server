@@ -59,6 +59,18 @@ export const KIND_INFO: Record<string, KindInfo> = {
 		label: "Step reviewed",
 		tip: "An automated review checked the step's result against its acceptance criteria and passed or failed it.",
 	},
+	"step.note.added": {
+		label: "Note added",
+		tip: "A sticky note was attached to a workflow step.",
+	},
+	"step.note.modified": {
+		label: "Note edited",
+		tip: "A sticky note on a workflow step was changed.",
+	},
+	"step.note.deleted": {
+		label: "Note removed",
+		tip: "A sticky note was removed from a workflow step.",
+	},
 	"usage.snapshot": {
 		label: "Token usage",
 		tip: "Periodic counters of the tokens the model consumed in the current step (input, output, cache).",
