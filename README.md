@@ -64,7 +64,7 @@ Start the hub and use it — batches appear on the dashboard within a few second
   `agent` (runner: `claude`, `free-code`, …) and `sandbox` (`host`|`docker`) match the workflows
   that reported those values in `workflow.created`/`workflow.updated`; instance-level events
   (heartbeats) belong to no workflow and drop out while either filter is on.
-- `GET /api/workflows?user=&instance=&agent=&sandbox=&from=&to=` — one aggregate row per workflow: name
+- `GET /api/workflows?limit=&offset=&user=&instance=&agent=&sandbox=&from=&to=` — one aggregate row per workflow: name
   (latest `workflow.created`/`workflow.updated`, falling back to the 8-char id prefix), `agent`,
   `sandbox` and `image` (latest event carrying each), user, derived `status`
   (newest signal wins: an unsettled `step.started` newer than the last `workflow.status_changed`
@@ -75,6 +75,17 @@ Start the hub and use it — batches appear on the dashboard within a few second
   count), token sums and first/last activity. The step list itself is reconstructed from
   `step.added` events (the plan) plus the `step.started`/`step.done`/`step.failed`/`step.judged`
   lifecycle events.
+
+  **The list is always paged** — a fleet reporting thousands of workflows must not be able to
+  render as one endless page. The response is `{ workflows, total, limit, offset }`, where `total`
+  is the unpaged match count the pager reads its "of N" from. `limit` defaults to 25 and is
+  clamped to 1–200, so omitting it (or asking for 10000) still returns one page. Rows are ordered
+  newest activity first, tie-broken by `workflowId`, which makes the order total: paging straight
+  through visits every workflow exactly once even when a whole ingest flush shares a timestamp.
+- `GET /api/workflows/names?user=&instance=&agent=&sandbox=&from=&to=` — every matching workflow as
+  `{ workflowId, name }` only (capped at 1000). This is what the filter bar's workflow dropdown
+  reads, so paging the list above can never hide a workflow from it; it skips the per-row fold and
+  stays cheap.
 - `GET /api/workflows/:id` — the workflow summary above plus `steps[]` (per-step status,
   duration, retries, sorted by `orderIndex`) and its 50 most recent events.
   404 when the id never reported.

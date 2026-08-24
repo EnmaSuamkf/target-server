@@ -523,11 +523,33 @@ function usageByWorkflow(workflowIds) {
  * and the derived status resolve from the workflow's FULL history instead, so
  * narrowing the range can never blank a workflow's identity or misread a run
  * that started before it.
+ *
+ * Rows are ordered newest activity first, with workflow_id as a tiebreaker.
+ * That second key is not cosmetic: workflows ingested in the same flush share a
+ * received_at, and `ORDER BY lastActivityAt DESC` alone leaves their relative
+ * order undefined — which under LIMIT/OFFSET means a row could be repeated on
+ * one page and skipped on the next. The tiebreaker makes the order total, so
+ * paging through the list is guaranteed to visit every workflow exactly once.
  */
-function workflowAggregates({ instanceId = null, user = null, agent = null, sandbox = null, from = null, to = null, workflowId = null } = {}) {
+function workflowAggregates({
+	instanceId = null,
+	user = null,
+	agent = null,
+	sandbox = null,
+	from = null,
+	to = null,
+	workflowId = null,
+	limit = null,
+	offset = 0,
+} = {}) {
 	const d = open();
 	const ev = eventFilterWhere({ instanceId, user, agent, sandbox, from, to, workflowId });
 	const and = (extra) => (ev.where ? `${ev.where} AND ${extra}` : `WHERE ${extra}`);
+	// Paging is applied to the GROUP BY above, not to the result — everything
+	// below this query (the plan snapshots, the usage totals, the lifecycle fold)
+	// runs per row, so a page of 25 costs a page of 25 regardless of how many
+	// workflows the filters match.
+	const page = limit == null ? "" : `LIMIT ${Number(limit)} OFFSET ${Number(offset) || 0}`;
 	const rows = d
 		.prepare(
 			`SELECT e.workflow_id AS workflowId,
@@ -561,7 +583,8 @@ function workflowAggregates({ instanceId = null, user = null, agent = null, sand
 			 FROM events e
 			 ${and("e.workflow_id IS NOT NULL")}
 			 GROUP BY e.workflow_id
-			 ORDER BY lastActivityAt DESC`,
+			 ORDER BY lastActivityAt DESC, e.workflow_id DESC
+			 ${page}`,
 		)
 		.all(...ev.params);
 
@@ -690,13 +713,69 @@ function workflowAggregates({ instanceId = null, user = null, agent = null, sand
 	});
 }
 
+/** How many workflows the identity/date filters match, for the pager's "of N". */
+export function countWorkflows({ instanceId = null, user = null, agent = null, sandbox = null, from = null, to = null } = {}) {
+	const ev = eventFilterWhere({ instanceId, user, agent, sandbox, from, to });
+	const where = ev.where ? `${ev.where} AND workflow_id IS NOT NULL` : "WHERE workflow_id IS NOT NULL";
+	return open()
+		.prepare(`SELECT COUNT(DISTINCT workflow_id) AS total FROM events ${where}`)
+		.get(...ev.params).total;
+}
+
 /**
- * The workflow list for the dashboard, newest activity first. Honours the
- * identity/date filters only — narrowing by event kind or by workflow would
- * filter the list itself away, so those two are deliberately ignored here.
+ * One page of the workflow list for the dashboard, newest activity first.
+ * Honours the identity/date filters only — narrowing by event kind or by
+ * workflow would filter the list itself away, so those two are deliberately
+ * ignored here.
+ *
+ * `total` is the unpaged match count: the pager needs to say "of 1,347" without
+ * fetching 1,347 rows, which is the whole point of paging this list.
  */
-export function listWorkflows({ instanceId = null, user = null, agent = null, sandbox = null, from = null, to = null } = {}) {
-	return workflowAggregates({ instanceId, user, agent, sandbox, from, to });
+export function listWorkflows({
+	instanceId = null,
+	user = null,
+	agent = null,
+	sandbox = null,
+	from = null,
+	to = null,
+	limit = null,
+	offset = 0,
+} = {}) {
+	const filters = { instanceId, user, agent, sandbox, from, to };
+	return {
+		workflows: workflowAggregates({ ...filters, limit, offset }),
+		total: countWorkflows(filters),
+		limit,
+		offset,
+	};
+}
+
+/**
+ * Just the id+name of every matching workflow, for the filter bar's dropdown.
+ *
+ * The dropdown has to keep offering workflows that are not on the current page,
+ * so it cannot read from the paged list. This query skips the whole per-row fold
+ * (plans, usage, lifecycle) and stays cheap even with thousands of rows.
+ */
+export function listWorkflowNames({ instanceId = null, user = null, agent = null, sandbox = null, from = null, to = null, limit = 1000 } = {}) {
+	const ev = eventFilterWhere({ instanceId, user, agent, sandbox, from, to });
+	const where = ev.where ? `${ev.where} AND e.workflow_id IS NOT NULL` : "WHERE e.workflow_id IS NOT NULL";
+	return open()
+		.prepare(
+			`SELECT e.workflow_id AS workflowId,
+			        MAX(e.received_at) AS lastActivityAt,
+			        (SELECT json_extract(c.data, '$.name') FROM events c
+			          WHERE c.workflow_id = e.workflow_id AND c.kind IN ('workflow.created', 'workflow.updated')
+			            AND json_extract(c.data, '$.name') IS NOT NULL
+			          ORDER BY c.received_at DESC, c.rowid DESC LIMIT 1) AS name
+			 FROM events e
+			 ${where}
+			 GROUP BY e.workflow_id
+			 ORDER BY lastActivityAt DESC, e.workflow_id DESC
+			 LIMIT ${Number(limit)}`,
+		)
+		.all(...ev.params)
+		.map((r) => ({ workflowId: r.workflowId, name: r.name ?? r.workflowId.slice(0, 8) }));
 }
 
 /**

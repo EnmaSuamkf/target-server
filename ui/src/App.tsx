@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { kindLabel, kindTip } from "./api/kinds.ts";
 import type {
 	EventsResponse,
@@ -7,6 +7,7 @@ import type {
 	Stats,
 	UsersResponse,
 	WorkflowDetailResponse,
+	WorkflowNamesResponse,
 	WorkflowRow,
 	WorkflowsResponse,
 } from "./api/types.ts";
@@ -16,6 +17,7 @@ import { EventFeed } from "./components/EventFeed.tsx";
 import { FilterBar, RANGE_MS } from "./components/FilterBar.tsx";
 import { InstancesTable } from "./components/InstancesTable.tsx";
 import { Kpi } from "./components/Kpi.tsx";
+import { Pagination } from "./components/Pagination.tsx";
 import { TargetMark } from "./components/TargetMark.tsx";
 import { WorkflowDetail } from "./components/WorkflowDetail.tsx";
 import { WorkflowsTable } from "./components/WorkflowsTable.tsx";
@@ -23,6 +25,7 @@ import { useApi } from "./hooks/useApi.ts";
 import { compactNumber, localToIso } from "./lib/format.ts";
 
 const POLL_MS = 4000;
+const DEFAULT_PAGE_SIZE = 25;
 
 /**
  * The dashboard shell.
@@ -34,6 +37,11 @@ const POLL_MS = 4000;
  */
 export function App() {
 	const [filters, setFilters] = useState<Filters>({ ...EMPTY_FILTERS });
+	// Workflow list paging. The list is unbounded — a busy fleet reports
+	// thousands — so the dashboard asks for one page and the server never returns
+	// more than that.
+	const [page, setPage] = useState(0);
+	const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
 
 	// The resolved query string every panel shares. Preset ranges re-anchor at
 	// query-build time via Date.now(); the poll keeps them sliding forward.
@@ -59,6 +67,22 @@ export function App() {
 		return s ? `?${s}` : "";
 	}, [filters]);
 
+	// The same query minus the two params /api/workflows ignores. Keeping them
+	// out matters now that the list is paged: selecting a workflow must not look
+	// like a filter change and bounce the reader back to page 1.
+	const listQuery = useMemo(() => {
+		const p = new URLSearchParams(query);
+		p.delete("workflow");
+		p.delete("kind");
+		const s = p.toString();
+		return s ? `?${s}` : "";
+	}, [query]);
+
+	// A narrower list makes the current page meaningless — start over at the top.
+	useEffect(() => {
+		setPage(0);
+	}, [listQuery]);
+
 	const { data: stats, error: statsErr } = useApi<Stats>(`/api/stats${query}`, POLL_MS);
 	const { data: inst } = useApi<InstancesResponse>("/api/instances", POLL_MS);
 	const { data: users } = useApi<UsersResponse>("/api/users", POLL_MS);
@@ -68,23 +92,36 @@ export function App() {
 	// The workflow-centric views. /api/workflows ignores the workflow/kind
 	// filters server-side, so the list stays stable while a workflow is
 	// selected; the detail below is what narrows.
-	const { data: wfs } = useApi<WorkflowsResponse>(`/api/workflows${query}`, POLL_MS);
+	const wfQuery = `${listQuery ? `${listQuery}&` : "?"}limit=${pageSize}&offset=${page * pageSize}`;
+	const { data: wfs } = useApi<WorkflowsResponse>(`/api/workflows${wfQuery}`, POLL_MS);
+	// The dropdown needs every match, not just the page on screen — that list is
+	// id+name only, so it stays cheap.
+	const { data: wfNames } = useApi<WorkflowNamesResponse>(`/api/workflows/names${listQuery}`, POLL_MS * 4);
 	const { data: wfDetail, error: wfDetailErr } = useApi<WorkflowDetailResponse>(
 		filters.workflow ? `/api/workflows/${filters.workflow}` : null,
 		POLL_MS,
 	);
 
+	// The list is live: workflows can drop out of range under a reader parked on
+	// the last page. Fall back to the new last page instead of showing nothing.
+	const total = wfs?.total ?? 0;
+	useEffect(() => {
+		const lastPage = Math.max(0, Math.ceil(total / pageSize) - 1);
+		setPage((p) => Math.min(p, lastPage));
+	}, [total, pageSize]);
+
 	const kinds = (allStats?.byKind ?? stats?.byKind ?? []).map((r) => r.kind);
 
-	// The filter-bar workflow options come from the list; keep the selected one
-	// present even when the date/user filters currently exclude it.
+	// The filter-bar workflow options come from the id+name list, NOT the page on
+	// screen — a dropdown that only offered the visible 25 would be a trap. Keep
+	// the selected one present even when the date/user filters exclude it.
 	const workflowOptions = useMemo<Pick<WorkflowRow, "workflowId" | "name">[]>(() => {
-		const list = wfs?.workflows ?? [];
+		const list = wfNames?.workflows ?? [];
 		if (filters.workflow && !list.some((w) => w.workflowId === filters.workflow)) {
 			return [...list, { workflowId: filters.workflow, name: wfDetail?.workflow.name ?? filters.workflow.slice(0, 8) }];
 		}
 		return list;
-	}, [wfs, filters.workflow, wfDetail]);
+	}, [wfNames, filters.workflow, wfDetail]);
 
 	const selectWorkflow = (id: string) => setFilters((f) => ({ ...f, workflow: id }));
 
@@ -150,6 +187,18 @@ export function App() {
 				<div className="panel">
 					<h2>Workflows</h2>
 					<WorkflowsTable workflows={wfs?.workflows ?? null} selectedId={filters.workflow} onSelect={selectWorkflow} />
+					<Pagination
+						total={wfs ? wfs.total : null}
+						page={page}
+						pageSize={pageSize}
+						shown={wfs?.workflows.length ?? 0}
+						onPage={setPage}
+						onPageSize={(n) => {
+							setPageSize(n);
+							setPage(0);
+						}}
+						label="workflows"
+					/>
 					<div className="panel-note">Click a workflow to see its steps and events. Honours the filters above.</div>
 				</div>
 
