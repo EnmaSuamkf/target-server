@@ -24,6 +24,7 @@ import {
 	insertEvent,
 	listInstances,
 	listUsers,
+	listWorkflowNames,
 	listWorkflows,
 	open,
 	recentEvents,
@@ -114,6 +115,22 @@ async function handleIngest(req, res) {
 	return sendJson(res, 200, { accepted, rejected });
 }
 
+/** Page size the workflow list defaults to, and the ceiling it will honour. */
+const DEFAULT_PAGE_SIZE = 25;
+const MAX_PAGE_SIZE = 200;
+
+/** `?limit=&offset=`, clamped — a client asking for everything gets a page. */
+function pageParams(url) {
+	const asInt = (name, fallback) => {
+		const n = Number.parseInt(url.searchParams.get(name) ?? "", 10);
+		return Number.isFinite(n) ? n : fallback;
+	};
+	return {
+		limit: Math.min(MAX_PAGE_SIZE, Math.max(1, asInt("limit", DEFAULT_PAGE_SIZE))),
+		offset: Math.max(0, asInt("offset", 0)),
+	};
+}
+
 const STATIC_TYPES = {
 	".html": "text/html; charset=utf-8",
 	".js": "text/javascript; charset=utf-8",
@@ -189,12 +206,20 @@ const server = createServer(async (req, res) => {
 				}),
 			});
 		}
+		// Only the identity/date filters apply to the workflow list: narrowing it
+		// by event kind or by workflow would filter the list itself away (the
+		// detail route below answers that question).
+		const listFilters = (({ instanceId, user, agent, sandbox, from, to }) => ({ instanceId, user, agent, sandbox, from, to }))(filters);
+
 		if (req.method === "GET" && pathname === "/api/workflows") {
-			// One aggregate row per workflow. Only the identity/date filters apply:
-			// narrowing this list by event kind or by workflow would filter the
-			// list itself away (the detail route below answers that question).
-			const { instanceId, user, agent, sandbox, from, to } = filters;
-			return sendJson(res, 200, { workflows: listWorkflows({ instanceId, user, agent, sandbox, from, to }) });
+			// One aggregate row per workflow, one page at a time. The list is
+			// unbounded by nature — a busy fleet has thousands of workflows — so
+			// `limit` is clamped rather than trusted, and always applied.
+			return sendJson(res, 200, listWorkflows({ ...listFilters, ...pageParams(url) }));
+		}
+		// Before the /:id route below, which would otherwise swallow "names".
+		if (req.method === "GET" && pathname === "/api/workflows/names") {
+			return sendJson(res, 200, { workflows: listWorkflowNames(listFilters) });
 		}
 		const workflowMatch = pathname.match(/^\/api\/workflows\/([A-Za-z0-9-]+)$/);
 		if (req.method === "GET" && workflowMatch) {

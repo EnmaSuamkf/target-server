@@ -190,8 +190,20 @@ export interface UsersResponse {
 export interface EventsResponse {
 	events: EventRow[];
 }
+/**
+ * `GET /api/workflows?limit=&offset=` — ONE PAGE of the list plus the unpaged
+ * match count the pager reads "of N" from.
+ */
 export interface WorkflowsResponse {
 	workflows: WorkflowRow[];
+	total: number;
+	limit: number;
+	offset: number;
+}
+
+/** `GET /api/workflows/names` — every match, id+name only, for the dropdown. */
+export interface WorkflowNamesResponse {
+	workflows: Pick<WorkflowRow, "workflowId" | "name">[];
 }
 
 /** The dashboard filter state, mapped 1:1 onto the API's query params. */
