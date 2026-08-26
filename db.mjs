@@ -230,9 +230,8 @@ export function sweepExpiredResets() {
 export async function adminHasDefaultPassword() {
 	const user = getAuthUserByEmail(DEFAULT_ADMIN_EMAIL);
 	if (!user?.passwordHash) return false;
-	const seed = process.env.TARGET_SEED_ADMIN_PASSWORD ?? DEFAULT_ADMIN_PASSWORD;
 	const { verifyPassword } = await import("./auth.mjs");
-	return verifyPassword(seed, user.passwordHash);
+	return verifyPassword(DEFAULT_ADMIN_PASSWORD, user.passwordHash);
 }
 
 /** Upsert the instance identity carried by a batch envelope. */
