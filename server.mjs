@@ -90,9 +90,16 @@ async function assertBootGuards() {
 		throw new Error("TARGET_SMTP_URL is required when HOST is not loopback — invitations would never be delivered (override with TARGET_ALLOW_FILE_MAIL=1)");
 	}
 	if (await adminHasDefaultPassword()) {
-		throw new Error(
-			"admin@admin.com still has the published default password — set TARGET_SEED_ADMIN_PASSWORD before first boot on a public bind",
-		);
+		const explicitSeed = process.env.TARGET_SEED_ADMIN_PASSWORD;
+		if (explicitSeed === DEFAULT_ADMIN_PASSWORD) {
+			log(
+				"WARNING: admin@admin.com uses the published default password — TARGET_SEED_ADMIN_PASSWORD was explicitly set for this deployment",
+			);
+		} else {
+			throw new Error(
+				"admin@admin.com still has the published default password — set TARGET_SEED_ADMIN_PASSWORD before first boot on a public bind",
+			);
+		}
 	}
 	if (!process.env.TARGET_AUTH_SECRET) {
 		log("WARNING: TARGET_AUTH_SECRET is not set — sessions depend on the DB-persisted secret");
