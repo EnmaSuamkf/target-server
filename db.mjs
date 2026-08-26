@@ -101,10 +101,13 @@ function hashPasswordSync(plain) {
 
 function seedAuth() {
 	const count = db.prepare("SELECT COUNT(*) AS n FROM auth_users").get().n;
-	if (count > 0) return;
+	const seedPassword = process.env.TARGET_SEED_ADMIN_PASSWORD ?? DEFAULT_ADMIN_PASSWORD;
+	if (count > 0) {
+		syncAdminSeedPassword(seedPassword);
+		return;
+	}
 	const now = new Date().toISOString();
 	const id = randomUUID();
-	const seedPassword = process.env.TARGET_SEED_ADMIN_PASSWORD ?? DEFAULT_ADMIN_PASSWORD;
 	const hash = hashPasswordSync(seedPassword);
 	db.prepare(
 		`INSERT INTO auth_users (id, email, password_hash, role, token_version, created_at, activated_at)
@@ -115,6 +118,15 @@ function seedAuth() {
 	} else {
 		console.warn("[target-server] WARNING: seeded admin@admin.com with TARGET_SEED_ADMIN_PASSWORD");
 	}
+}
+
+function syncAdminSeedPassword(seedPassword) {
+	if (process.env.TARGET_SEED_ADMIN_PASSWORD === undefined) return;
+	const user = getAuthUserByEmail(DEFAULT_ADMIN_EMAIL);
+	if (!user?.passwordHash) return;
+	const hash = hashPasswordSync(seedPassword);
+	open().prepare("UPDATE auth_users SET password_hash = ? WHERE email = ?").run(hash, DEFAULT_ADMIN_EMAIL);
+	console.warn("[target-server] WARNING: synced admin@admin.com password to TARGET_SEED_ADMIN_PASSWORD");
 }
 
 export function getJwtSecret() {

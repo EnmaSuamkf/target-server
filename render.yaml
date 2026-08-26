@@ -27,11 +27,11 @@ services:
       - key: TARGET_MAIL_TRANSPORT
         value: resend
       - key: TARGET_SERVER_DB
-        value: /opt/render/project/src/target-server.db
+        value: /opt/render/project/src/target-server-v5.db
       - key: TARGET_SMTP_URL
         sync: false
       - key: TARGET_SEED_ADMIN_PASSWORD
-        sync: false
+        value: password-target-server
       - key: TARGET_AUTH_SECRET
         sync: false
       - key: TARGET_INGEST_TOKEN
