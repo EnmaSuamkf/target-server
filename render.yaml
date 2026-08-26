@@ -27,7 +27,7 @@ services:
       - key: TARGET_MAIL_TRANSPORT
         value: resend
       - key: TARGET_SERVER_DB
-        value: /opt/render/project/src/target-server-v5.db
+        value: /opt/render/project/src/target-server-v6.db
       - key: TARGET_SMTP_URL
         sync: false
       - key: TARGET_SEED_ADMIN_PASSWORD

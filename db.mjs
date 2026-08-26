@@ -99,9 +99,16 @@ function hashPasswordSync(plain) {
 	return `scrypt$16384$8$1$${salt.toString("base64")}$${hash.toString("base64")}`;
 }
 
+function resolveSeedPassword() {
+	const raw = process.env.TARGET_SEED_ADMIN_PASSWORD;
+	if (raw === undefined) return DEFAULT_ADMIN_PASSWORD;
+	const trimmed = raw.trim();
+	return trimmed || DEFAULT_ADMIN_PASSWORD;
+}
+
 function seedAuth() {
 	const count = db.prepare("SELECT COUNT(*) AS n FROM auth_users").get().n;
-	const seedPassword = process.env.TARGET_SEED_ADMIN_PASSWORD ?? DEFAULT_ADMIN_PASSWORD;
+	const seedPassword = resolveSeedPassword();
 	if (count > 0) {
 		syncAdminSeedPassword(seedPassword);
 		return;
@@ -121,12 +128,15 @@ function seedAuth() {
 }
 
 function syncAdminSeedPassword(seedPassword) {
-	if (process.env.TARGET_SEED_ADMIN_PASSWORD === undefined) return;
 	const user = getAuthUserByEmail(DEFAULT_ADMIN_EMAIL);
 	if (!user?.passwordHash) return;
 	const hash = hashPasswordSync(seedPassword);
 	open().prepare("UPDATE auth_users SET password_hash = ? WHERE email = ?").run(hash, DEFAULT_ADMIN_EMAIL);
-	console.warn("[target-server] WARNING: synced admin@admin.com password to TARGET_SEED_ADMIN_PASSWORD");
+	if (seedPassword === DEFAULT_ADMIN_PASSWORD) {
+		console.warn("[target-server] WARNING: synced admin@admin.com password to the published default");
+	} else {
+		console.warn("[target-server] WARNING: synced admin@admin.com password to TARGET_SEED_ADMIN_PASSWORD");
+	}
 }
 
 export function getJwtSecret() {
@@ -243,7 +253,7 @@ export async function adminHasDefaultPassword() {
 	const user = getAuthUserByEmail(DEFAULT_ADMIN_EMAIL);
 	if (!user?.passwordHash) return false;
 	const { verifyPassword } = await import("./auth.mjs");
-	return verifyPassword(DEFAULT_ADMIN_PASSWORD, user.passwordHash);
+	return await verifyPassword(DEFAULT_ADMIN_PASSWORD, user.passwordHash);
 }
 
 /** Upsert the instance identity carried by a batch envelope. */
