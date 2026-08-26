@@ -8,22 +8,35 @@ Wire contract it implements: `docs/report-server.es.html` §7 in the target repo
 
 ## Requirements
 
-- Node.js **≥ 24**. The server itself has **no dependencies** (`node:sqlite` and
-  other builtins); only the dashboard has a build step (React + Vite, in `ui/`).
+- Node.js **≥ 24**. The server uses **two runtime dependencies** (`joi` for request
+  validation, `nodemailer` for invitation/recovery mail); everything else is
+  builtins (`node:sqlite`, `node:crypto`, …). The dashboard has its own build
+  step (React + Vite, in `ui/`).
 
 ## Run
 
 ```bash
-npm run ui:install        # once: installs the dashboard's dependencies
-npm run build             # once per UI change: ui/src → public/dist
+npm ci                    # joi + nodemailer
+npm run ui:install        # installs the dashboard's dependencies, then builds it
 npm start                 # or: node server.mjs
 ```
+
+Sign in at **http://127.0.0.1:8900/** with the seeded admin account
+(`admin@admin.com` / `password-target-server` on a fresh database). Change that
+password before deploying — the server refuses to start on a public bind while
+the published default is still in place.
+
+`npm run build` (ui/src → public/dist) on its own is enough after a UI change;
+`ui:install` runs it for you. `public/dist` is gitignored, so a `git pull` that
+touches `ui/` leaves the built bundle behind — the server notices and refuses to
+serve a stale dashboard, telling you to rebuild rather than showing you an old
+one. Set `TARGET_SKIP_UI_STALE_CHECK=1` to serve it anyway.
 
 Then open the dashboard at **http://127.0.0.1:8900/**.
 
 The API (`/ingest`, `/api/*`, `/health`) works without building the UI — the
 server only needs `public/dist` to serve the dashboard, and says so in the
-browser if it is missing.
+browser if it is missing or out of date.
 
 While working on the dashboard, `npm run ui:dev` serves it on
 **http://127.0.0.1:5174/** with hot reload, proxying `/api`, `/health` and
@@ -37,6 +50,59 @@ Configuration (env vars):
 | `HOST` | `127.0.0.1` | Bind address |
 | `TARGET_INGEST_TOKEN` | _(empty)_ | If set, `POST /ingest` requires `Authorization: Bearer <token>` |
 | `TARGET_SERVER_DB` | `./target-server.db` | SQLite file |
+| `TARGET_SKIP_UI_STALE_CHECK` | _(empty)_ | If set, serve `public/dist` even when it is older than `ui/` |
+| `TARGET_AUTH_SECRET` | _(generated + stored in DB)_ | HS256 signing key for sessions |
+| `TARGET_AUTH_TTL_HOURS` | `8` | Access-token lifetime |
+| `TARGET_AUTH_SECURE_COOKIE` | auto | Add `Secure` to the session cookie (on when `TARGET_PUBLIC_URL` is `https://`) |
+| `TARGET_PUBLIC_URL` | `http://HOST:PORT` | Origin for emailed setup/reset links (**required** on a public bind) |
+| `TARGET_SMTP_URL` | _(empty)_ | `smtp(s)://user:pass@host:port` — **required** on a public bind (unless `TARGET_ALLOW_FILE_MAIL=1`) |
+| `TARGET_MAIL_FROM` | `target-server@localhost` | Envelope / From address |
+| `TARGET_MAIL_TRANSPORT` | auto | Force `smtp` \| `file` \| `noop` (file is the local default) |
+| `TARGET_ALLOW_FILE_MAIL` | `0` | Allow file/noop mail transport on a public bind |
+| `TARGET_SEED_ADMIN_PASSWORD` | published default | Password for the seeded `admin@admin.com` — set before first boot when deployed |
+| `TARGET_TRUST_PROXY` | `0` | Use the last hop of `X-Forwarded-For` for rate limiting (only behind a trusted proxy) |
+| `TARGET_AUTH_DISABLED` | `0` | Skip the API auth guard (local dev/tests only; refused on a public bind) |
+
+## Authentication
+
+JWT sessions in an `httpOnly` cookie (Bearer header also accepted). Every
+`/api/*` route except `/api/auth/*` requires a signed-in operator.
+`POST /ingest` keeps its own `TARGET_INGEST_TOKEN` and is unchanged.
+
+Human accounts live under `/api/auth/users` — distinct from `GET /api/users`,
+which still lists reporting instance display names.
+
+First run on a fresh database seeds `admin@admin.com`. Invite additional
+operators from the **Users** panel: the server emails a single-use setup link
+(no password in mail). Local/CI defaults write `.mail-outbox/*.eml` instead of
+using SMTP.
+
+### Deployment
+
+On any non-loopback `HOST`, the server **refuses to start** without:
+
+- `TARGET_PUBLIC_URL` (links must not come from the bind address or Host header)
+- a real mail transport (`TARGET_SMTP_URL`, unless `TARGET_ALLOW_FILE_MAIL=1`)
+- a non-default seed admin password (`TARGET_SEED_ADMIN_PASSWORD`)
+
+It also refuses `TARGET_AUTH_DISABLED=1` on a public bind. Set
+`TARGET_INGEST_TOKEN` before exposing the port.
+
+#### Render
+
+The repo includes [`render.yaml`](render.yaml) (Blueprint). To deploy:
+
+1. Push this repo to GitHub (branch `main`).
+2. In the [Render Dashboard](https://dashboard.render.com) → **Blueprints** → **New Blueprint Instance**, select `EnmaSuamkf/target-server`.
+3. When prompted, set the secret env vars (`sync: false` in the Blueprint):
+   - `TARGET_SMTP_URL` — e.g. `smtps://resend:re_KEY@smtp.resend.com:465`
+   - `TARGET_SEED_ADMIN_PASSWORD` — non-default password for `admin@admin.com` (before first boot)
+   - `TARGET_AUTH_SECRET` — optional; generated on first boot if omitted
+   - `TARGET_INGEST_TOKEN` — optional; protects `POST /ingest`
+4. Deploy. The service URL is **https://target-server.onrender.com** (matches `TARGET_PUBLIC_URL` in the Blueprint).
+
+Build: `npm ci && npm --prefix ui ci && npm run build`. Start: `node server.mjs`.
+Health check: `GET /health`. SQLite lives at `TARGET_SERVER_DB` (ephemeral on the free plan unless you add a persistent disk).
 
 ## Point a Target instance at it
 
@@ -52,7 +118,18 @@ Start the hub and use it — batches appear on the dashboard within a few second
 
 ## API
 
-- `POST /ingest` — receive a batch. Returns `{ accepted: [id...], rejected: [{id,reason,detail}] }`.
+All `GET /api/*` routes below require a session unless noted.
+
+- `POST /api/auth/login` — sign in (`admin@admin.com` on a fresh DB)
+- `POST /api/auth/logout` — sign out
+- `GET /api/auth/me` — current operator
+- `POST /api/auth/forgot-password` — email a reset link (always 202)
+- `POST /api/auth/setup` — complete an invitation (`/setup?token=…`)
+- `POST /api/auth/reset-password` — set password from recovery link
+- `GET/POST/DELETE /api/auth/users` — list, invite, delete human accounts
+- `POST /api/auth/users/:id/invite` — resend invitation
+
+- `POST /ingest` — receive a batch (optional ingest token; not session auth). Returns `{ accepted: [id...], rejected: [{id,reason,detail}] }`.
   Idempotent: re-sending the same event ids inserts nothing new but still acks them.
 - `GET /api/stats?from=&to=&user=&instance=&workflow=&kind=&agent=&sandbox=` — totals,
   events-by-kind, versions, usage sums, plus `agents`/`sandboxes` (the distinct values ever

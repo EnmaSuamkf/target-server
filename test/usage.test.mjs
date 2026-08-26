@@ -19,8 +19,9 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test, { after } from "node:test";
+import test, { after, before } from "node:test";
 import { once } from "node:events";
+import { login } from "./helpers.mjs";
 
 const tmpDb = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "target-server-usage-")), "t.db");
 process.env.TARGET_SERVER_DB = tmpDb;
@@ -31,7 +32,12 @@ const { server } = await import("../server.mjs");
 const { normalizeUsageSnapshot, isNewUsageShape } = await import("../db.mjs");
 if (!server.listening) await once(server, "listening");
 const base = `http://127.0.0.1:${server.address().port}`;
+let cookie = "";
 after(() => server.close());
+
+before(async () => {
+	cookie = await login(base);
+});
 
 /** The real session behind this fix, both ways it has been reported. */
 const OLD_SHAPE = {
@@ -129,21 +135,21 @@ test("missing/garbage fields degrade to zeros instead of NaN", () => {
 
 test("the aggregates apply the same rule in SQL: old rows read 16.0M, not 416", async () => {
 	await post([snapshot("u-old-1", "wf-old", "sess-old", OLD_SHAPE)]);
-	const s = await (await fetch(`${base}/api/stats?workflow=wf-old`)).json();
+	const s = await (await fetch(`${base}/api/stats?workflow=wf-old`, { headers: { cookie } })).json();
 	assert.equal(s.usage.inputTokens, TRUE_INPUT);
 	assert.equal(s.usage.outputTokens, 98599);
 
-	const list = await (await fetch(`${base}/api/workflows`)).json();
+	const list = await (await fetch(`${base}/api/workflows`, { headers: { cookie } })).json();
 	const wf = list.workflows.find((w) => w.workflowId === "wf-old");
 	assert.deepEqual(wf.tokens, { input: TRUE_INPUT, output: 98599 });
 });
 
 test("new-shape rows are summed as-is, and carry the client's readout to the detail", async () => {
 	await post([snapshot("u-new-1", "wf-new", "sess-new", NEW_SHAPE)]);
-	const s = await (await fetch(`${base}/api/stats?workflow=wf-new`)).json();
+	const s = await (await fetch(`${base}/api/stats?workflow=wf-new`, { headers: { cookie } })).json();
 	assert.equal(s.usage.inputTokens, TRUE_INPUT); // not 16M + the parts again
 
-	const detail = await (await fetch(`${base}/api/workflows/wf-new`)).json();
+	const detail = await (await fetch(`${base}/api/workflows/wf-new`, { headers: { cookie } })).json();
 	assert.equal(detail.usage.inputTokens, TRUE_INPUT);
 	assert.equal(detail.usage.sessions.length, 1);
 	const [u] = detail.usage.sessions;
@@ -163,11 +169,11 @@ test("snapshots are cumulative: the LAST one per session wins, they are not summ
 		snapshot("c-2", "wf-cum", "sess-cum", { input_tokens: 200, output_tokens: 20, cache_read: 999800, turns: 2 }),
 		snapshot("c-3", "wf-cum", "sess-cum", { input_tokens: 300, output_tokens: 30, cache_read: 1999700, turns: 3 }),
 	]);
-	const s = await (await fetch(`${base}/api/stats?workflow=wf-cum`)).json();
+	const s = await (await fetch(`${base}/api/stats?workflow=wf-cum`, { headers: { cookie } })).json();
 	assert.equal(s.usage.inputTokens, 2000000);
 	assert.equal(s.usage.outputTokens, 30);
 
-	const detail = await (await fetch(`${base}/api/workflows/wf-cum`)).json();
+	const detail = await (await fetch(`${base}/api/workflows/wf-cum`, { headers: { cookie } })).json();
 	assert.equal(detail.usage.sessions.length, 1);
 	assert.equal(detail.usage.sessions[0].turns, 3);
 	assert.equal(detail.usage.inputTokens, 2000000);
@@ -178,16 +184,16 @@ test("separate sessions of one workflow ARE summed, newest session first", async
 		snapshot("m-1", "wf-multi", "sess-a", { input_tokens: 1, output_tokens: 2, cache_read: 999, turns: 5 }),
 		snapshot("m-2", "wf-multi", "sess-b", NEW_SHAPE),
 	]);
-	const detail = await (await fetch(`${base}/api/workflows/wf-multi`)).json();
+	const detail = await (await fetch(`${base}/api/workflows/wf-multi`, { headers: { cookie } })).json();
 	assert.equal(detail.usage.sessions.length, 2);
 	assert.equal(detail.usage.inputTokens, 1000 + TRUE_INPUT);
 	assert.equal(detail.usage.outputTokens, 2 + 98599);
-	const s = await (await fetch(`${base}/api/stats?workflow=wf-multi`)).json();
+	const s = await (await fetch(`${base}/api/stats?workflow=wf-multi`, { headers: { cookie } })).json();
 	assert.equal(s.usage.inputTokens, detail.usage.inputTokens);
 });
 
 test("a workflow with no snapshots reports an empty usage block, not a crash", async () => {
 	await post([{ id: "n-1", kind: "workflow.created", workflow_id: "wf-none", created_at: new Date().toISOString(), data: { name: "quiet" } }]);
-	const detail = await (await fetch(`${base}/api/workflows/wf-none`)).json();
+	const detail = await (await fetch(`${base}/api/workflows/wf-none`, { headers: { cookie } })).json();
 	assert.deepEqual(detail.usage, { inputTokens: 0, outputTokens: 0, sessions: [] });
 });

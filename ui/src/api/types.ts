@@ -233,3 +233,20 @@ export const EMPTY_FILTERS: Filters = {
 	agent: "",
 	sandbox: "",
 };
+
+/** Human account (dashboard operator), from /api/auth/*. */
+export interface AuthUser {
+	id: string;
+	email: string;
+	role: string;
+	createdAt: string;
+	lastLoginAt: string | null;
+	status: "pending" | "active";
+	usesDefaultPassword?: boolean;
+}
+
+export interface FieldError {
+	field: string;
+	code: string;
+	message: string;
+}

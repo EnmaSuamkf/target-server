@@ -8,8 +8,9 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test, { after } from "node:test";
+import test, { after, before } from "node:test";
 import { once } from "node:events";
+import { login } from "./helpers.mjs";
 
 const tmpDb = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "target-server-test-")), "t.db");
 process.env.TARGET_SERVER_DB = tmpDb;
@@ -19,6 +20,11 @@ process.env.HOST = "127.0.0.1";
 const { server } = await import("../server.mjs");
 if (!server.listening) await once(server, "listening");
 const base = `http://127.0.0.1:${server.address().port}`;
+let cookie = "";
+
+before(async () => {
+	cookie = await login(base);
+});
 
 after(() => server.close());
 
@@ -53,7 +59,7 @@ test("POST /ingest accepts a batch and returns accepted ids", async () => {
 
 test("re-posting the same batch is idempotent (no double-count)", async () => {
 	await fetch(`${base}/ingest`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(batch()) });
-	const res = await fetch(`${base}/api/stats`);
+	const res = await fetch(`${base}/api/stats`, { headers: { cookie } });
 	const s = await res.json();
 	assert.equal(s.totalEvents, 3); // still 3 despite two posts
 	assert.equal(s.totalInstances, 1);
@@ -85,9 +91,9 @@ test("a batch missing events[] is a 422", async () => {
 });
 
 test("dashboard API exposes instances and events", async () => {
-	const inst = await (await fetch(`${base}/api/instances`)).json();
+	const inst = await (await fetch(`${base}/api/instances`, { headers: { cookie } })).json();
 	assert.ok(inst.instances.find((i) => i.instanceId === "inst-aaaaaaaa" && i.displayName === "Ada"));
-	const evs = await (await fetch(`${base}/api/events?limit=10`)).json();
+	const evs = await (await fetch(`${base}/api/events?limit=10`, { headers: { cookie } })).json();
 	assert.ok(evs.events.length >= 3);
 });
 
@@ -130,7 +136,7 @@ test("workflow aggregation: /api/workflows lists counts and /api/workflows/:id r
 	});
 	assert.equal(res.status, 200);
 
-	const list = await (await fetch(`${base}/api/workflows`)).json();
+	const list = await (await fetch(`${base}/api/workflows`, { headers: { cookie } })).json();
 	const wf1 = list.workflows.find((w) => w.workflowId === "wf1");
 	assert.ok(wf1, "wf1 is listed");
 	assert.equal(wf1.name, "steps demo"); // latest non-null workflow.created name
@@ -142,7 +148,7 @@ test("workflow aggregation: /api/workflows lists counts and /api/workflows/:id r
 	assert.deepEqual(wf1.tokens, { input: 100, output: 20 });
 	assert.equal(wf1.status, "running"); // s1 started and never settled
 
-	const detail = await (await fetch(`${base}/api/workflows/wf1`)).json();
+	const detail = await (await fetch(`${base}/api/workflows/wf1`, { headers: { cookie } })).json();
 	assert.equal(detail.workflow.workflowId, "wf1");
 	assert.equal(detail.workflow.status, "running");
 	assert.equal(detail.steps.length, 2);
@@ -158,7 +164,7 @@ test("workflow aggregation: /api/workflows lists counts and /api/workflows/:id r
 	assert.equal(s2.manualReview, true);
 	assert.ok(detail.events.length >= 4);
 
-	const missing = await fetch(`${base}/api/workflows/wf-unknown`);
+	const missing = await fetch(`${base}/api/workflows/wf-unknown`, { headers: { cookie } });
 	assert.equal(missing.status, 404);
 });
 
@@ -194,7 +200,7 @@ test("agent/sandbox: workflow rows resolve them and the filters narrow every vie
 
 	// Rows resolve agent/sandbox from the latest event carrying them —
 	// workflow.updated counts for the name too (rename notification).
-	const list = await (await fetch(`${base}/api/workflows`)).json();
+	const list = await (await fetch(`${base}/api/workflows`, { headers: { cookie } })).json();
 	const wf1 = list.workflows.find((w) => w.workflowId === "wf1");
 	const wf2 = list.workflows.find((w) => w.workflowId === "wf2");
 	assert.equal(wf1.agent, "claude");
@@ -205,23 +211,23 @@ test("agent/sandbox: workflow rows resolve them and the filters narrow every vie
 	assert.equal(wf2.image, "target-agent:latest");
 
 	// The filters narrow the workflow list…
-	const onlyFc = await (await fetch(`${base}/api/workflows?agent=free-code`)).json();
+	const onlyFc = await (await fetch(`${base}/api/workflows?agent=free-code`, { headers: { cookie } })).json();
 	assert.deepEqual(onlyFc.workflows.map((w) => w.workflowId), ["wf2"]);
-	const onlyDocker = await (await fetch(`${base}/api/workflows?sandbox=docker`)).json();
+	const onlyDocker = await (await fetch(`${base}/api/workflows?sandbox=docker`, { headers: { cookie } })).json();
 	assert.deepEqual(onlyDocker.workflows.map((w) => w.workflowId), ["wf2"]);
-	const onlyHost = await (await fetch(`${base}/api/workflows?sandbox=host`)).json();
+	const onlyHost = await (await fetch(`${base}/api/workflows?sandbox=host`, { headers: { cookie } })).json();
 	assert.deepEqual(onlyHost.workflows.map((w) => w.workflowId), ["wf1"]);
 
 	// …the event feed…
-	const evs = await (await fetch(`${base}/api/events?agent=claude&limit=50`)).json();
+	const evs = await (await fetch(`${base}/api/events?agent=claude&limit=50`, { headers: { cookie } })).json();
 	assert.ok(evs.events.length > 0);
 	assert.ok(evs.events.every((e) => e.workflowId === "wf1"));
 
 	// …and the stats, which also publish the distinct values for the dropdowns.
-	const s = await (await fetch(`${base}/api/stats?sandbox=docker`)).json();
+	const s = await (await fetch(`${base}/api/stats?sandbox=docker`, { headers: { cookie } })).json();
 	assert.equal(s.workflows, 1);
 	assert.ok(s.events === undefined); // shape sanity: stats has totalEvents
-	const all = await (await fetch(`${base}/api/stats`)).json();
+	const all = await (await fetch(`${base}/api/stats`, { headers: { cookie } })).json();
 	assert.deepEqual(all.agents.sort(), ["claude", "free-code"]);
 	assert.deepEqual(all.sandboxes.sort(), ["docker", "host"]);
 });

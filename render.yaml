@@ -1,0 +1,38 @@
+# Render Blueprint for target-server (Node web service + React dashboard).
+#
+# Secrets use sync: false — set them in the Render dashboard (or when applying
+# the Blueprint), never commit real values.
+#
+# Apply: Dashboard → Blueprints → New Blueprint Instance → repo EnmaSuamkf/target-server
+services:
+  - type: web
+    name: target-server
+    runtime: node
+    region: oregon
+    plan: free
+    branch: main
+    buildCommand: npm ci && npm --prefix ui ci && npm run build
+    startCommand: node server.mjs
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: "24"
+      - key: HOST
+        value: 0.0.0.0
+      - key: TARGET_PUBLIC_URL
+        value: https://target-server.onrender.com
+      - key: TARGET_MAIL_FROM
+        value: Target <onboarding@resend.dev>
+      - key: TARGET_MAIL_TRANSPORT
+        value: smtp
+      - key: TARGET_SERVER_DB
+        value: /opt/render/project/src/target-server.db
+      - key: TARGET_SMTP_URL
+        sync: false
+      - key: TARGET_SEED_ADMIN_PASSWORD
+        sync: false
+      - key: TARGET_AUTH_SECRET
+        sync: false
+      - key: TARGET_INGEST_TOKEN
+        sync: false
