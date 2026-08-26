@@ -1,5 +1,6 @@
 /**
- * Mail transport — nodemailer for SMTP, file outbox for dev/CI, noop for tests.
+ * Mail transport — nodemailer for SMTP, Resend HTTP API (Render free tier),
+ * file outbox for dev/CI, noop for tests.
  */
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -7,15 +8,35 @@ import nodemailer from "nodemailer";
 
 const FROM = process.env.TARGET_MAIL_FROM ?? "target-server@localhost";
 const SMTP_URL = process.env.TARGET_SMTP_URL ?? "";
+const RESEND_API_KEY = process.env.TARGET_RESEND_API_KEY ?? "";
 const FORCED = process.env.TARGET_MAIL_TRANSPORT ?? "";
 const OUTBOX = join(process.cwd(), ".mail-outbox");
 
 let transport = null;
 let transportName = "file";
+let resendApiKey = "";
+
+function resendKeyFromSmtpUrl(url) {
+	try {
+		const u = new URL(url);
+		if (u.hostname.includes("resend.com") && u.username === "resend" && u.password) return u.password;
+	} catch {
+		// ignore malformed URLs
+	}
+	return "";
+}
 
 function pickTransport() {
 	if (FORCED === "noop") return { name: "noop", t: null };
 	if (FORCED === "file") return { name: "file", t: null };
+	const resendKey = RESEND_API_KEY || resendKeyFromSmtpUrl(SMTP_URL);
+	if (FORCED === "resend" || resendKey) {
+		if (!resendKey) {
+			throw new Error("TARGET_RESEND_API_KEY is required when TARGET_MAIL_TRANSPORT=resend");
+		}
+		resendApiKey = resendKey;
+		return { name: "resend", t: null };
+	}
 	if (FORCED === "smtp" || SMTP_URL) {
 		if (!SMTP_URL) {
 			throw new Error(
@@ -26,6 +47,28 @@ function pickTransport() {
 		return { name: "smtp", t };
 	}
 	return { name: "file", t: null };
+}
+
+async function sendViaResend({ to, subject, text, html }) {
+	const res = await fetch("https://api.resend.com/emails", {
+		method: "POST",
+		headers: {
+			Authorization: `Bearer ${resendApiKey}`,
+			"Content-Type": "application/json",
+		},
+		body: JSON.stringify({
+			from: FROM,
+			to: [to],
+			subject,
+			text,
+			...(html ? { html } : {}),
+		}),
+	});
+	const body = await res.json().catch(() => ({}));
+	if (!res.ok) {
+		throw new Error(body?.message ?? `Resend API ${res.status}`);
+	}
+	return body;
 }
 
 export async function initMailer() {
@@ -54,6 +97,10 @@ export async function sendMail({ to, subject, text, html }) {
 		console.log(`[target-server] mail (file): wrote ${path}`);
 		return { sent: true, transport: "file", path };
 	}
+	if (transportName === "resend") {
+		await sendViaResend({ to, subject, text, html });
+		return { sent: true, transport: "resend" };
+	}
 	await transport.sendMail({ from: FROM, to, subject, text, html });
 	return { sent: true, transport: "smtp" };
 }
@@ -63,5 +110,5 @@ export function outboxDir() {
 }
 
 export function isDeliveringTransport() {
-	return transportName === "smtp";
+	return transportName === "smtp" || transportName === "resend";
 }

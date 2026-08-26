@@ -95,7 +95,7 @@ The repo includes [`render.yaml`](render.yaml) (Blueprint). To deploy:
 1. Push this repo to GitHub (branch `main`).
 2. In the [Render Dashboard](https://dashboard.render.com) → **Blueprints** → **New Blueprint Instance**, select `EnmaSuamkf/target-server`.
 3. When prompted, set the secret env vars (`sync: false` in the Blueprint):
-   - `TARGET_SMTP_URL` — e.g. `smtps://resend:re_KEY@smtp.resend.com:465`
+   - `TARGET_SMTP_URL` — e.g. `smtps://resend:re_KEY@smtp.resend.com:465` (Resend API key is read from this URL on Render; SMTP ports are blocked on the free plan, so the server uses Resend's HTTPS API instead)
    - `TARGET_SEED_ADMIN_PASSWORD` — non-default password for `admin@admin.com` (before first boot)
    - `TARGET_AUTH_SECRET` — optional; generated on first boot if omitted
    - `TARGET_INGEST_TOKEN` — optional; protects `POST /ingest`

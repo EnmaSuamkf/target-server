@@ -21,11 +21,11 @@ services:
       - key: HOST
         value: 0.0.0.0
       - key: TARGET_PUBLIC_URL
-        value: https://target-server.onrender.com
+        value: https://target-server-okjn.onrender.com
       - key: TARGET_MAIL_FROM
         value: Target <onboarding@resend.dev>
       - key: TARGET_MAIL_TRANSPORT
-        value: smtp
+        value: resend
       - key: TARGET_SERVER_DB
         value: /opt/render/project/src/target-server.db
       - key: TARGET_SMTP_URL
