@@ -30,6 +30,8 @@ services:
         value: /opt/render/project/src/target-server-v6.db
       - key: TARGET_SMTP_URL
         sync: false
+      - key: TARGET_USE_PUBLISHED_ADMIN
+        value: "1"
       - key: TARGET_SEED_ADMIN_PASSWORD
         value: password-target-server
       - key: TARGET_AUTH_SECRET

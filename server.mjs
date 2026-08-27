@@ -91,7 +91,7 @@ async function assertBootGuards() {
 	}
 	if (await adminHasDefaultPassword()) {
 		const explicitSeed = process.env.TARGET_SEED_ADMIN_PASSWORD?.trim();
-		if (explicitSeed === DEFAULT_ADMIN_PASSWORD) {
+		if (explicitSeed === DEFAULT_ADMIN_PASSWORD || process.env.TARGET_USE_PUBLISHED_ADMIN === "1") {
 			log(
 				"WARNING: admin@admin.com uses the published default password — TARGET_SEED_ADMIN_PASSWORD was explicitly set for this deployment",
 			);

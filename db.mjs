@@ -100,6 +100,9 @@ function hashPasswordSync(plain) {
 }
 
 function resolveSeedPassword() {
+	if (process.env.TARGET_USE_PUBLISHED_ADMIN === "1") {
+		return DEFAULT_ADMIN_PASSWORD;
+	}
 	const raw = process.env.TARGET_SEED_ADMIN_PASSWORD;
 	if (raw === undefined) return DEFAULT_ADMIN_PASSWORD;
 	const trimmed = raw.trim();
