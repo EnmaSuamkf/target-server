@@ -68,6 +68,13 @@ test("logout clears session", async () => {
 });
 
 test("/login serves SPA shell", async () => {
+	const distIndex = path.join(new URL("../public/dist/index.html", import.meta.url).pathname);
+	if (!fs.existsSync(distIndex)) {
+		const res = await fetch(`${base}/login`);
+		assert.equal(res.status, 503);
+		assert.match(await res.text(), /Dashboard not built/i);
+		return;
+	}
 	const res = await fetch(`${base}/login`);
 	assert.equal(res.status, 200);
 	assert.match(await res.text(), /<html/i);
