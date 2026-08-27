@@ -9,12 +9,16 @@ services:
     name: target-server
     runtime: node
     region: oregon
-    plan: free
+    plan: starter
     branch: main
     buildCommand: npm ci && npm --prefix ui ci && npm run build
     startCommand: node server.mjs
     healthCheckPath: /health
     autoDeploy: true
+    disk:
+      name: target-server-data
+      mountPath: /var/data
+      sizeGB: 1
     envVars:
       - key: NODE_VERSION
         value: "24"
@@ -29,7 +33,7 @@ services:
       - key: TARGET_ALLOW_FILE_MAIL
         value: "1"
       - key: TARGET_SERVER_DB
-        value: /opt/render/project/src/target-server-v6.db
+        value: /var/data/target-server.db
       - key: TARGET_SMTP_URL
         sync: false
       - key: TARGET_USE_PUBLISHED_ADMIN
