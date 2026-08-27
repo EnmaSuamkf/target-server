@@ -99,10 +99,22 @@ function hashPasswordSync(plain) {
 	return `scrypt$16384$8$1$${salt.toString("base64")}$${hash.toString("base64")}`;
 }
 
-function publishedDeployUrl() {
+/** Origin for emailed setup/reset links (never from the Host header). */
+export function publicUrl(opts = {}) {
+	const host = opts.host ?? process.env.HOST ?? "127.0.0.1";
+	const port = opts.port ?? process.env.PORT ?? "8900";
 	const explicit = (process.env.TARGET_PUBLIC_URL ?? "").replace(/\/$/, "");
+	const render = (process.env.RENDER_EXTERNAL_URL ?? "").replace(/\/$/, "");
+	// Custom domain: a non-onrender TARGET_PUBLIC_URL is authoritative.
+	if (explicit && !explicit.includes(".onrender.com")) return explicit;
+	// On Render, RENDER_EXTERNAL_URL matches the live service hostname.
+	if (render) return render;
 	if (explicit) return explicit;
-	return (process.env.RENDER_EXTERNAL_URL ?? "").replace(/\/$/, "");
+	return `http://${host}:${port}`.replace(/\/$/, "");
+}
+
+function publishedDeployUrl() {
+	return publicUrl();
 }
 
 export function isPublishedRenderDeploy() {

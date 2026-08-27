@@ -99,7 +99,7 @@ The repo includes [`render.yaml`](render.yaml) (Blueprint). To deploy:
    - `TARGET_SEED_ADMIN_PASSWORD` — non-default password for `admin@admin.com` (before first boot)
    - `TARGET_AUTH_SECRET` — optional; generated on first boot if omitted
    - `TARGET_INGEST_TOKEN` — optional; protects `POST /ingest`
-4. Deploy. The service URL is **https://target-server.onrender.com** (matches `TARGET_PUBLIC_URL` in the Blueprint).
+4. Deploy. The service URL is **https://target-server-okjn.onrender.com** (matches `TARGET_PUBLIC_URL` in the Blueprint; on Render, `RENDER_EXTERNAL_URL` overrides a stale onrender hostname).
 
 Build: `npm ci && npm --prefix ui ci && npm run build`. Start: `node server.mjs`.
 Health check: `GET /health`. SQLite lives at `TARGET_SERVER_DB` (ephemeral on the free plan unless you add a persistent disk).

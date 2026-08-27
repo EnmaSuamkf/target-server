@@ -17,7 +17,7 @@ const TTL_HOURS = Number.parseInt(process.env.TARGET_AUTH_TTL_HOURS ?? "8", 10);
 function secureCookieFlag() {
 	if (process.env.TARGET_AUTH_SECURE_COOKIE === "0") return false;
 	if (process.env.TARGET_AUTH_SECURE_COOKIE === "1") return true;
-	const pub = process.env.TARGET_PUBLIC_URL ?? "";
+	const pub = process.env.TARGET_PUBLIC_URL ?? process.env.RENDER_EXTERNAL_URL ?? "";
 	return pub.startsWith("https://");
 }
 

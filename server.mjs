@@ -40,6 +40,7 @@ import {
 	insertResetToken,
 	listAuthUsers,
 	open,
+	publicUrl,
 	recordLogin,
 	setUserPassword,
 	sweepExpiredResets,
@@ -75,16 +76,12 @@ function log(msg) {
 	console.log(`[target-server] ${msg}`);
 }
 
-function publicUrl() {
-	return (process.env.TARGET_PUBLIC_URL ?? `http://${HOST}:${PORT}`).replace(/\/$/, "");
-}
-
 async function assertBootGuards() {
 	if (isLoopbackHost(HOST)) return;
 	if (AUTH_DISABLED) {
 		throw new Error("TARGET_AUTH_DISABLED=1 is refused on a non-loopback bind — the dashboard would be public");
 	}
-	if (!process.env.TARGET_PUBLIC_URL) {
+	if (!process.env.TARGET_PUBLIC_URL && !process.env.RENDER_EXTERNAL_URL) {
 		throw new Error("TARGET_PUBLIC_URL is required when HOST is not loopback — emailed links would point at the internal bind");
 	}
 	const allowFileMail =
@@ -363,14 +360,15 @@ async function issueInvite(user) {
 	const expiresAt = new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString();
 	insertResetToken({ tokenHash, userId: user.id, kind: "invite", expiresAt });
 	touchInvitedAt(user.id);
-	const body = withToken(inviteMail({ publicUrl: publicUrl(), email: user.email }), raw);
+	const body = withToken(inviteMail({ publicUrl: publicUrl({ host: HOST, port: PORT }), email: user.email }), raw);
 	let mail;
 	try {
 		mail = await sendMail({ to: user.email, ...body });
 	} catch (err) {
 		mail = { sent: false, transport: mailTransportName(), error: String(err?.message ?? err) };
 	}
-	return { invite: { url: `${publicUrl()}/setup?token=${raw}`, expiresAt }, mail };
+	const origin = publicUrl({ host: HOST, port: PORT });
+	return { invite: { url: `${origin}/setup?token=${raw}`, expiresAt }, mail };
 }
 
 async function issueReset(user) {
@@ -380,7 +378,7 @@ async function issueReset(user) {
 	const tokenHash = hashToken(raw);
 	const expiresAt = new Date(Date.now() + 3600 * 1000).toISOString();
 	insertResetToken({ tokenHash, userId: user.id, kind: "reset", expiresAt });
-	const body = withToken(resetMail({ publicUrl: publicUrl(), email: user.email }), raw);
+	const body = withToken(resetMail({ publicUrl: publicUrl({ host: HOST, port: PORT }), email: user.email }), raw);
 	try {
 		await sendMail({ to: user.email, ...body });
 	} catch (err) {
