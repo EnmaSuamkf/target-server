@@ -99,9 +99,19 @@ function hashPasswordSync(plain) {
 	return `scrypt$16384$8$1$${salt.toString("base64")}$${hash.toString("base64")}`;
 }
 
+function publishedDeployUrl() {
+	const explicit = (process.env.TARGET_PUBLIC_URL ?? "").replace(/\/$/, "");
+	if (explicit) return explicit;
+	return (process.env.RENDER_EXTERNAL_URL ?? "").replace(/\/$/, "");
+}
+
+export function isPublishedRenderDeploy() {
+	const url = publishedDeployUrl();
+	return url === "https://target-server-okjn.onrender.com";
+}
+
 function resolveSeedPassword() {
-	const publishedUrl = (process.env.TARGET_PUBLIC_URL ?? "").replace(/\/$/, "");
-	if (publishedUrl === "https://target-server-okjn.onrender.com") {
+	if (isPublishedRenderDeploy()) {
 		return DEFAULT_ADMIN_PASSWORD;
 	}
 	if (process.env.TARGET_USE_PUBLISHED_ADMIN === "1") {

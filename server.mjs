@@ -36,6 +36,7 @@ import {
 	getAuthUserByEmail,
 	getAuthUserById,
 	invalidateResetTokens,
+	isPublishedRenderDeploy,
 	insertResetToken,
 	listAuthUsers,
 	open,
@@ -88,7 +89,7 @@ async function assertBootGuards() {
 	}
 	const allowFileMail =
 		process.env.TARGET_ALLOW_FILE_MAIL === "1" ||
-		publicUrl() === "https://target-server-okjn.onrender.com";
+		isPublishedRenderDeploy();
 	if (!isDeliveringTransport() && !allowFileMail) {
 		throw new Error("TARGET_SMTP_URL is required when HOST is not loopback — invitations would never be delivered (override with TARGET_ALLOW_FILE_MAIL=1)");
 	}
@@ -97,7 +98,7 @@ async function assertBootGuards() {
 	}
 	if (await adminHasDefaultPassword()) {
 		const explicitSeed = process.env.TARGET_SEED_ADMIN_PASSWORD?.trim();
-		if (explicitSeed === DEFAULT_ADMIN_PASSWORD || process.env.TARGET_USE_PUBLISHED_ADMIN === "1" || publicUrl() === "https://target-server-okjn.onrender.com") {
+		if (explicitSeed === DEFAULT_ADMIN_PASSWORD || process.env.TARGET_USE_PUBLISHED_ADMIN === "1" || isPublishedRenderDeploy()) {
 			log(
 				"WARNING: admin@admin.com uses the published default password — TARGET_SEED_ADMIN_PASSWORD was explicitly set for this deployment",
 			);
