@@ -4,6 +4,7 @@ node_modules/
 *.sqlite
 *.log
 .env
+.mail-outbox/
 
 # Built dashboard (produced by `npm run build`; sources live in ui/src).
 public/dist/

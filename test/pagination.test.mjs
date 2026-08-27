@@ -10,6 +10,7 @@ import os from "node:os";
 import path from "node:path";
 import test, { after, before } from "node:test";
 import { once } from "node:events";
+import { login } from "./helpers.mjs";
 
 const tmpDb = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "target-server-page-")), "t.db");
 process.env.TARGET_SERVER_DB = tmpDb;
@@ -19,12 +20,14 @@ process.env.HOST = "127.0.0.1";
 const { server } = await import("../server.mjs");
 if (!server.listening) await once(server, "listening");
 const base = `http://127.0.0.1:${server.address().port}`;
+let cookie = "";
 
 after(() => server.close());
 
 const TOTAL = 30;
 
 before(async () => {
+	cookie = await login(base);
 	// 30 workflows, each one event, with strictly increasing created_at so the
 	// "newest activity first" order is deterministic: wf-29 … wf-00.
 	const events = [];
@@ -52,7 +55,7 @@ before(async () => {
 	assert.equal(res.status, 200);
 });
 
-const list = async (qs = "") => (await fetch(`${base}/api/workflows${qs}`)).json();
+const list = async (qs = "") => (await fetch(`${base}/api/workflows${qs}`, { headers: { cookie } })).json();
 
 test("the list is paged by default — an unqualified GET does not return everything", async () => {
 	const page = await list();
@@ -107,19 +110,19 @@ test("`total` counts the filtered list, so the pager's 'of N' follows the filter
 });
 
 test("/api/workflows/names lists every match, so paging cannot hide one from the dropdown", async () => {
-	const { workflows } = await (await fetch(`${base}/api/workflows/names`)).json();
+	const { workflows } = await (await fetch(`${base}/api/workflows/names`, { headers: { cookie } })).json();
 	assert.equal(workflows.length, TOTAL);
 	assert.deepEqual(Object.keys(workflows[0]).sort(), ["name", "workflowId"]);
 	assert.equal(workflows[0].workflowId, "wf-29");
 	assert.equal(workflows[0].name, "workflow 29");
 	// It honours the same filters as the list itself.
-	const claude = await (await fetch(`${base}/api/workflows/names?agent=claude`)).json();
+	const claude = await (await fetch(`${base}/api/workflows/names?agent=claude`, { headers: { cookie } })).json();
 	assert.equal(claude.workflows.length, TOTAL / 2);
 });
 
 test("the detail route still resolves — 'names' must not be read as a workflow id", async () => {
-	const detail = await (await fetch(`${base}/api/workflows/wf-07`)).json();
+	const detail = await (await fetch(`${base}/api/workflows/wf-07`, { headers: { cookie } })).json();
 	assert.equal(detail.workflow.workflowId, "wf-07");
-	const missing = await fetch(`${base}/api/workflows/wf-nope`);
+	const missing = await fetch(`${base}/api/workflows/wf-nope`, { headers: { cookie } });
 	assert.equal(missing.status, 404);
 });

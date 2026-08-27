@@ -1,0 +1,1576 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>The Target Project — authentication for the report server</title>
+    <meta
+      name="description"
+      content="Implementation plan: put JWT authentication in front of target-server — a login page with password recovery, a Users section to create and delete users, emails validated by a joi blueprint, and an invitation email whose single-use link is where the invited user sets their own password."
+    />
+    <style>
+      :root{
+        --bg: #0e1416;
+        --surface: #141c1f;
+        --surface-2: #182124;
+        --border: #253034;
+        --text: #e6edee;
+        --muted: #8ea1a6;
+        --faint: #5d7378;
+        --accent: #5ed6a4;
+        --accent-dim: #2f6b54;
+        --warn: #e7b563;
+        --danger: #e07b6b;
+        --mono: ui-monospace, "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+        --sans: ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      }
+      *{ box-sizing: border-box; }
+      html{ scroll-behavior: smooth; }
+      body{
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-family: var(--sans);
+        line-height: 1.65;
+      }
+      a{ color: var(--accent); }
+      a:focus-visible{ outline: 2px solid var(--accent); outline-offset: 2px; }
+      code, kbd{
+        font-family: var(--mono);
+        font-size: 0.88em;
+        background: var(--surface-2);
+        border: 1px solid var(--border);
+        padding: 0.05em 0.4em;
+        border-radius: 4px;
+        white-space: nowrap;
+      }
+      pre{
+        font-family: var(--mono);
+        font-size: 0.82rem;
+        line-height: 1.6;
+        background: var(--surface-2);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 1rem 1.15rem;
+        overflow-x: auto;
+        margin: 0 0 1rem;
+      }
+      pre code{ background: none; border: none; padding: 0; white-space: pre; }
+
+      .shell{ max-width: 900px; margin: 0 auto; padding: 3.2rem 1.5rem 5rem; }
+
+      header.hero{ margin-bottom: 2.6rem; }
+      .eyebrow{
+        font-family: var(--mono);
+        font-size: 0.74rem;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--accent);
+        display: flex;
+        align-items: center;
+        gap: 0.6em;
+        margin-bottom: 0.6rem;
+      }
+      .eyebrow::before{
+        content: "";
+        width: 6px; height: 6px;
+        background: var(--accent);
+        border-radius: 50%;
+        box-shadow: 0 0 0 3px var(--accent-dim);
+      }
+      h1{
+        font-family: var(--mono);
+        font-size: clamp(1.6rem, 4vw, 2.2rem);
+        font-weight: 600;
+        letter-spacing: -0.01em;
+        margin: 0 0 0.8rem;
+        line-height: 1.25;
+      }
+      .lede{ color: var(--muted); font-size: 1.02rem; margin: 0; max-width: 68ch; }
+
+      h2{
+        font-family: var(--mono);
+        font-size: 1.08rem;
+        font-weight: 600;
+        margin: 3.2rem 0 1rem;
+        padding-bottom: 0.5rem;
+        border-bottom: 1px solid var(--border);
+        letter-spacing: -0.01em;
+      }
+      h2 .num{ color: var(--accent); margin-right: 0.55em; }
+      h3{
+        font-family: var(--mono);
+        font-size: 0.94rem;
+        font-weight: 600;
+        margin: 2rem 0 0.7rem;
+        color: var(--text);
+      }
+      p{ margin: 0 0 1rem; }
+      ul, ol{ margin: 0 0 1rem; padding-left: 1.3rem; }
+      li{ margin-bottom: 0.45rem; }
+      strong{ color: #f2f8f9; }
+
+      figure{ margin: 1.6rem 0 1.9rem; }
+      .diagram{
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 1.4rem 1.2rem 1rem;
+        overflow-x: auto;
+      }
+      .diagram svg{ display: block; width: 100%; height: auto; min-width: 620px; }
+      figcaption{
+        color: var(--faint);
+        font-size: 0.82rem;
+        margin-top: 0.7rem;
+        font-family: var(--mono);
+      }
+
+      /* shared SVG vocabulary (same as docs/report-server.es.html) */
+      .s-box{ fill: var(--surface-2); stroke: var(--border); stroke-width: 1.5; }
+      .s-box-accent{ fill: var(--surface-2); stroke: var(--accent); stroke-width: 1.5; }
+      .s-box-warn{ fill: var(--surface-2); stroke: var(--warn); stroke-width: 1.5; }
+      .s-box-danger{ fill: var(--surface-2); stroke: var(--danger); stroke-width: 1.5; }
+      .s-zone{ fill: none; stroke: var(--border); stroke-width: 1.5; stroke-dasharray: 5 4; }
+      .s-t{ font-family: var(--mono); font-size: 12px; fill: var(--text); }
+      .s-t-sm{ font-family: var(--mono); font-size: 10.5px; fill: var(--muted); }
+      .s-t-xs{ font-family: var(--mono); font-size: 9.5px; fill: var(--faint); }
+      .s-t-accent{ font-family: var(--mono); font-size: 10.5px; fill: var(--accent); }
+      .s-t-warn{ font-family: var(--mono); font-size: 10.5px; fill: var(--warn); }
+      .s-line{ stroke: var(--faint); stroke-width: 1.4; fill: none; }
+      .s-line-accent{ stroke: var(--accent); stroke-width: 1.6; fill: none; }
+      .s-line-dash{ stroke: var(--muted); stroke-width: 1.4; fill: none; stroke-dasharray: 4 3; }
+      .s-lifeline{ stroke: var(--border); stroke-width: 1.4; stroke-dasharray: 3 4; }
+
+      table{
+        width: 100%;
+        border-collapse: collapse;
+        margin: 0 0 1.4rem;
+        font-size: 0.9rem;
+      }
+      th, td{
+        text-align: left;
+        padding: 0.6rem 0.7rem;
+        border-bottom: 1px solid var(--border);
+        vertical-align: top;
+      }
+      th{
+        font-family: var(--mono);
+        font-size: 0.76rem;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: var(--faint);
+        font-weight: 600;
+      }
+      td code{ white-space: normal; }
+      .tbl-wrap{ overflow-x: auto; }
+
+      .callout{
+        border-left: 3px solid var(--accent);
+        background: var(--surface);
+        padding: 0.9rem 1.1rem;
+        border-radius: 0 8px 8px 0;
+        margin: 0 0 1.4rem;
+      }
+      .callout.warn{ border-left-color: var(--warn); }
+      .callout.danger{ border-left-color: var(--danger); }
+      .callout p:last-child{ margin-bottom: 0; }
+      .callout .tag{
+        display: block;
+        font-family: var(--mono);
+        font-size: 0.72rem;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--accent);
+        margin-bottom: 0.4rem;
+      }
+      .callout.warn .tag{ color: var(--warn); }
+      .callout.danger .tag{ color: var(--danger); }
+
+      .toc{
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 1.1rem 1.3rem;
+        margin-bottom: 1rem;
+      }
+      .toc ol{ margin: 0; padding-left: 1.2rem; }
+      .toc li{ margin-bottom: 0.25rem; font-size: 0.92rem; }
+      .toc a{ text-decoration: none; }
+      .toc a:hover{ text-decoration: underline; }
+
+      .files{ font-family: var(--mono); font-size: 0.84rem; }
+      .files .new{ color: var(--accent); }
+      .files .mod{ color: var(--warn); }
+
+      /* Text this revision changed in response to the §16 answers. */
+      .chg{ color: var(--warn); font-weight: 600; }
+      tr.added td{ background: rgba(94, 214, 164, 0.06); }
+
+      footer{
+        margin-top: 4rem;
+        padding-top: 1.4rem;
+        border-top: 1px solid var(--border);
+        color: var(--faint);
+        font-size: 0.84rem;
+        font-family: var(--mono);
+      }
+      @media (max-width: 640px){
+        .shell{ padding: 2.2rem 1.1rem 3.5rem; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <header class="hero">
+        <div class="eyebrow">Implementation plan · server auth</div>
+        <h1>Authentication for the report server</h1>
+        <p class="lede">
+          Put a login in front of <code>target-server</code>. JWT-based sessions,
+          a seeded default operator (<code>admin@admin.com</code>), a
+          <strong>Users</strong> section that creates and deletes accounts, emails
+          validated by a <strong>joi blueprint</strong>, an invitation email whose
+          single-use link is where the new user sets their own password, and a
+          login page with password recovery — on a server that is being deployed,
+          so the defaults are chosen for a public bind, not for
+          <code>127.0.0.1</code>.
+        </p>
+        <p class="lede">
+          <strong>Revised 2026-08-26</strong> against the answers to §<a href="#open">16</a>:
+          validation is <code>joi</code>, no password is ever emailed, mail goes
+          through a real relay, every user is an admin, and the server ships to a
+          deployment. Two runtime dependencies (<code>joi</code>,
+          <code>nodemailer</code>) — the first this repo has ever had, and §<a href="#open">16</a>
+          says what each one bought.
+        </p>
+      </header>
+
+      <div class="toc">
+        <ol>
+          <li><a href="#today">Where we are today</a></li>
+          <li><a href="#requirements">What is being asked</a></li>
+          <li><a href="#decisions">Design decisions (and why)</a></li>
+          <li><a href="#blueprint">The blueprint: one validation source of truth</a></li>
+          <li><a href="#data">Data model</a></li>
+          <li><a href="#tokens">JWT, cookies and revocation</a></li>
+          <li><a href="#api">API surface</a></li>
+          <li><a href="#guard">Guarding what already exists</a></li>
+          <li><a href="#mail">Sending mail: nodemailer, and a relay</a></li>
+          <li><a href="#ui">Dashboard: login, recovery, Users</a></li>
+          <li><a href="#config">Configuration</a></li>
+          <li><a href="#work">Work breakdown</a></li>
+          <li><a href="#tests">Test plan</a></li>
+          <li><a href="#security">Security notes</a></li>
+          <li><a href="#criterion">Acceptance criteria</a></li>
+          <li><a href="#open">Answers, and what they changed</a></li>
+          <li><a href="#deploy">Deployment checklist</a></li>
+        </ol>
+      </div>
+
+      <!-- 1 -->
+      <h2 id="today"><span class="num">1</span>Where we are today</h2>
+      <p>
+        <code>target-server</code> is a single Node ≥24 process
+        (<code>server.mjs</code>, ~250 lines) with <strong>no runtime
+        dependencies</strong>: <code>node:http</code>, <code>node:sqlite</code>
+        and friends. (This plan spends that budget for the first time — two
+        packages, justified one by one in §<a href="#decisions">3</a>.) <code>db.mjs</code> owns the schema and every query;
+        <code>ui/</code> is a React 19 + Vite SPA that builds to
+        <code>public/dist/</code> and is served as static files.
+      </p>
+      <ul>
+        <li>
+          <strong>Nothing is authenticated except ingest.</strong>
+          <code>TARGET_INGEST_TOKEN</code> — when set — guards
+          <code>POST /ingest</code> with a shared bearer token. Every
+          <code>GET /api/*</code> route (<code>stats</code>,
+          <code>instances</code>, <code>users</code>, <code>events</code>,
+          <code>workflows</code>, <code>workflows/:id</code>) is open to anyone
+          who can reach the port, as is the dashboard itself.
+        </li>
+        <li>
+          <strong><code>/api/users</code> already exists and is not about
+          people.</strong> It returns distinct <em>reporting instance display
+          names</em>. The new human accounts must not collide with it — see
+          §<a href="#api">7</a>.
+        </li>
+        <li>
+          <strong>Routing is a flat <code>if</code> chain</strong> in the
+          <code>createServer</code> callback, with <code>serveStatic</code> as the
+          fallback for any other <code>GET</code>. Unknown paths 404 — there is no
+          SPA fallback, which matters the moment we introduce
+          <code>/login</code> and <code>/reset</code> URLs.
+        </li>
+        <li>
+          <strong>The SPA has no router and no client state beyond filters.</strong>
+          <code>App.tsx</code> renders the whole dashboard unconditionally;
+          <code>hooks/useApi.ts</code> is a thin <code>fetch</code> + poll helper
+          that reports errors as strings and has no notion of a 401.
+        </li>
+        <li>
+          <strong>Schema evolution is <code>CREATE TABLE IF NOT EXISTS</code></strong>
+          inside <code>open()</code>. There is no migration framework, and for
+          additive tables we do not need one.
+        </li>
+        <li>
+          <strong>Tests</strong> (<code>test/*.test.mjs</code>) boot the real
+          server on an ephemeral port against a temp DB and hit the HTTP API
+          directly. Four files today: <code>ingest</code>, <code>notes</code>,
+          <code>pagination</code>, <code>usage</code>.
+        </li>
+      </ul>
+
+      <!-- 2 -->
+      <h2 id="requirements"><span class="num">2</span>What is being asked</h2>
+      <div class="tbl-wrap">
+        <table>
+          <thead>
+            <tr><th>#</th><th>Requirement</th><th>Where it lands</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>R1</td>
+              <td>JWT authentication for the server.</td>
+              <td>§<a href="#tokens">6</a>, <code>auth.mjs</code></td>
+            </tr>
+            <tr>
+              <td>R2</td>
+              <td>
+                Default user <code>admin@admin.com</code> /
+                <code>password-target-server</code>.
+              </td>
+              <td>§<a href="#data">5</a>, seeded in <code>open()</code></td>
+            </tr>
+            <tr>
+              <td>R3</td>
+              <td>A <strong>Users</strong> section to create and delete users.</td>
+              <td>§<a href="#ui">10</a>, <code>UsersPanel.tsx</code></td>
+            </tr>
+            <tr>
+              <td>R4</td>
+              <td>
+                Creation takes an email, validated <em>using the blueprint</em>
+                — now a <code>joi</code> schema. <span class="chg">The password is
+                no longer typed by the creator</span>: the invited user sets it
+                themselves (R5).
+              </td>
+              <td>§<a href="#blueprint">4</a>, <code>blueprint.mjs</code></td>
+            </tr>
+            <tr>
+              <td>R5</td>
+              <td>
+                On creation the system emails a welcome message carrying a
+                <span class="chg">single-use invitation link</span> — a URL with a
+                token where the user sets up their credentials for the first time.
+                No password travels by mail.
+              </td>
+              <td>§<a href="#mail">9</a>, <code>mailer.mjs</code></td>
+            </tr>
+            <tr>
+              <td>R6</td>
+              <td>A login page, with password recovery.</td>
+              <td>§<a href="#ui">10</a>, <code>LoginPage.tsx</code></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- 3 -->
+      <h2 id="decisions"><span class="num">3</span>Design decisions (and why)</h2>
+
+      <h3>D1 · Two dependencies, and no third</h3>
+      <p>
+        The zero-dependency posture is documented in the README, in
+        <code>package.json</code> and in the CI workflow's comments, and this plan
+        breaks it — deliberately, twice. The rule it replaces: <em>a dependency is
+        worth it when it owns a protocol or a spec we would otherwise re-implement
+        badly, and not when it owns code we can read in one sitting.</em>
+      </p>
+      <div class="tbl-wrap">
+        <table>
+          <thead><tr><th>Package</th><th>Version</th><th>Why it earns its place</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><code>joi</code></td>
+              <td><code>^18.2.5</code></td>
+              <td><strong>Asked for by name.</strong> It owns the validation
+                vocabulary (§<a href="#blueprint">4</a>), including
+                <code>string().email()</code> with real TLD data — the one rule
+                nobody should hand-roll. Server-side only; see D8.</td>
+            </tr>
+            <tr>
+              <td><code>nodemailer</code></td>
+              <td><code>^9.0.5</code></td>
+              <td><strong>Owns SMTP.</strong> The previous draft hand-rolled
+                <code>EHLO</code>/<code>STARTTLS</code>/<code>AUTH</code>/
+                <code>quoted-printable</code> over <code>node:net</code>. On a
+                deployed server the invitation mail is the <em>only</em> path to
+                an account (D7), so that protocol code moved from "clever" to
+                "single point of failure". Nodemailer has zero runtime
+                dependencies of its own — the tree stays two packages deep, total.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        <strong>Still hand-rolled: the JWT.</strong> Now that the rule is a budget
+        rather than a ban, <code>jsonwebtoken</code> deserves re-asking — and the
+        answer does not change. A JWT is three base64url segments and one
+        <code>HMAC-SHA256</code>; <code>node:crypto</code> gives us that in ~40
+        lines with <code>timingSafeEqual</code>. What the library really sells is
+        breadth of algorithms (RS/ES/PS) we will never use, and its historical CVEs
+        are precisely the <code>alg</code>-confusion class that D3's literal
+        <code>"HS256"</code> check closes in one line. It owns nothing we cannot
+        read.
+      </p>
+
+      <h3>D2 · <code>scrypt</code> for password hashing</h3>
+      <p>
+        <code>crypto.scrypt</code> is a memory-hard KDF in the standard library —
+        no bcrypt/argon2 native build. Store
+        <code>scrypt$N$r$p$&lt;salt-b64&gt;$&lt;hash-b64&gt;</code> so the
+        parameters travel with the hash and can be raised later without breaking
+        existing rows. Verify with <code>timingSafeEqual</code>.
+      </p>
+
+      <h3>D3 · The token lives in an <code>httpOnly</code> cookie, and the header still works</h3>
+      <p>
+        The dashboard is same-origin with the API, so a cookie is the simplest
+        transport <em>and</em> the one that survives XSS better than
+        <code>localStorage</code>. Set
+        <code>HttpOnly; SameSite=Strict; Path=/; Max-Age=…</code> (plus
+        <code>Secure</code> when <code>TARGET_AUTH_SECURE_COOKIE=1</code>, since
+        the default bind is plain HTTP on <code>127.0.0.1</code>). The middleware
+        <em>also</em> accepts <code>Authorization: Bearer &lt;jwt&gt;</code>, so
+        <code>curl</code> and scripts are not locked out.
+      </p>
+
+      <h3>D4 · One short-lived access token + a <code>token_version</code>, not a refresh-token table</h3>
+      <p>
+        A refresh-token table is the textbook answer, but this is a
+        single-operator monitoring tool and the real requirement behind it is
+        "deleting a user must actually log them out". A
+        <code>token_version</code> integer on the user row does that in one
+        comparison: the claim carries <code>tv</code>, the guard rejects any token
+        whose <code>tv</code> no longer matches. Deleting a user, changing a
+        password or resetting one all bump it. Token TTL: <strong>8 hours</strong>
+        (an operator's working day), re-issued on any authenticated request older
+        than half its life so an active session slides forward.
+      </p>
+
+      <h3>D5 · Ingest keeps its own auth — the fleet must not break</h3>
+      <p>
+        <code>POST /ingest</code> is machine-to-machine and already has
+        <code>TARGET_INGEST_TOKEN</code>. It stays exactly as it is. Reporting
+        instances in the field must not need a JWT, and a deploy of this feature
+        must not drop a single batch.
+      </p>
+
+      <h3>D6 · The dashboard bundle stays public; the data does not</h3>
+      <p>
+        <code>public/dist/*</code> is served unauthenticated — it has to be, or
+        there is nothing to render the login page with. The bundle contains no
+        secrets. Everything under <code>/api/</code> except
+        <code>/api/auth/*</code> requires a session.
+      </p>
+
+      <h3>D7 · An invitation link, not a mailed password <span class="chg">(new)</span></h3>
+      <p>
+        Creating a user no longer asks the creator to invent a password. The
+        account is stored with <strong>no usable password hash</strong> and one
+        single-use invitation token; the email carries
+        <code>/setup?token=…</code>, and the user's first password is the one they
+        choose there. This removes the credential-in-a-mailbox problem the
+        previous draft could only mitigate, and it deletes a whole state — there is
+        no <code>must_change_pw</code> modal to build, because a user who has not
+        completed setup has no password to change.
+      </p>
+      <p>
+        The cost is that <strong>mail is now on the provisioning critical
+        path</strong>: an undelivered invitation is an account nobody can enter.
+        Three things pay for it — the create response returns the invitation URL so
+        the Users panel can offer <em>Copy link</em> for out-of-band delivery, a
+        <em>Resend</em> action re-issues it, and the server refuses to boot with a
+        non-delivering transport when it is publicly bound (§<a href="#deploy">17</a>).
+      </p>
+
+      <h3>D8 · The blueprint runs on the server only <span class="chg">(new)</span></h3>
+      <p>
+        The previous draft shared <code>blueprint.mjs</code> with the browser
+        through a Vite alias so "the form and the endpoint can never disagree".
+        With joi as the engine that trade turns bad: joi's browser build is
+        <strong>178 KB minified / ~53 KB gzipped</strong>, against a current
+        dashboard bundle of 232 KB / 73.5 KB — a <strong>+72% gzipped payload</strong>
+        to check an <code>@</code> and a string length.
+      </p>
+      <p>
+        Worse, it would not even buy the guarantee. Two copies of a rule agree only
+        while the bundle is fresh, and <em>this repo has just shipped a fix for
+        exactly that failure</em> — a device serving a stale <code>public/dist</code>
+        against a newer API. The way to make the form and the endpoint agree is to
+        have <strong>one implementation</strong>, on the side that enforces it: the
+        form posts, the endpoint answers <code>422 { errors: [{ field, code,
+        message }] }</code>, and the form renders those errors under the right
+        inputs. The client keeps only what costs nothing and cannot drift —
+        <code>required</code>, <code>type="email"</code>,
+        <code>minlength="12"</code> — for instant feedback before the round trip.
+      </p>
+      <p>
+        If a future form is complex enough to want the real schema in the browser,
+        joi's ESM browser build can be <code>await import()</code>-ed inside that
+        one component, so the dashboard pays for it only on the page that uses it.
+        Nothing in this plan needs that.
+      </p>
+
+      <!-- 4 -->
+      <h2 id="blueprint"><span class="num">4</span>The blueprint: one validation source of truth</h2>
+      <div class="callout">
+        <span class="tag">Answered — Q1</span>
+        <p>
+          <strong>"Blueprint" is <code>joi</code>.</strong> The previous draft
+          guessed at declarative-validation-in-general and hand-rolled the
+          combinators; that guess is now gone. <code>blueprint.mjs</code> keeps its
+          name, its place and its public contract — only the engine underneath is
+          joi instead of forty lines of our own.
+        </p>
+      </div>
+      <p>
+        <code>blueprint.mjs</code> (repo root, ESM) declares one named joi schema
+        per request shape and exports a single <code>validate()</code>. It is the
+        <strong>single source of truth</strong> for validation, imported by
+        <code>server.mjs</code> and by nothing else — the browser does not run it
+        (D8), it renders the errors it comes back with.
+      </p>
+      <pre><code>// blueprint.mjs
+import Joi from "joi";
+
+const EMAIL = Joi.string().trim().lowercase().max(254)
+  .email({ minDomainSegments: 2, tlds: { allow: true } })   // real TLD list, not a regex
+  .required();
+
+const PASSWORD = Joi.string().min(12).max(200).required();  // length only, no composition theatre
+const TOKEN    = Joi.string().hex().length(64).required();  // sha256-sized invite/reset token
+
+export const BLUEPRINTS = {
+  "user.create":  Joi.object({ email: EMAIL }),                    // no password: the invite sets it (D7)
+  "auth.login":   Joi.object({ email: EMAIL, password: Joi.string().required() }),
+  "auth.forgot":  Joi.object({ email: EMAIL }),
+  "auth.setup":   Joi.object({ token: TOKEN, password: PASSWORD }), // invitation → first password
+  "auth.reset":   Joi.object({ token: TOKEN, password: PASSWORD }), // recovery → new password
+};
+
+const OPTS = { abortEarly: false, stripUnknown: true, convert: true };
+
+/** → { ok: true, value } | { ok: false, errors: [{ field, code, message }] } */
+export function validate(name, input) {
+  const { value, error } = BLUEPRINTS[name].validate(input ?? {}, OPTS);
+  if (!error) return { ok: true, value };
+  return { ok: false, errors: error.details.map(toFieldError) };
+}</code></pre>
+      <ul>
+        <li>
+          <strong>The error shape is ours, not joi's.</strong>
+          <code>toFieldError</code> maps each <code>detail</code> to
+          <code>{ field: d.path.join("."), code: d.type, message }</code> — so the
+          wire contract stays <code>{ field, code, message }</code> exactly as the
+          previous draft promised, the UI never learns what joi is, and swapping the
+          engine again would not touch a single component. <code>d.type</code> gives
+          stable codes (<code>string.email</code>, <code>string.min</code>,
+          <code>any.required</code>); <code>message</code> comes from a small
+          <code>messages()</code> override so users read "Enter a valid email
+          address", not <code>"email" must be a valid email</code>.
+        </li>
+        <li>
+          <strong>Normalisation is part of validation.</strong>
+          <code>.trim().lowercase()</code> with <code>convert: true</code> means
+          <code>validate()</code> returns the <em>cleaned</em> value, and
+          <em>that</em> is what gets stored and compared — so
+          <code>ADMIN@Admin.com </code> and <code>admin@admin.com</code> are one
+          account, not two. Every call site uses the returned
+          <code>value</code>, never the raw body; that is the rule reviewers should
+          check.
+        </li>
+        <li>
+          <strong>Email:</strong> joi's <code>.email()</code> with
+          <code>tlds: { allow: true }</code> validates against the real IANA TLD
+          list shipped in <code>@hapi/tlds</code> — the single strongest argument
+          for the dependency, since it is the one rule a hand-written regex always
+          gets wrong. <code>minDomainSegments: 2</code> rejects
+          <code>user@localhost</code>. Unicode addresses are accepted and stored as
+          given; deliverability is still proven by the invitation email, not by a
+          parser.
+        </li>
+        <li>
+          <strong><code>stripUnknown: true</code> is a security control</strong>,
+          not tidiness: a client cannot smuggle <code>role</code>,
+          <code>token_version</code> or <code>id</code> into a create body, because
+          fields the schema does not declare never reach the query.
+        </li>
+        <li>
+          <strong>Uniqueness is not a blueprint rule</strong> — it needs the DB.
+          It is checked right after and surfaced in the same
+          <code>{ field: "email", code: "email_taken" }</code> shape, so the form
+          renders a joi error and a database error through one code path.
+        </li>
+        <li>
+          <strong>No UI alias, no <code>blueprint.d.ts</code>.</strong> Both existed
+          only to share the module with the browser; D8 drops that, which also
+          drops the <code>server.fs.allow: ['..']</code> hole in the dev server and
+          the hand-written type file that would have had to track the schema by
+          hand. <code>ui/vite.config.ts</code> is no longer touched by this plan.
+        </li>
+      </ul>
+
+      <!-- 5 -->
+      <h2 id="data"><span class="num">5</span>Data model</h2>
+      <p>
+        Two new tables in <code>db.mjs</code>'s <code>open()</code>, additive,
+        <code>CREATE TABLE IF NOT EXISTS</code> like everything else — an existing
+        <code>target-server.db</code> upgrades in place with no migration step.
+      </p>
+      <pre><code>CREATE TABLE IF NOT EXISTS auth_users (
+  id             TEXT PRIMARY KEY,          -- uuid
+  email          TEXT NOT NULL UNIQUE,      -- normalised by the blueprint
+  password_hash  TEXT,                      -- NULL until the invite is completed (D7)
+  role           TEXT NOT NULL DEFAULT 'admin',
+  token_version  INTEGER NOT NULL DEFAULT 1,
+  created_at     TEXT NOT NULL,
+  created_by     TEXT,                      -- auth_users.id of the creator
+  invited_at     TEXT,                      -- last invitation sent
+  activated_at   TEXT,                      -- when they set their own password
+  last_login_at  TEXT
+);
+CREATE TABLE IF NOT EXISTS auth_resets (
+  token_hash  TEXT PRIMARY KEY,             -- sha256 of the emailed token
+  user_id     TEXT NOT NULL,
+  kind        TEXT NOT NULL DEFAULT 'reset',-- 'invite' | 'reset'
+  created_at  TEXT NOT NULL,
+  expires_at  TEXT NOT NULL,
+  used_at     TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_resets_user ON auth_resets(user_id);
+CREATE TABLE IF NOT EXISTS auth_meta (      -- singleton: the signing secret
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  jwt_secret TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);</code></pre>
+      <ul>
+        <li>
+          <strong>Seeding (R2):</strong> at the end of <code>open()</code>, if
+          <code>auth_users</code> is empty, insert
+          <code>admin@admin.com</code> with
+          <code>password-target-server</code> hashed, and log a loud warning that
+          the default credentials are active. Seeding only on an <em>empty</em>
+          table means deleting the admin on purpose does not resurrect it on the
+          next restart — but see §<a href="#api">7</a>: you cannot delete the last
+          user. <span class="chg">Because the server is being deployed</span>,
+          <code>TARGET_SEED_ADMIN_PASSWORD</code> overrides the default, and the
+          boot warning escalates to a refusal when the published default is still
+          in place on a non-loopback bind (§<a href="#deploy">17</a>). This is the
+          one account that can hold a password it did not choose, so it is the one
+          account that still gets nagged to change it.
+        </li>
+        <li>
+          <strong>Tokens are stored hashed.</strong> The 32 random bytes go in the
+          email; only their SHA-256 goes in the DB, so a database read does not
+          hand over live links. Single use (<code>used_at</code>), 1 hour TTL for
+          recovery, 7 days for an invitation (people read mail late). Expired rows
+          are swept opportunistically. Issuing a new token of a kind invalidates
+          that user's outstanding ones of the same kind, so <em>Resend</em> cannot
+          leave two live invitations behind.
+        </li>
+        <li>
+          <strong><code>password_hash IS NULL</code> is the invited-but-not-yet-set
+          state <span class="chg">(new)</span>.</strong> It is the only state
+          change D7 introduces, and it is load-bearing in three places: login
+          refuses it (and says "finish setting up your account", since there is
+          nothing to compare against), the Users panel renders it as a
+          <em>Pending</em> badge with <em>Copy link</em> / <em>Resend</em>, and
+          <code>auth.setup</code> is the one endpoint allowed to fill it. A user in
+          this state still counts for the last-user guard — deleting the only
+          activated admin because a pending invitation exists would lock the
+          instance out.
+        </li>
+        <li>
+          <strong><code>must_change_pw</code> is gone.</strong> It existed to
+          chase a mailed password out of a mailbox. No password is mailed, so there
+          is nothing to chase, and the first-login modal it drove is cut from
+          §<a href="#ui">10</a>. The seeded admin is the exception, handled below.
+        </li>
+        <li>
+          <strong>The signing secret</strong> comes from
+          <code>TARGET_AUTH_SECRET</code> when set. Otherwise one is generated
+          (<code>randomBytes(32)</code>) and persisted in <code>auth_meta</code>,
+          so a restart does not silently log everyone out — with a log line saying
+          where it came from.
+        </li>
+      </ul>
+
+      <!-- 6 -->
+      <h2 id="tokens"><span class="num">6</span>JWT, cookies and revocation</h2>
+      <figure>
+        <div class="diagram">
+          <svg viewBox="0 0 760 300" role="img" aria-label="Login exchanges credentials for a JWT cookie; guarded API calls verify signature, expiry and token version.">
+            <text class="s-label" x="10" y="16">BROWSER</text>
+            <text class="s-label" x="300" y="16">SERVER.MJS</text>
+            <text class="s-label" x="600" y="16">SQLITE</text>
+            <line class="s-lifeline" x1="90"  y1="26" x2="90"  y2="290" />
+            <line class="s-lifeline" x1="380" y1="26" x2="380" y2="290" />
+            <line class="s-lifeline" x1="660" y1="26" x2="660" y2="290" />
+
+            <rect class="s-box-accent" x="20" y="34" width="140" height="26" rx="6" />
+            <text class="s-t" x="34" y="52">Login form</text>
+            <rect class="s-box" x="300" y="34" width="160" height="26" rx="6" />
+            <text class="s-t" x="314" y="52">POST /api/auth/login</text>
+            <rect class="s-box" x="600" y="34" width="120" height="26" rx="6" />
+            <text class="s-t" x="614" y="52">auth_users</text>
+
+            <path class="s-line-accent" d="M90 86 H372" marker-end="url(#ah)" />
+            <text class="s-t-sm" x="120" y="80">{ email, password } · blueprint "auth.login"</text>
+
+            <path class="s-line" d="M380 122 H652" marker-end="url(#ah)" />
+            <text class="s-t-sm" x="404" y="116">lookup by normalised email → scrypt verify</text>
+
+            <path class="s-line-dash" d="M660 152 H388" marker-end="url(#ah)" />
+            <text class="s-t-sm" x="404" y="146">row + token_version</text>
+
+            <path class="s-line-accent" d="M372 188 H98" marker-end="url(#ah)" />
+            <text class="s-t-sm" x="112" y="182">Set-Cookie: target_auth=&lt;jwt&gt;; HttpOnly; SameSite=Strict</text>
+
+            <rect class="s-box-warn" x="252" y="212" width="256" height="58" rx="8" />
+            <text class="s-t-warn" x="266" y="232">guard(req) on every /api/*</text>
+            <text class="s-t-xs" x="266" y="248">signature · exp · tv === user.token_version</text>
+            <text class="s-t-xs" x="266" y="262">fail → 401 { error: "unauthorized" }</text>
+
+            <defs>
+              <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+                <path d="M0 0 L10 5 L0 10 z" fill="#8ea1a6" />
+              </marker>
+            </defs>
+          </svg>
+        </div>
+        <figcaption>Login → cookie → guarded request. No session table on the hot path.</figcaption>
+      </figure>
+      <p><code>auth.mjs</code> (new, zero-dep) owns the whole mechanism:</p>
+      <pre><code>signJwt(payload)            // { alg: "HS256", typ: "JWT" } + HMAC, base64url
+verifyJwt(token)            // → payload | null  (timingSafeEqual, exp checked)
+hashPassword(plain)         // scrypt$N$r$p$salt$hash
+verifyPassword(plain, hash)
+readToken(req)              // Cookie: target_auth=… | Authorization: Bearer …
+authenticate(req)           // → user row | null   (verifies tv against the DB)
+requireAuth(req, res)       // → user | writes 401 and returns null
+setAuthCookie(res, jwt) / clearAuthCookie(res)</code></pre>
+      <p>
+        Claims: <code>{ sub, email, role, tv, iat, exp }</code>. Nothing secret,
+        nothing large. <code>alg</code> is checked against the literal
+        <code>"HS256"</code> before verification — the <code>alg: none</code>
+        confusion attack is a two-line mistake to make and a one-line check to
+        prevent.
+      </p>
+
+      <!-- 7 -->
+      <h2 id="api"><span class="num">7</span>API surface</h2>
+      <div class="callout">
+        <span class="tag">Naming</span>
+        <p>
+          <code>GET /api/users</code> already means "distinct reporting instance
+          display names" and the dashboard's filter bar depends on it. Human
+          accounts therefore live under <code>/api/auth/users</code>, and the old
+          route keeps its meaning and its shape. No breaking change for the SPA
+          or for anyone scripting against it.
+        </p>
+      </div>
+      <div class="tbl-wrap">
+        <table>
+          <thead>
+            <tr><th>Route</th><th>Auth</th><th>Body / params</th><th>Returns</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>POST /api/auth/login</code></td>
+              <td>public</td>
+              <td>blueprint <code>auth.login</code></td>
+              <td>
+                200 <code>{ user }</code> + <code>Set-Cookie</code>; 401
+                <code>{ error: "invalid_credentials" }</code> — identical for
+                unknown email, wrong password and an account whose invitation is
+                still pending (<code>password_hash IS NULL</code>; there is nothing
+                to verify, and saying so would be an enumeration oracle)
+              </td>
+            </tr>
+            <tr>
+              <td><code>POST /api/auth/logout</code></td>
+              <td>session</td>
+              <td>—</td>
+              <td>204 + cookie cleared</td>
+            </tr>
+            <tr>
+              <td><code>GET /api/auth/me</code></td>
+              <td>session</td>
+              <td>—</td>
+              <td>
+                200 <code>{ user }</code> / 401. This is the SPA's boot probe:
+                its answer decides login page vs dashboard
+              </td>
+            </tr>
+            <tr>
+              <td><code>POST /api/auth/forgot-password</code></td>
+              <td>public</td>
+              <td>blueprint <code>auth.forgot</code></td>
+              <td>
+                <strong>Always</strong> 202 <code>{ ok: true }</code> — an
+                honest 404 here is an account-enumeration oracle. Mail is sent
+                only if the account exists
+              </td>
+            </tr>
+            <tr class="added">
+              <td><code>POST /api/auth/setup</code> <span class="chg">(new)</span></td>
+              <td>token</td>
+              <td>blueprint <code>auth.setup</code></td>
+              <td>
+                The invitation link's endpoint (D7): sets the <em>first</em>
+                password on an account whose <code>password_hash</code> is
+                <code>NULL</code>, stamps <code>activated_at</code>, consumes the
+                token, and signs the user in. 400
+                <code>{ error: "invalid_or_expired" }</code>; 409
+                <code>already_activated</code> if the account already has a
+                password — that user wants recovery, not setup, and the response
+                says so
+              </td>
+            </tr>
+            <tr>
+              <td><code>POST /api/auth/reset-password</code></td>
+              <td>token</td>
+              <td>blueprint <code>auth.reset</code></td>
+              <td>
+                200 + auto-login; 400 <code>{ error: "invalid_or_expired" }</code>.
+                Consumes the token, bumps <code>token_version</code>
+              </td>
+            </tr>
+            <tr>
+              <td><code>GET /api/auth/users</code></td>
+              <td>session</td>
+              <td>—</td>
+              <td>
+                <code>{ users: [{ id, email, role, createdAt, lastLoginAt }] }</code>
+                — never the hash
+              </td>
+            </tr>
+            <tr>
+              <td><code>POST /api/auth/users</code></td>
+              <td>session</td>
+              <td>blueprint <code>user.create</code> — <span class="chg">email only</span></td>
+              <td>
+                201 <code>{ user, invite: { url, expiresAt }, mail: { sent, transport } }</code>;
+                409 <code>email_taken</code>; 422 with the blueprint's
+                <code>errors[]</code>. <strong><code>invite.url</code> is returned
+                to the creating admin on purpose</strong> — it is the out-of-band
+                escape hatch for undelivered mail (D7), and it is safe here because
+                the caller is an authenticated admin who could invite the address
+                again anyway. It is returned <em>only</em> in this response and
+                never in <code>GET</code> listings
+              </td>
+            </tr>
+            <tr class="added">
+              <td><code>POST /api/auth/users/:id/invite</code> <span class="chg">(new)</span></td>
+              <td>session</td>
+              <td>—</td>
+              <td>
+                200 <code>{ invite: { url, expiresAt }, mail: { sent, transport } }</code>.
+                Re-issues the invitation, invalidating the previous one. 409
+                <code>already_activated</code> for a user who has a password —
+                they use recovery instead
+              </td>
+            </tr>
+            <tr>
+              <td><code>DELETE /api/auth/users/:id</code></td>
+              <td>session</td>
+              <td>—</td>
+              <td>
+                204; 409 <code>last_user</code> (never lock the instance out);
+                409 <code>self_delete</code>. Bumps <code>token_version</code> and
+                drops pending resets, so the deleted user's cookie dies on their
+                next request
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        Two shared concerns implemented once, in <code>server.mjs</code>: a
+        <strong>JSON body reader for <code>POST</code></strong> (reuse the
+        existing <code>readBody</code> + a small <code>readJson</code> wrapper
+        with the same 5 MB cap) and a <strong>rate limiter</strong> — an in-memory
+        <code>Map</code> keyed by IP+route, 10 attempts / 15 min on
+        <code>login</code>, <code>forgot-password</code>,
+        <code>reset-password</code> and <code>setup</code>, answering 429 with
+        <code>Retry-After</code>. In-memory is honest for a single-process
+        server; it resets on restart and that is acceptable here.
+        <span class="chg">Deployed</span>, the client IP comes from the last hop of
+        <code>X-Forwarded-For</code> and only when
+        <code>TARGET_TRUST_PROXY=1</code> — trusting that header unconditionally
+        would let anyone reset their own bucket by forging it
+        (§<a href="#deploy">17</a>).
+      </p>
+
+      <!-- 8 -->
+      <h2 id="guard"><span class="num">8</span>Guarding what already exists</h2>
+      <p>
+        One insertion point in the <code>createServer</code> callback, placed
+        after the <code>/ingest</code>, <code>/health</code> and
+        <code>/api/auth/*</code> branches and before the data routes:
+      </p>
+      <pre><code>// Public: /ingest (machine token), /health, /api/auth/*, and the static bundle.
+// Everything else under /api/ needs a human session.
+if (pathname.startsWith("/api/") && !requireAuth(req, res)) return;</code></pre>
+      <ul>
+        <li>
+          <code>/health</code> stays public — liveness probes and uptime checks
+          depend on it and it leaks nothing.
+        </li>
+        <li>
+          <code>/ingest</code> is untouched (D5).
+        </li>
+        <li>
+          <strong>SPA fallback:</strong> <code>serveStatic</code> gains one rule —
+          a <code>GET</code> that is not under <code>/assets/</code>, has no file
+          extension and does not resolve to a real file serves
+          <code>index.html</code> instead of 404. Without it,
+          <code>/login</code> and the emailed <code>/setup?token=…</code> and
+          <code>/reset?token=…</code> links all break on refresh — and for an
+          invited user that link is their <em>first</em> contact with the server,
+          so a 404 there is the whole feature failing at the front door.
+        </li>
+        <li>
+          The "dashboard not built" 503 page keeps working, and gets one extra
+          line telling the operator the API is guarded now. <span class="chg">So
+          does the "dashboard out of date" page</span> added by the stale-bundle
+          fix — both are served before the guard, because an operator who cannot
+          log in needs to be told why, and neither page reveals anything.
+        </li>
+      </ul>
+
+      <!-- 9 -->
+      <h2 id="mail"><span class="num">9</span>Sending mail: nodemailer, and a relay</h2>
+      <div class="callout">
+        <span class="tag">Answered — Q3, "you should decide"</span>
+        <p>
+          <strong>The decision: keep one SMTP config knob, stop writing the SMTP
+          client.</strong> <code>mailer.mjs</code> becomes a ~60-line wrapper over
+          <code>nodemailer</code> instead of ~200 lines of hand-rolled
+          <code>EHLO</code>/<code>STARTTLS</code>/<code>AUTH</code>/
+          <code>quoted-printable</code> over <code>node:net</code>. Two answers
+          forced this together: mail is now the <em>only</em> way into an account
+          (Q2 → D7) and the server is going to be deployed (Q5), so
+          "our SMTP client mis-parses one relay's multiline greeting" stops being a
+          bug and starts being an outage nobody can log in through.
+        </p>
+        <p>
+          <strong>Relay: any provider that speaks SMTP</strong> — the config stays
+          a single <code>TARGET_SMTP_URL</code>, so Resend, SES, Postmark, Mailgun
+          and a corporate relay are all the same one-line change and none of them
+          is baked into the code. If you want a default recommendation for this
+          deployment: a transactional provider on your own domain with SPF and
+          DKIM published, because an invitation that lands in spam is an account
+          that never gets used. Sending from <code>@gmail.com</code> through a
+          consumer account is the one option to avoid.
+        </p>
+      </div>
+      <p>
+        The transport table is unchanged in shape — the file and noop transports
+        are what keep tests and CI working without a mail server — but the choice
+        is now enforced at boot rather than merely defaulted:
+      </p>
+      <div class="tbl-wrap">
+        <table>
+          <thead><tr><th>Transport</th><th>When</th><th>Behaviour</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><code>smtp</code></td>
+              <td><code>TARGET_SMTP_URL</code> is set</td>
+              <td>Real delivery through <code>nodemailer.createTransport(url)</code>.
+                <code>smtp://user:pass@host:587</code> (STARTTLS) or
+                <code>smtps://…:465</code> (implicit TLS). <span class="chg">Required
+                when the bind is not loopback</span> — see below. Verified once at
+                boot with <code>transport.verify()</code>, which turns a wrong
+                password into a startup error instead of a silently undelivered
+                invitation an hour later</td>
+            </tr>
+            <tr>
+              <td><code>file</code></td>
+              <td>default</td>
+              <td>
+                Writes <code>.eml</code> files to
+                <code>./.mail-outbox/</code> (gitignored) and logs the path.
+                Development and CI work end-to-end with no mail server, and the
+                tests assert against those files
+              </td>
+            </tr>
+            <tr>
+              <td><code>noop</code></td>
+              <td><code>TARGET_MAIL_TRANSPORT=noop</code></td>
+              <td>Drops the message, logs one line</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout warn">
+        <span class="tag">Boot guard — the cost of D7</span>
+        <p>
+          Starting with the <code>file</code> or <code>noop</code> transport while
+          <code>HOST</code> is not a loopback address is <strong>refused</strong>:
+          every invitation would be written to a directory on the server and read
+          by nobody, and since no password is mailed, no invited user could ever
+          log in. The error names the fix (<code>TARGET_SMTP_URL</code>) and
+          <code>TARGET_ALLOW_FILE_MAIL=1</code> overrides it for anyone who
+          genuinely wants that. Locally — the default
+          <code>127.0.0.1</code> bind — nothing changes: the file transport stays
+          the default and CI never needs a mail server.
+        </p>
+      </div>
+      <p>
+        <strong>Mail must never fail user creation.</strong> Sending happens after
+        the row is committed; a transport error is caught, logged, and reported as
+        <code>{ mail: { sent: false, error } }</code> so the Users panel can show
+        "user created — invitation email failed" next to the
+        <em>Copy link</em> and <em>Resend</em> actions, rather than a half-done
+        operation the operator cannot interpret. With D7 that fallback is no longer
+        a nicety: the returned <code>invite.url</code> is what an admin hands over
+        by any other channel while the relay is being fixed.
+      </p>
+      <h3>The invitation email (R5, <span class="chg">revised</span>)</h3>
+      <p>
+        Plain-text plus a minimal HTML part. <strong>No credential appears in
+        it</strong> — the link is the credential, and it expires:
+      </p>
+      <pre><code>Subject: Your Target report server account
+
+You have been given an account on the Target report server.
+
+  Server:  https://target.example.com/
+  Email:   someone@example.com
+
+Choose your password to finish setting up the account
+(link valid 7 days, single use):
+
+  https://target.example.com/setup?token=…
+
+If the link has expired, ask whoever invited you to send a new one.
+If you were not expecting this, ignore this email — the account
+cannot be used until someone opens the link.</code></pre>
+      <div class="callout">
+        <span class="tag">Answered — Q2, and the risk it retires</span>
+        <p>
+          The previous draft mailed the password because R5 said so, and flagged
+          that this leaves a live credential sitting in at least two mailboxes
+          forever. <strong>The answer chose the invite link</strong>, so that
+          paragraph is now a paragraph about a risk we no longer take. What the
+          change actually removes: a plaintext password in mail archives and
+          backups, a password chosen by someone other than its owner, the
+          <code>must_change_pw</code> column, and the first-login modal that
+          enforced it.
+        </p>
+        <p>
+          What it adds is one failure mode, stated plainly: <strong>an account is
+          unusable until its invitation is opened</strong>. That is why
+          <code>invite.url</code> comes back to the admin, why <em>Resend</em>
+          exists, and why the boot guard above refuses a non-delivering transport
+          on a public bind. The recovery email is unchanged in shape — same
+          template family, 1 hour TTL, <code>/reset</code> instead of
+          <code>/setup</code>.
+        </p>
+      </div>
+      <p>
+        The link's origin comes from <code>TARGET_PUBLIC_URL</code> (default
+        <code>http://HOST:PORT</code>) — never from the request's
+        <code>Host</code> header, which an attacker controls and could use to
+        redirect setup and reset links to their own domain.
+        <span class="chg">Deployed, it stops being optional</span>: behind a proxy
+        the default resolves to the internal bind
+        (<code>http://0.0.0.0:8900/</code>), producing invitations nobody outside
+        the host can open. The boot guard in §<a href="#deploy">17</a> requires it
+        for a non-loopback bind for exactly that reason.
+      </p>
+
+      <!-- 10 -->
+      <h2 id="ui"><span class="num">10</span>Dashboard: login, recovery, Users</h2>
+      <figure>
+        <div class="diagram">
+          <svg viewBox="0 0 760 218" role="img" aria-label="App boot probes /api/auth/me and renders login, the token password form, or the dashboard.">
+            <rect class="s-box-accent" x="20" y="80" width="130" height="46" rx="8" />
+            <text class="s-t" x="34" y="100">main.tsx</text>
+            <text class="s-t-xs" x="34" y="116">GET /api/auth/me</text>
+
+            <path class="s-line" d="M150 103 H210" marker-end="url(#ah2)" />
+
+            <rect class="s-box" x="212" y="76" width="120" height="54" rx="8" />
+            <text class="s-t" x="226" y="98">AuthGate</text>
+            <text class="s-t-xs" x="226" y="114">401 · 200 · token?</text>
+
+            <path class="s-line" d="M332 90 H418" marker-end="url(#ah2)" />
+            <text class="s-t-xs" x="346" y="84">401</text>
+            <rect class="s-box-warn" x="420" y="18" width="150" height="46" rx="8" />
+            <text class="s-t" x="434" y="38">LoginPage</text>
+            <text class="s-t-xs" x="434" y="54">+ Forgot password</text>
+
+            <path class="s-line" d="M332 103 H418" marker-end="url(#ah2)" />
+            <text class="s-t-xs" x="336" y="122">/setup · /reset ?token=</text>
+            <rect class="s-box-warn" x="420" y="86" width="150" height="46" rx="8" />
+            <text class="s-t" x="434" y="106">TokenPasswordForm</text>
+            <text class="s-t-xs" x="434" y="122">token → password</text>
+
+            <path class="s-line-accent" d="M332 118 H418" marker-end="url(#ah2)" />
+            <text class="s-t-xs" x="348" y="160">200</text>
+            <rect class="s-box-accent" x="420" y="152" width="150" height="46" rx="8" />
+            <text class="s-t" x="434" y="172">App (dashboard)</text>
+            <text class="s-t-xs" x="434" y="188">+ Users panel</text>
+
+            <rect class="s-box" x="600" y="152" width="140" height="46" rx="8" />
+            <text class="s-t" x="614" y="172">topbar</text>
+            <text class="s-t-xs" x="614" y="188">email · Sign out</text>
+            <path class="s-line" d="M570 175 H592" marker-end="url(#ah2)" />
+
+            <defs>
+              <marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+                <path d="M0 0 L10 5 L0 10 z" fill="#8ea1a6" />
+              </marker>
+            </defs>
+          </svg>
+        </div>
+        <figcaption>One probe at boot decides the whole tree. No router library.</figcaption>
+      </figure>
+      <ul>
+        <li>
+          <strong><code>AuthGate.tsx</code></strong> wraps <code>&lt;App/&gt;</code>
+          in <code>main.tsx</code>. It reads <code>location.pathname</code> —
+          <code>/setup</code> and <code>/reset</code> render their token forms even
+          while logged out; everything else is decided by
+          <code>/api/auth/me</code>. Three states:
+          <em>checking</em> (a quiet splash — no dashboard flash), <em>anonymous</em>,
+          <em>signed in</em>. Roughly 120 lines, no router dependency; the
+          dashboard's existing URL-free filter state is untouched.
+        </li>
+        <li>
+          <strong><code>LoginPage.tsx</code></strong> — email + password,
+          <span class="chg">native <code>required</code> /
+          <code>type="email"</code> for instant feedback and the server's
+          <code>errors[]</code> for everything else</span> (D8 — joi does not ship
+          to the browser), one error line for bad credentials, and a
+          "Forgot your password?" toggle
+          that swaps in the recovery form and always shows the same
+          "if that address has an account, a link is on its way" confirmation.
+        </li>
+        <li>
+          <strong><code>TokenPasswordForm.tsx</code></strong>
+          <span class="chg">(one component, two routes)</span> — reads the token
+          from the query string, takes a password twice, posts to
+          <code>/api/auth/setup</code> or <code>/api/auth/reset-password</code>
+          depending on the path, and on success drops straight into the dashboard
+          (both endpoints set the cookie). The two differ only in copy —
+          "Choose your password" versus "Set a new password" — and in what an
+          expired token offers: setup says "ask whoever invited you to resend",
+          recovery offers the forgot-password form again. Merging them is worth a
+          line here because the previous draft had one form and now there are two
+          flows through it.
+        </li>
+        <li>
+          <strong><code>UsersPanel.tsx</code></strong> — a panel in the existing
+          <code>App.tsx</code> layout, matching <code>InstancesTable</code>'s
+          markup so it inherits <code>global.css</code>: a table of accounts
+          (email, status, created, last login), <span class="chg">a create form
+          that is now a single email field and an <em>Invite</em> button</span> —
+          no password input, no <em>Generate</em> button, no
+          <code>crypto.randomUUID()</code> password — and a delete button with a
+          typed-email confirmation. Disabled with a tooltip for the last remaining
+          user and for your own row. <strong>Status</strong> is
+          <em>Pending invitation</em> or <em>Active</em>, and a pending row carries
+          <em>Copy link</em> (the <code>invite.url</code> from the create response,
+          held in component state only — it is never re-fetched, so a reload drops
+          it and <em>Resend</em> is the way back) and <em>Resend</em>. After a
+          create it shows the mail outcome, and on <code>mail.sent: false</code> it
+          says so loudly with the link right there, because on a deployed server
+          that is the difference between a stuck account and a phone call.
+        </li>
+        <li>
+          <strong><code>hooks/useApi.ts</code></strong> gains one behaviour: a 401
+          fires an <code>onUnauthorized</code> callback (context) instead of
+          setting an error string, so an expired token drops every polling panel
+          back to the login page at once rather than painting six red boxes. A
+          <code>usePost</code> sibling handles the mutating calls, since the hook
+          is <code>GET</code>-only today.
+        </li>
+        <li>
+          <strong>Top bar</strong> gains the signed-in email and a
+          <em>Sign out</em> button next to the existing "live · refresh 4s"
+          indicator.
+        </li>
+        <li>
+          <strong>The first-login modal is cut</strong> <span class="chg">(was:
+          "prompt when <code>must_change_pw</code>")</span>. Nobody is issued a
+          password they did not choose, so nobody needs to be chased into changing
+          one — with a single exception: the seeded <code>admin@admin.com</code>.
+          If the signed-in user is that account and it still holds the published
+          default password, the top bar shows a persistent warning strip linking to
+          the password change. One banner, not a modal, and it disappears the
+          moment the password changes.
+        </li>
+      </ul>
+
+      <!-- 11 -->
+      <h2 id="config"><span class="num">11</span>Configuration</h2>
+      <div class="tbl-wrap">
+        <table>
+          <thead><tr><th>Var</th><th>Default</th><th>Meaning</th></tr></thead>
+          <tbody>
+            <tr><td><code>TARGET_AUTH_SECRET</code></td><td><em>generated + stored</em></td><td>HS256 signing key. Set it to share sessions across restarts of a rebuilt DB, or across replicas</td></tr>
+            <tr><td><code>TARGET_AUTH_TTL_HOURS</code></td><td><code>8</code></td><td>Access-token lifetime</td></tr>
+            <tr><td><code>TARGET_AUTH_SECURE_COOKIE</code></td><td><span class="chg">auto</span></td><td>Add <code>Secure</code> to the cookie. <span class="chg">Defaults on when <code>TARGET_PUBLIC_URL</code> is <code>https://</code></span>, so the deployed case is right without being remembered; <code>0</code> forces it off</td></tr>
+            <tr><td><code>TARGET_PUBLIC_URL</code></td><td><code>http://HOST:PORT</code></td><td>Origin used to build emailed links. <span class="chg">Required for a non-loopback bind</span> (§<a href="#deploy">17</a>)</td></tr>
+            <tr><td><code>TARGET_SMTP_URL</code></td><td><em>(empty)</em></td><td><code>smtp(s)://user:pass@host:port</code>, handed to nodemailer. Empty → file transport. <span class="chg">Required for a non-loopback bind</span></td></tr>
+            <tr><td><code>TARGET_MAIL_FROM</code></td><td><code>target-server@localhost</code></td><td>Envelope + <code>From:</code>. Use an address on a domain with SPF/DKIM once deployed</td></tr>
+            <tr><td><code>TARGET_MAIL_TRANSPORT</code></td><td><em>auto</em></td><td>Force <code>smtp</code> | <code>file</code> | <code>noop</code></td></tr>
+            <tr class="added"><td><code>TARGET_ALLOW_FILE_MAIL</code> <span class="chg">(new)</span></td><td><code>0</code></td><td>Permit the file/noop transport on a public bind. Accepts that invitations reach nobody</td></tr>
+            <tr class="added"><td><code>TARGET_SEED_ADMIN_PASSWORD</code> <span class="chg">(new)</span></td><td><em>(published default)</em></td><td>Password for the seeded <code>admin@admin.com</code>. Set it in any deployment</td></tr>
+            <tr class="added"><td><code>TARGET_TRUST_PROXY</code> <span class="chg">(new)</span></td><td><code>0</code></td><td>Take the client IP from the last hop of <code>X-Forwarded-For</code>. Only behind a proxy that overwrites it</td></tr>
+            <tr><td><code>TARGET_AUTH_DISABLED</code></td><td><code>0</code></td><td>Escape hatch: skip the guard entirely. Logs a warning on every boot. Local dev and the existing tests only — <span class="chg">the server refuses to start with it set on a non-loopback bind</span>, since that is an unauthenticated public dashboard</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        <code>TARGET_INGEST_TOKEN</code>, <code>PORT</code>, <code>HOST</code> and
+        <code>TARGET_SERVER_DB</code> keep their current meaning.
+      </p>
+
+      <!-- 12 -->
+      <h2 id="work"><span class="num">12</span>Work breakdown</h2>
+      <p>
+        Six phases, each independently reviewable and each leaving the server in a
+        working state. <span class="files"><span class="new">green = new file</span>,
+        <span class="mod">amber = modified</span></span>.
+      </p>
+      <div class="tbl-wrap">
+        <table>
+          <thead><tr><th>Phase</th><th>Does</th><th>Files</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><strong>P1</strong><br />Blueprint</td>
+              <td><span class="chg">Add <code>joi</code></span> (the repo's first runtime dependency, so this phase also creates the root <code>dependencies</code> block and a real lockfile), the five named schemas, <code>validate()</code> and the <code>{ field, code, message }</code> mapping. No behaviour change yet — pure, and testable on its own. <span class="chg">No UI alias and no <code>blueprint.d.ts</code></span> (D8).</td>
+              <td class="files"><span class="new">blueprint.mjs</span>, <span class="mod">package.json</span>, <span class="mod">package-lock.json</span></td>
+            </tr>
+            <tr>
+              <td><strong>P2</strong><br />Crypto + storage</td>
+              <td>scrypt hashing, HS256 sign/verify, cookie helpers; the three tables, the seeded admin, the persisted secret, and the user/reset queries.</td>
+              <td class="files"><span class="new">auth.mjs</span>, <span class="mod">db.mjs</span></td>
+            </tr>
+            <tr>
+              <td><strong>P3</strong><br />Auth endpoints</td>
+              <td><code>login</code> / <code>logout</code> / <code>me</code>, the guard on <code>/api/*</code>, the SPA fallback, <code>readJson</code>, the rate limiter.</td>
+              <td class="files"><span class="mod">server.mjs</span></td>
+            </tr>
+            <tr>
+              <td><strong>P4</strong><br />Mail + recovery</td>
+              <td><span class="chg">Add <code>nodemailer</code></span>; the smtp/file/noop transports behind it, <code>verify()</code> at boot and the non-delivering-transport guard, the invitation and recovery templates, <code>forgot-password</code> / <code>reset-password</code> / <span class="chg"><code>setup</code></span>, token issue and consume with <code>kind</code>.</td>
+              <td class="files"><span class="new">mailer.mjs</span>, <span class="new">mail-templates.mjs</span>, <span class="mod">package.json</span>, <span class="mod">server.mjs</span>, <span class="mod">.gitignore</span></td>
+            </tr>
+            <tr>
+              <td><strong>P5</strong><br />Users API</td>
+              <td>List / create / delete under <code>/api/auth/users</code>, uniqueness, last-user and self-delete guards, invitation on create, <code>:id/invite</code> resend. <span class="chg">No role checks</span> (Q4): every account is an admin, and <code>role</code> is written but never read.</td>
+              <td class="files"><span class="mod">server.mjs</span>, <span class="mod">db.mjs</span></td>
+            </tr>
+            <tr>
+              <td><strong>P6</strong><br />Dashboard</td>
+              <td>AuthGate, login, recovery, the shared token/password form, the Users panel with pending invitations and <em>Copy link</em>, the 401 handling in <code>useApi</code>, the top-bar identity, the default-password banner, styles. <span class="chg">No joi in the bundle</span> (D8).</td>
+              <td class="files"><span class="new">ui/src/components/{AuthGate,LoginPage,TokenPasswordForm,UsersPanel}.tsx</span>, <span class="new">ui/src/api/auth.ts</span>, <span class="mod">ui/src/{main,App}.tsx</span>, <span class="mod">ui/src/hooks/useApi.ts</span>, <span class="mod">ui/src/api/types.ts</span>, <span class="mod">ui/src/styles/global.css</span></td>
+            </tr>
+            <tr>
+              <td><strong>P7</strong><br />Docs + tests</td>
+              <td>New test files, the four existing suites updated for the guard, README section (config table, first-run credentials, mail setup) <span class="chg">and a deployment section from §<a href="#deploy">17</a></span>.</td>
+              <td class="files"><span class="new">test/{auth,users,blueprint,mailer}.test.mjs</span>, <span class="mod">test/*.test.mjs</span>, <span class="mod">README.md</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        Rough size: <span class="chg">~500</span> lines of server-side JS
+        (joi and nodemailer replace roughly 250 of the previous draft's own
+        combinator and SMTP code), ~450 of TSX, ~450 of tests.
+        <strong>Dependencies: <code>joi</code> and <code>nodemailer</code> at the
+        root, none added to <code>ui/</code></strong> — the dashboard bundle is the
+        same size after this feature as before it, plus the login and Users
+        components.
+      </p>
+      <div class="callout warn">
+        <span class="tag">Phase ordering, given the answers</span>
+        <p>
+          P4 moves ahead of P5: with D7 there is no way to create a usable account
+          without mail, so building the Users API first would leave a phase whose
+          only outcome is accounts nobody can enter. P1–P3 still land a working
+          login for the seeded admin, which is the first genuinely reviewable
+          milestone.
+        </p>
+      </div>
+
+      <!-- 13 -->
+      <h2 id="tests"><span class="num">13</span>Test plan</h2>
+      <div class="callout warn">
+        <span class="tag">Existing tests will break — deliberately</span>
+        <p>
+          <code>ingest.test.mjs</code>, <code>notes.test.mjs</code>,
+          <code>pagination.test.mjs</code> and <code>usage.test.mjs</code> all hit
+          <code>/api/*</code> unauthenticated. That is the correct new failure.
+          Each gets a small <code>login()</code> helper in a shared
+          <code>test/helpers.mjs</code> that logs in as the seeded admin and
+          returns a cookie header — which also proves the seeded account works on
+          a fresh DB, on every run. The ingest assertions themselves stay
+          untouched, which is the regression signal that matters most.
+        </p>
+      </div>
+      <ul>
+        <li><strong>blueprint</strong> — table-driven: valid and invalid emails (unicode, spaces, double <code>@</code>, no TLD, <code>user@localhost</code>, a made-up TLD, 300 chars), normalisation (<code>" ADMIN@Example.COM "</code> → <code>admin@example.com</code>), password length, <span class="chg"><code>stripUnknown</code> drops an injected <code>role</code></span>, and the <code>{ field, code, message }</code> shape — the last one is the contract the UI depends on, so it is asserted literally rather than snapshotted.</li>
+        <li><strong>auth</strong> — login success/failure; identical response and timing shape for unknown email vs wrong password; cookie flags; <code>me</code> before/after; expired token rejected; tampered signature rejected; <code>alg: none</code> rejected; <code>token_version</code> bump invalidates a live cookie; <code>Bearer</code> header path; rate limiter 429s and recovers.</li>
+        <li><strong>guard</strong> — every existing <code>/api</code> route 401s anonymously and 200s with a session; <code>/health</code> and <code>/ingest</code> still work without one; <code>/login</code> serves the SPA shell.</li>
+        <li><strong>users</strong> — create (201 + row + no hash in the response + an <code>invite.url</code>), duplicate → 409, invalid email → 422 with the blueprint error, delete → 204 + the deleted user's cookie now 401s, last-user and self-delete → 409. <span class="chg">A pending user counts toward the last-user guard</span>, and a body carrying <code>role: "superadmin"</code> creates a plain admin.</li>
+        <li><strong>invitation</strong> <span class="chg">(new)</span> — the <code>.eml</code> contains the address and the setup link and <strong>does not contain the string "password:" or any credential</strong>; opening the link sets a first password and signs in; the account cannot log in before that (and fails with the same <code>invalid_credentials</code> as a wrong password, not a distinguishable error); a second use of the token fails; an expired token fails; <em>Resend</em> invalidates the previous token; <code>setup</code> on an activated account → 409.</li>
+        <li><strong>mail</strong> — an SMTP failure still returns 201 with <code>mail.sent: false</code> <em>and</em> a usable <code>invite.url</code>, which is the escape hatch D7 leans on; the file transport is refused on a non-loopback bind unless <code>TARGET_ALLOW_FILE_MAIL=1</code>.</li>
+        <li><strong>recovery</strong> — <code>forgot-password</code> returns 202 for a nonexistent address and writes no mail; for a real one it writes mail and the link resets the password; the old password stops working.</li>
+        <li><strong>boot guards</strong> <span class="chg">(new)</span> — with <code>HOST=0.0.0.0</code>, starting without <code>TARGET_SMTP_URL</code>, without <code>TARGET_PUBLIC_URL</code>, or with <code>TARGET_AUTH_DISABLED=1</code> each exits non-zero with a message naming the variable; each override is honoured; none of them fire on the default loopback bind, so no existing local workflow changes.</li>
+        <li><strong>UI</strong> — <code>npm run build</code> (<code>tsc --noEmit</code> strict + Vite) is the gate CI already enforces. <span class="chg">Plus a bundle-size assertion</span>: the built <code>assets/*.js</code> stays under 300 KB raw, which is what makes D8 a rule rather than an intention — an accidental <code>import Joi from "joi"</code> in a component fails CI instead of quietly adding 178 KB.</li>
+      </ul>
+
+      <!-- 14 -->
+      <h2 id="security"><span class="num">14</span>Security notes</h2>
+      <ul>
+        <li><strong>Enumeration:</strong> login and recovery answer identically whether or not the address exists — <span class="chg">and identically for an account whose invitation is still pending</span>, which is a third case the invite flow introduces and the easiest one to leak.</li>
+        <li><strong>Timing:</strong> verify a dummy hash when the user is missing, so "no such user" costs the same as "wrong password". <code>timingSafeEqual</code> for every secret comparison.</li>
+        <li><strong>CSRF:</strong> <code>SameSite=Strict</code> covers it for a same-origin SPA; the mutating routes additionally require <code>content-type: application/json</code>, which a cross-site form post cannot send.</li>
+        <li><strong>Host-header injection:</strong> emailed links come from <code>TARGET_PUBLIC_URL</code>, never from the request.</li>
+        <li><strong>Secrets in logs:</strong> the existing <code>log()</code> prints request context — the new code logs email addresses and user ids only, never passwords, tokens or hashes. <span class="chg">Invitation and reset URLs are never logged either</span> (they are bearer credentials for an account), and the mail body is not logged; the file transport writes it to disk, which is a dev-only path and gitignored.</li>
+        <li><strong>No password is ever transmitted by mail</strong> <span class="chg">(D7)</span>. The only credential the system originates is the seeded admin's, and it exists to be replaced.</li>
+        <li><strong>Default credentials</strong> are, by definition, published. On a loopback bind that is a warning; <span class="chg">on a public bind the server refuses to start</span> until <code>TARGET_SEED_ADMIN_PASSWORD</code> is set or the password is changed. The README will say so plainly.</li>
+        <li><strong>Dependency surface</strong> <span class="chg">(new)</span>: two direct packages, <code>joi</code> pulling six <code>@hapi/*</code> modules and <code>nodemailer</code> pulling none. Both are on the request path for unauthenticated input, so <code>npm audit</code> in CI stops being a formality and the lockfile is now something reviewers read.</li>
+        <li><strong>Not in scope:</strong> <span class="chg">roles (Q4 — every user is an admin who can create and delete any other, including the one who created them)</span>, 2FA, SSO, account lockout, an audit log. The <code>role</code> column is written with <code>'admin'</code> and never read; when a read-only viewer is wanted it is a query change, not a migration. <strong>Worth saying out loud:</strong> with no roles, an invitation is a full grant — anyone who receives one can delete everyone else. For a single-operator monitoring tool that is the accepted trade, and the last-user guard is the only floor under it.</li>
+      </ul>
+
+      <!-- 15 -->
+      <h2 id="criterion"><span class="num">15</span>Acceptance criteria</h2>
+      <ol>
+        <li>A fresh <code>node server.mjs</code> against an empty DB seeds <code>admin@admin.com</code> / <code>password-target-server</code>, and that account logs in through the browser.</li>
+        <li>Loading <code>/</code> while signed out shows the login page, not the dashboard; no <code>/api</code> data is fetched or returned.</li>
+        <li>Every <code>/api/*</code> route except <code>/api/auth/*</code> answers 401 without a session. <code>/ingest</code> and <code>/health</code> are unaffected.</li>
+        <li>The Users panel creates a user from an email alone; a bad address is rejected by the <span class="chg">joi</span> blueprint with a message the form renders under the field, and the same body posted by <code>curl</code> is rejected identically.</li>
+        <li><span class="chg">Creating a user produces an invitation email that contains a working single-use setup link and <strong>no password</strong>; opening it lets the invited user choose their own password and lands them in the dashboard signed in.</span></li>
+        <li><span class="chg">Until that link is opened, the account cannot log in, and the attempt is indistinguishable from a wrong password.</span></li>
+        <li>"Forgot your password?" sends a reset link that sets a new password and signs the user in; the old password stops working.</li>
+        <li>Deleting a user removes it and invalidates its live session on the next request; the last remaining user cannot be deleted.</li>
+        <li><span class="chg">On a non-loopback bind, the server refuses to start without a real mail transport, without <code>TARGET_PUBLIC_URL</code>, with auth disabled, or with the published default admin password still in place — each with a message naming the variable that fixes it.</span></li>
+        <li><span class="chg"><code>npm test</code> and <code>npm run build</code> pass; the root <code>package.json</code> declares exactly <code>joi</code> and <code>nodemailer</code>, <code>ui/package.json</code> is unchanged, and the built dashboard bundle has not grown beyond its current size plus the new components.</span></li>
+      </ol>
+
+      <!-- 16 -->
+      <h2 id="open"><span class="num">16</span>Answers, and what they changed</h2>
+      <p>
+        All five open questions are answered. The plan above is rewritten to match;
+        this section is the decision log — what was asked, what came back, and
+        which sections moved.
+      </p>
+
+      <h3>Q1 · "Blueprint" → <code>joi</code></h3>
+      <p>
+        <strong>Answer: use the joi dependency.</strong> §<a href="#blueprint">4</a>
+        is rewritten around <code>joi@^18</code>: five named schemas, one
+        <code>validate()</code>, and a mapping layer that keeps the
+        <code>{ field, code, message }</code> wire shape the rest of the plan was
+        already written against — so nothing downstream of §4 had to change its
+        contract.
+      </p>
+      <p>
+        Two consequences the answer did not spell out, decided here.
+        <strong>First, the zero-dependency rule is now a budget</strong> (D1); the
+        README, <code>package.json</code> and the CI comments all assert
+        "no runtime dependencies" and each is a documentation change in P1.
+        <strong>Second, joi does not ship to the browser</strong> (D8) — its
+        browser build is ~53 KB gzipped against a 73.5 KB dashboard, and the
+        previous draft's "share the module through a Vite alias" idea would have
+        put two copies of every rule in play, which is the same class of bug as the
+        stale bundle this workflow started from. The server validates; the form
+        renders the server's verdict. That deletes <code>blueprint.d.ts</code>, the
+        Vite alias and the <code>server.fs.allow: ['..']</code> hole.
+      </p>
+
+      <h3>Q2 · Emailing the password → an invitation link</h3>
+      <p>
+        <strong>Answer: send an email with a URL carrying a token, where the user
+        sets up their credentials the first time.</strong> This is D7, and it is the
+        answer that changed the most sections: R4/R5 in §<a href="#requirements">2</a>,
+        the nullable <code>password_hash</code> and the token <code>kind</code> in
+        §<a href="#data">5</a>, a new <code>POST /api/auth/setup</code> and an
+        email-only create body in §<a href="#api">7</a>, a rewritten template in
+        §<a href="#mail">9</a>, an email-only create form in §<a href="#ui">10</a>.
+      </p>
+      <p>
+        It also <em>deletes</em> work: the <code>must_change_pw</code> column, the
+        first-login modal, the password field and its <em>Generate</em> button, and
+        the danger callout that existed only to flag a risk we no longer take. The
+        one thing it adds is a dependency on mail actually working — carried by the
+        returned <code>invite.url</code>, the <em>Resend</em> action, and the boot
+        guard.
+      </p>
+
+      <h3>Q3 · SMTP target → my call, made</h3>
+      <p>
+        <strong>Answer: decide it.</strong> Two decisions, both in
+        §<a href="#mail">9</a>.
+      </p>
+      <ol>
+        <li>
+          <strong>Use <code>nodemailer</code> instead of hand-rolling SMTP.</strong>
+          The previous draft's ~200 lines of <code>EHLO</code>/<code>STARTTLS</code>/
+          <code>AUTH</code>/<code>quoted-printable</code> was defensible only while
+          mail was a nice-to-have. Q2 put mail on the account-provisioning critical
+          path and Q5 put the server in front of real users; together they make
+          hand-written protocol code the wrong risk to take. Nodemailer has no
+          runtime dependencies of its own, so the cost is one package.
+        </li>
+        <li>
+          <strong>Keep <code>TARGET_SMTP_URL</code> as the only mail knob, and
+          require a real relay when the bind is public.</strong> Every transactional
+          provider speaks SMTP, so no provider is baked into the code and switching
+          is one environment variable. The file transport stays the default for
+          local work and CI — but silently writing invitations to a directory on a
+          deployed server would mean nobody can ever log in, so that combination is
+          refused at boot unless explicitly allowed. The one recommendation attached
+          to the decision: send from your own domain with SPF and DKIM, because an
+          invitation in a spam folder is an account that never gets used.
+        </li>
+      </ol>
+
+      <h3>Q4 · Roles → none yet</h3>
+      <p>
+        <strong>Answer: every user is an admin; no roles.</strong> P5 gains no role
+        checks; the <code>role</code> column is written as <code>'admin'</code> and
+        never read, kept only so a viewer role is later a query change rather than a
+        migration. §<a href="#security">14</a> now states the consequence plainly:
+        with no roles, an invitation is a full grant, and any user can delete any
+        other — the last-user guard is the only floor under that. Accepted for a
+        single-operator tool; worth revisiting the moment a second kind of user
+        exists.
+      </p>
+
+      <h3>Q5 · Existing deployments → we will deploy</h3>
+      <p>
+        <strong>Answer: the server is going to be deployed.</strong> That retires
+        the question as asked — there is no fleet of running instances to bridge
+        onto a login wall, so <code>TARGET_AUTH_DISABLED</code> stops being a
+        migration story and shrinks to what it should always have been: a local-dev
+        and test switch, refused outright on a public bind.
+      </p>
+      <p>
+        The larger effect is that every default in this plan was chosen for
+        <code>127.0.0.1</code> and now has to answer for a public address. The
+        cookie's <code>Secure</code> flag, the origin used to build emailed links,
+        the rate limiter's idea of a client IP, the published seed password and the
+        non-delivering mail transport are each a quiet no-op locally and a real
+        hole once deployed. Rather than scatter that through the plan, it is
+        collected as §<a href="#deploy">17</a>, and the pattern is uniform: the
+        server <strong>refuses to start</strong> rather than warning, because a
+        warning in a container log is a warning nobody reads.
+      </p>
+
+      <!-- 17 -->
+      <h2 id="deploy"><span class="num">17</span>Deployment checklist</h2>
+      <p>
+        New section, and it exists only because of Q5. Everything here is a
+        no-op on the default <code>127.0.0.1</code> bind — local development and
+        <code>npm test</code> are untouched — and every row fires when
+        <code>HOST</code> resolves to anything else.
+      </p>
+      <div class="tbl-wrap">
+        <table>
+          <thead>
+            <tr><th>Setting</th><th>If it is wrong</th><th>Behaviour on a public bind</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>TARGET_SMTP_URL</code></td>
+              <td>Invitations are written to a directory nobody reads; no invited user can ever log in</td>
+              <td><strong>Refuse to start.</strong> Override: <code>TARGET_ALLOW_FILE_MAIL=1</code>. The URL is also <code>verify()</code>-ed at boot, so a bad password fails now, not at the first invitation</td>
+            </tr>
+            <tr>
+              <td><code>TARGET_PUBLIC_URL</code></td>
+              <td>Links point at the internal bind (<code>http://0.0.0.0:8900/…</code>) and open for nobody</td>
+              <td><strong>Refuse to start.</strong> Never derived from the <code>Host</code> header — that is how reset links get redirected to someone else's domain</td>
+            </tr>
+            <tr>
+              <td><code>TARGET_AUTH_DISABLED</code></td>
+              <td>A public, unauthenticated dashboard — the exact thing this plan exists to prevent</td>
+              <td><strong>Refuse to start.</strong> No override; use it locally or not at all</td>
+            </tr>
+            <tr>
+              <td>Seed admin password</td>
+              <td>A published default credential on a reachable address</td>
+              <td><strong>Refuse to start</strong> while <code>admin@admin.com</code> still holds the default. Fix: <code>TARGET_SEED_ADMIN_PASSWORD</code> before first boot, or change it and restart</td>
+            </tr>
+            <tr>
+              <td><code>TARGET_AUTH_SECRET</code></td>
+              <td>Every restart on a fresh volume signs with a new key and logs everyone out</td>
+              <td>Warn. It is persisted in <code>auth_meta</code>, so this only bites when the DB is ephemeral — which, deployed, it usually is</td>
+            </tr>
+            <tr>
+              <td><code>TARGET_AUTH_SECURE_COOKIE</code></td>
+              <td>The session cookie travels without <code>Secure</code></td>
+              <td>Defaults <em>on</em> when <code>TARGET_PUBLIC_URL</code> is <code>https://</code>. Nothing to remember unless you are deliberately terminating TLS elsewhere</td>
+            </tr>
+            <tr>
+              <td><code>TARGET_TRUST_PROXY</code></td>
+              <td>Off behind a proxy: every request shares one rate-limit bucket, so one attacker locks out everybody. On without a proxy: anyone forges <code>X-Forwarded-For</code> and has no rate limit at all</td>
+              <td>Off by default — the failure it prevents is worse than the one it causes. Set it only when a proxy overwrites the header</td>
+            </tr>
+            <tr>
+              <td><code>TARGET_INGEST_TOKEN</code></td>
+              <td>Anyone who can reach the port can inject fabricated activity</td>
+              <td>Warn loudly. Unchanged by this plan (D5), but a public bind is the moment it stops being optional</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <ul>
+        <li>
+          <strong>Build the dashboard at deploy time, in the image.</strong>
+          <code>public/dist/</code> is gitignored, <code>npm start</code> does not
+          build, and this very workflow began with a device serving a stale bundle
+          against a newer API. The deploy pipeline runs
+          <code>npm ci &amp;&amp; npm run ui:install</code> before the process
+          starts; the staleness guard already in <code>server.mjs</code> is the
+          backstop that turns a mistake here into a visible 503 rather than an old
+          UI that looks current.
+        </li>
+        <li>
+          <strong>Persist the SQLite file.</strong> <code>TARGET_SERVER_DB</code>
+          on a volume. On an ephemeral filesystem every restart loses the accounts
+          and re-seeds the default admin — with the guard above, into a refusal to
+          start.
+        </li>
+        <li>
+          <strong>Terminate TLS in front.</strong> Emailed links are
+          <code>https://</code>, which flips the cookie's <code>Secure</code> flag
+          on by itself. <code>/health</code> stays public for the probe;
+          <code>/ingest</code> keeps its own token and must not be behind the login
+          wall (D5) — check that the reverse proxy does not "helpfully" require auth
+          on it, or the reporting fleet goes silent.
+        </li>
+        <li>
+          <strong>First run, in order:</strong> boot → log in as the seeded admin →
+          change its password → invite the real accounts → confirm the invitation
+          arrives (not the outbox directory) before handing the URL out.
+        </li>
+      </ul>
+
+      <footer>
+        The Target Project · target-server · plan drafted 2026-08-25 ·
+        revised 2026-08-26 with the answers to §16 ·
+        workflow "server is not looking same in diff devices" ·
+        companion to <code>docs/report-server.es.html</code>
+      </footer>
+    </div>
+  </body>
+</html>

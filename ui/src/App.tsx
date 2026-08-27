@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { kindLabel, kindTip } from "./api/kinds.ts";
+import { forgotPassword, logout } from "./api/auth.ts";
 import type {
+	AuthUser,
 	EventsResponse,
 	Filters,
 	InstancesResponse,
@@ -19,6 +21,7 @@ import { InstancesTable } from "./components/InstancesTable.tsx";
 import { Kpi } from "./components/Kpi.tsx";
 import { Pagination } from "./components/Pagination.tsx";
 import { TargetMark } from "./components/TargetMark.tsx";
+import { UsersPanel } from "./components/UsersPanel.tsx";
 import { WorkflowDetail } from "./components/WorkflowDetail.tsx";
 import { WorkflowsTable } from "./components/WorkflowsTable.tsx";
 import { useApi } from "./hooks/useApi.ts";
@@ -26,6 +29,35 @@ import { compactNumber, localToIso } from "./lib/format.ts";
 
 const POLL_MS = 4000;
 const DEFAULT_PAGE_SIZE = 25;
+
+function ChangePasswordButton({ email }: { email: string }) {
+	const [sent, setSent] = useState(false);
+	const [busy, setBusy] = useState(false);
+
+	async function onClick() {
+		setBusy(true);
+		try {
+			await forgotPassword(email);
+			setSent(true);
+		} finally {
+			setBusy(false);
+		}
+	}
+
+	if (sent) {
+		return (
+			<span className="topbar-pw-sent" title="Open the link in your email (or the server mail outbox in dev) to set a new password">
+				Reset link sent
+			</span>
+		);
+	}
+
+	return (
+		<button type="button" className="btn btn--ghost btn--sm" disabled={busy} onClick={() => void onClick()}>
+			Change password
+		</button>
+	);
+}
 
 /**
  * The dashboard shell.
@@ -35,7 +67,7 @@ const DEFAULT_PAGE_SIZE = 25;
  * — filtering happens in SQL, so the KPIs, breakdowns, tables and feed below
  * always answer the same question.
  */
-export function App() {
+export function App({ user, onSignOut }: { user: AuthUser; onSignOut: () => void }) {
 	const [filters, setFilters] = useState<Filters>({ ...EMPTY_FILTERS });
 	// Workflow list paging. The list is unbounded — a busy fleet reports
 	// thousands — so the dashboard asks for one page and the server never returns
@@ -138,10 +170,23 @@ export function App() {
 					</div>
 					<span className="live">
 						<span className="dot" />
+						{user.email}
+						{" · "}
 						{`live · refresh ${POLL_MS / 1000}s`}
 					</span>
+					<ChangePasswordButton email={user.email} />
+					<button type="button" className="btn btn--ghost btn--sm topbar-signout" onClick={() => void logout().then(onSignOut)}>
+						Sign out
+					</button>
 				</div>
 			</header>
+
+			{user.usesDefaultPassword ? (
+				<div className="default-pw-banner">
+					The seeded admin account still uses the published default password —{" "}
+					<ChangePasswordButton email={user.email} /> or invite a replacement admin below.
+				</div>
+			) : null}
 
 			<main className="shell">
 				<h1 className="page-title">Activity across the fleet</h1>
@@ -182,6 +227,12 @@ export function App() {
 						value={stats ? stats.usage.outputTokens.toLocaleString() : "..."}
 						hint={stats ? compactNumber(stats.usage.outputTokens) : null}
 					/>
+				</div>
+
+				<div className="panel" id="dashboard-accounts">
+					<h2>Dashboard accounts</h2>
+					<div className="panel-note">Invite colleagues who can sign in to this dashboard. Distinct from the User filter above, which filters reported activity.</div>
+					<UsersPanel currentUser={user} />
 				</div>
 
 				<div className="panel">

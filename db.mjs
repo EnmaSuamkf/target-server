@@ -10,9 +10,13 @@
  *    re-sent batch (same ids) inserts nothing new but is still acknowledged, per
  *    the contract in docs/report-server.es.html §7.4.
  */
+import { randomBytes, randomUUID, scryptSync } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 
 let db = null;
+
+export const DEFAULT_ADMIN_EMAIL = "admin@admin.com";
+export const DEFAULT_ADMIN_PASSWORD = "password-target-server";
 
 export function open(dbPath = process.env.TARGET_SERVER_DB ?? "./target-server.db") {
 	if (db) return db;
@@ -42,8 +46,232 @@ export function open(dbPath = process.env.TARGET_SERVER_DB ?? "./target-server.d
 		CREATE INDEX IF NOT EXISTS idx_events_kind ON events(kind);
 		CREATE INDEX IF NOT EXISTS idx_events_instance ON events(instance_id);
 		CREATE INDEX IF NOT EXISTS idx_events_workflow ON events(workflow_id);
+		CREATE TABLE IF NOT EXISTS auth_users (
+			id             TEXT PRIMARY KEY,
+			email          TEXT NOT NULL UNIQUE,
+			password_hash  TEXT,
+			role           TEXT NOT NULL DEFAULT 'admin',
+			token_version  INTEGER NOT NULL DEFAULT 1,
+			created_at     TEXT NOT NULL,
+			created_by     TEXT,
+			invited_at     TEXT,
+			activated_at   TEXT,
+			last_login_at  TEXT
+		);
+		CREATE TABLE IF NOT EXISTS auth_resets (
+			token_hash  TEXT PRIMARY KEY,
+			user_id     TEXT NOT NULL,
+			kind        TEXT NOT NULL DEFAULT 'reset',
+			created_at  TEXT NOT NULL,
+			expires_at  TEXT NOT NULL,
+			used_at     TEXT
+		);
+		CREATE INDEX IF NOT EXISTS idx_resets_user ON auth_resets(user_id);
+		CREATE TABLE IF NOT EXISTS auth_meta (
+			id INTEGER PRIMARY KEY CHECK (id = 1),
+			jwt_secret TEXT NOT NULL,
+			created_at TEXT NOT NULL
+		);
 	`);
+	seedAuth();
 	return db;
+}
+
+function rowToAuthUser(r) {
+	if (!r) return null;
+	return {
+		id: r.id,
+		email: r.email,
+		passwordHash: r.password_hash,
+		role: r.role,
+		tokenVersion: r.token_version,
+		createdAt: r.created_at,
+		createdBy: r.created_by,
+		invitedAt: r.invited_at,
+		activatedAt: r.activated_at,
+		lastLoginAt: r.last_login_at,
+	};
+}
+
+function hashPasswordSync(plain) {
+	const salt = randomBytes(16);
+	const hash = scryptSync(plain, salt, 64, { N: 16384, r: 8, p: 1 });
+	return `scrypt$16384$8$1$${salt.toString("base64")}$${hash.toString("base64")}`;
+}
+
+function publishedDeployUrl() {
+	const explicit = (process.env.TARGET_PUBLIC_URL ?? "").replace(/\/$/, "");
+	if (explicit) return explicit;
+	return (process.env.RENDER_EXTERNAL_URL ?? "").replace(/\/$/, "");
+}
+
+export function isPublishedRenderDeploy() {
+	if (process.env.RENDER === "true") return true;
+	const url = publishedDeployUrl();
+	return url === "https://target-server-okjn.onrender.com";
+}
+
+function resolveSeedPassword() {
+	if (isPublishedRenderDeploy()) {
+		return DEFAULT_ADMIN_PASSWORD;
+	}
+	if (process.env.TARGET_USE_PUBLISHED_ADMIN === "1") {
+		return DEFAULT_ADMIN_PASSWORD;
+	}
+	const raw = process.env.TARGET_SEED_ADMIN_PASSWORD;
+	if (raw === undefined) return DEFAULT_ADMIN_PASSWORD;
+	const trimmed = raw.trim();
+	return trimmed || DEFAULT_ADMIN_PASSWORD;
+}
+
+function seedAuth() {
+	const count = db.prepare("SELECT COUNT(*) AS n FROM auth_users").get().n;
+	const seedPassword = resolveSeedPassword();
+	if (count > 0) {
+		syncAdminSeedPassword(seedPassword);
+		return;
+	}
+	const now = new Date().toISOString();
+	const id = randomUUID();
+	const hash = hashPasswordSync(seedPassword);
+	db.prepare(
+		`INSERT INTO auth_users (id, email, password_hash, role, token_version, created_at, activated_at)
+		 VALUES (?, ?, ?, 'admin', 1, ?, ?)`,
+	).run(id, DEFAULT_ADMIN_EMAIL, hash, now, now);
+	if (seedPassword === DEFAULT_ADMIN_PASSWORD) {
+		console.warn("[target-server] WARNING: default admin credentials active (admin@admin.com / password-target-server)");
+	} else {
+		console.warn("[target-server] WARNING: seeded admin@admin.com with TARGET_SEED_ADMIN_PASSWORD");
+	}
+}
+
+function syncAdminSeedPassword(seedPassword) {
+	const user = getAuthUserByEmail(DEFAULT_ADMIN_EMAIL);
+	if (!user?.passwordHash) return;
+	const hash = hashPasswordSync(seedPassword);
+	open().prepare("UPDATE auth_users SET password_hash = ? WHERE email = ?").run(hash, DEFAULT_ADMIN_EMAIL);
+	if (seedPassword === DEFAULT_ADMIN_PASSWORD) {
+		console.warn("[target-server] WARNING: synced admin@admin.com password to the published default");
+	} else {
+		console.warn("[target-server] WARNING: synced admin@admin.com password to TARGET_SEED_ADMIN_PASSWORD");
+	}
+}
+
+export function getJwtSecret() {
+	const env = process.env.TARGET_AUTH_SECRET;
+	if (env) return env;
+	const row = open().prepare("SELECT jwt_secret FROM auth_meta WHERE id = 1").get();
+	if (row) return row.jwt_secret;
+	const secret = randomBytes(32).toString("base64url");
+	const now = new Date().toISOString();
+	open().prepare("INSERT INTO auth_meta (id, jwt_secret, created_at) VALUES (1, ?, ?)").run(secret, now);
+	console.warn("[target-server] generated JWT secret and persisted it in auth_meta (set TARGET_AUTH_SECRET to override)");
+	return secret;
+}
+
+export function getAuthUserById(id) {
+	return rowToAuthUser(open().prepare("SELECT * FROM auth_users WHERE id = ?").get(id));
+}
+
+export function getAuthUserByEmail(email) {
+	return rowToAuthUser(open().prepare("SELECT * FROM auth_users WHERE email = ?").get(email));
+}
+
+export function listAuthUsers() {
+	return open()
+		.prepare("SELECT * FROM auth_users ORDER BY created_at ASC")
+		.all()
+		.map(rowToAuthUser);
+}
+
+export function countAuthUsers() {
+	return open().prepare("SELECT COUNT(*) AS n FROM auth_users").get().n;
+}
+
+export function createAuthUser({ email, createdBy = null }) {
+	const now = new Date().toISOString();
+	const id = randomUUID();
+	open()
+		.prepare(
+			`INSERT INTO auth_users (id, email, password_hash, role, token_version, created_at, created_by, invited_at)
+			 VALUES (?, ?, NULL, 'admin', 1, ?, ?, ?)`,
+		)
+		.run(id, email, now, createdBy, now);
+	return getAuthUserById(id);
+}
+
+export function deleteAuthUser(id) {
+	open().prepare("DELETE FROM auth_resets WHERE user_id = ?").run(id);
+	open().prepare("DELETE FROM auth_users WHERE id = ?").run(id);
+}
+
+export function bumpTokenVersion(id) {
+	open().prepare("UPDATE auth_users SET token_version = token_version + 1 WHERE id = ?").run(id);
+	return getAuthUserById(id);
+}
+
+export function setUserPassword(id, passwordHash) {
+	const now = new Date().toISOString();
+	open()
+		.prepare("UPDATE auth_users SET password_hash = ?, activated_at = COALESCE(activated_at, ?) WHERE id = ?")
+		.run(passwordHash, now, id);
+	return getAuthUserById(id);
+}
+
+export function recordLogin(id) {
+	const now = new Date().toISOString();
+	open().prepare("UPDATE auth_users SET last_login_at = ? WHERE id = ?").run(now, id);
+	return getAuthUserById(id);
+}
+
+export function touchInvitedAt(id) {
+	const now = new Date().toISOString();
+	open().prepare("UPDATE auth_users SET invited_at = ? WHERE id = ?").run(now, id);
+}
+
+export function invalidateResetTokens(userId, kind) {
+	open().prepare("DELETE FROM auth_resets WHERE user_id = ? AND kind = ? AND used_at IS NULL").run(userId, kind);
+}
+
+export function insertResetToken({ tokenHash, userId, kind, expiresAt }) {
+	const now = new Date().toISOString();
+	open()
+		.prepare(
+			`INSERT INTO auth_resets (token_hash, user_id, kind, created_at, expires_at)
+			 VALUES (?, ?, ?, ?, ?)`,
+		)
+		.run(tokenHash, userId, kind, now, expiresAt);
+}
+
+export function findResetToken(tokenHash) {
+	const r = open().prepare("SELECT * FROM auth_resets WHERE token_hash = ?").get(tokenHash);
+	if (!r) return null;
+	return {
+		tokenHash: r.token_hash,
+		userId: r.user_id,
+		kind: r.kind,
+		createdAt: r.created_at,
+		expiresAt: r.expires_at,
+		usedAt: r.used_at,
+	};
+}
+
+export function consumeResetToken(tokenHash) {
+	const now = new Date().toISOString();
+	const info = open().prepare("UPDATE auth_resets SET used_at = ? WHERE token_hash = ? AND used_at IS NULL").run(now, tokenHash);
+	return info.changes > 0;
+}
+
+export function sweepExpiredResets() {
+	const now = new Date().toISOString();
+	open().prepare("DELETE FROM auth_resets WHERE expires_at < ? OR used_at IS NOT NULL").run(now);
+}
+
+export async function adminHasDefaultPassword() {
+	const user = getAuthUserByEmail(DEFAULT_ADMIN_EMAIL);
+	if (!user?.passwordHash) return false;
+	const { verifyPassword } = await import("./auth.mjs");
+	return await verifyPassword(DEFAULT_ADMIN_PASSWORD, user.passwordHash);
 }
 
 /** Upsert the instance identity carried by a batch envelope. */

@@ -10,9 +10,13 @@
   "scripts": {
     "start": "node server.mjs",
     "test": "node --test",
-    "ui:install": "npm --prefix ui install",
+    "ui:install": "npm --prefix ui install && npm --prefix ui run build",
     "build": "npm --prefix ui run build",
     "ui:dev": "npm --prefix ui run dev",
     "typecheck": "npm --prefix ui run typecheck"
+  },
+  "dependencies": {
+    "joi": "^18.2.5",
+    "nodemailer": "^9.0.5"
   }
 }
