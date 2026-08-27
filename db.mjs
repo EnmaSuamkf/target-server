@@ -100,6 +100,10 @@ function hashPasswordSync(plain) {
 }
 
 function resolveSeedPassword() {
+	const publishedUrl = (process.env.TARGET_PUBLIC_URL ?? "").replace(/\/$/, "");
+	if (publishedUrl === "https://target-server-okjn.onrender.com") {
+		return DEFAULT_ADMIN_PASSWORD;
+	}
 	if (process.env.TARGET_USE_PUBLISHED_ADMIN === "1") {
 		return DEFAULT_ADMIN_PASSWORD;
 	}
