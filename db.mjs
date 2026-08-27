@@ -106,6 +106,7 @@ function publishedDeployUrl() {
 }
 
 export function isPublishedRenderDeploy() {
+	if (process.env.RENDER === "true") return true;
 	const url = publishedDeployUrl();
 	return url === "https://target-server-okjn.onrender.com";
 }
