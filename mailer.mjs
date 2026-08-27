@@ -32,16 +32,20 @@ function pickTransport() {
 	const resendKey = RESEND_API_KEY || resendKeyFromSmtpUrl(SMTP_URL);
 	if (FORCED === "resend" || resendKey) {
 		if (!resendKey) {
-			throw new Error("TARGET_RESEND_API_KEY is required when TARGET_MAIL_TRANSPORT=resend");
+			console.warn(
+				"[target-server] WARNING: TARGET_MAIL_TRANSPORT=resend but no Resend API key — using file outbox",
+			);
+			return { name: "file", t: null };
 		}
 		resendApiKey = resendKey;
 		return { name: "resend", t: null };
 	}
 	if (FORCED === "smtp" || SMTP_URL) {
 		if (!SMTP_URL) {
-			throw new Error(
-				"TARGET_SMTP_URL is required when TARGET_MAIL_TRANSPORT=smtp (e.g. smtps://resend:re_KEY@smtp.resend.com:465)",
+			console.warn(
+				"[target-server] WARNING: TARGET_MAIL_TRANSPORT=smtp but TARGET_SMTP_URL unset — using file outbox",
 			);
+			return { name: "file", t: null };
 		}
 		const t = nodemailer.createTransport(SMTP_URL);
 		return { name: "smtp", t };

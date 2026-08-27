@@ -26,6 +26,8 @@ services:
         value: Target <onboarding@resend.dev>
       - key: TARGET_MAIL_TRANSPORT
         value: resend
+      - key: TARGET_ALLOW_FILE_MAIL
+        value: "1"
       - key: TARGET_SERVER_DB
         value: /opt/render/project/src/target-server-v6.db
       - key: TARGET_SMTP_URL
