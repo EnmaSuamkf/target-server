@@ -35,6 +35,7 @@ function fieldErrors(errors: FieldError[], field: string) {
 	return errors.filter((e) => e.field === field || e.field.startsWith(`${field}.`));
 }
 
+/** Plan-preview steps only — run state lives in Client activity (ingest), not the sync mirror. */
 function remoteStepsToCanvas(steps: SyncRemoteStepRow[], context: string | null): WorkflowStep[] {
 	const out: WorkflowStep[] = [];
 	if (context?.trim()) {
@@ -42,6 +43,7 @@ function remoteStepsToCanvas(steps: SyncRemoteStepRow[], context: string | null)
 			stepId: "context",
 			orderIndex: 0,
 			description: context.trim(),
+			// Context is hub-owned; the client never mirrors its status into remote_workflow_steps.
 			status: "pending",
 			statusAt: null,
 			durationMs: null,
@@ -700,29 +702,38 @@ export function RemoteWorkflowsPanel({
 						</button>
 					</section>
 
-					<div className="wf-view-switch">
-						<button
-							type="button"
-							className={`btn btn--sm${view === "canvas" ? " btn--on" : ""}`}
-							onClick={() => setView("canvas")}
-						>
-							Canvas
-						</button>
-						<button
-							type="button"
-							className={`btn btn--sm${view === "list" ? " btn--on" : ""}`}
-							onClick={() => setView("list")}
-						>
-							List
-						</button>
-					</div>
-
-					{view === "list" ? (
-						<StepCanvas steps={canvasSteps} />
-					) : steps.length > 0 || selected.conversation_context ? (
-						<WorkflowCanvas steps={canvasSteps} />
+					{selected.local_id ? (
+						<p className="hint sync-plan-live-hint">
+							Live canvas and step status are in <strong>Client activity</strong> below — this panel is
+							for editing the plan and sending commands.
+						</p>
 					) : (
-						<div className="empty">Add steps below to see the workflow canvas.</div>
+						<>
+							<div className="wf-view-switch">
+								<button
+									type="button"
+									className={`btn btn--sm${view === "canvas" ? " btn--on" : ""}`}
+									onClick={() => setView("canvas")}
+								>
+									Canvas
+								</button>
+								<button
+									type="button"
+									className={`btn btn--sm${view === "list" ? " btn--on" : ""}`}
+									onClick={() => setView("list")}
+								>
+									List
+								</button>
+							</div>
+
+							{view === "list" ? (
+								<StepCanvas steps={canvasSteps} planMode />
+							) : steps.length > 0 || selected.conversation_context ? (
+								<WorkflowCanvas steps={canvasSteps} planMode />
+							) : (
+								<div className="empty">Add steps below to see the workflow plan preview.</div>
+							)}
+						</>
 					)}
 
 					<section className="sync-section">
@@ -782,6 +793,7 @@ export function RemoteWorkflowsPanel({
 											status={step.status}
 											workflowOnClient={Boolean(selected.local_id)}
 											onClient={step.on_client}
+											showRunStatus={!selected.local_id}
 										/>
 										<div className="sync-step-plan__actions">
 											<button
