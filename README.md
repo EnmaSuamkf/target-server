@@ -8,14 +8,28 @@ Wire contract it implements: `docs/report-server.es.html` §7 in the target repo
 
 ## Requirements
 
-- Node.js **≥ 24**. The server uses **two runtime dependencies** (`joi` for request
-  validation, `nodemailer` for invitation/recovery mail); everything else is
-  builtins (`node:sqlite`, `node:crypto`, …). The dashboard has its own build
-  step (React + Vite, in `ui/`).
+- Node.js **≥ 24** (see `.nvmrc`). The server uses **two runtime dependencies**
+  (`joi` for request validation, `nodemailer` for invitation/recovery mail);
+  everything else is builtins — especially **`node:sqlite`**, which does **not**
+  exist on Node 18 or 20. The dashboard build (Vite 7) also requires Node
+  **20.19+** or **22.12+**, so use **24** for both server and UI.
+
+If `npm start` fails with `ERR_UNKNOWN_BUILTIN_MODULE: node:sqlite`, your shell
+is on an old Node (e.g. 18.x from the system package manager). Upgrade:
+
+```bash
+nvm install 24 && nvm use 24    # nvm — repo includes .nvmrc
+# or: fnm install 24 && fnm use 24
+node --version                  # must show v24.x.x
+```
+
+`npm run start` runs `scripts/check-node.mjs` first and prints these hints when
+the version is too low.
 
 ## Run
 
 ```bash
+nvm use                   # optional — picks Node 24 from .nvmrc
 npm ci                    # joi + nodemailer
 npm run ui:install        # installs the dashboard's dependencies, then builds it
 npm start                 # or: node server.mjs
@@ -115,6 +129,140 @@ TARGET_REPORT_ENABLED=true
 ```
 
 Start the hub and use it — batches appear on the dashboard within a few seconds.
+
+## Remote sync
+
+Hybrid push/pull protocol: a central **target-server** plans workflows and
+enqueues **commands**; each **Target hub** on a user machine registers,
+polls, applies commands locally, acks results, and pushes **events** back.
+Full wire contract: [`docs/remote-sync.md`](docs/remote-sync.md).
+
+```
+┌──────────────┐   register / heartbeat / events (push)   ┌──────────────┐
+│  Target hub  │ ◄────────── commands (pull) + ack ───────► │ target-server│
+│  (client)    │                                            │  :8900       │
+└──────────────┘                                            └──────────────┘
+```
+
+### Environment variables
+
+**Server** (optional overrides — defaults work for local dev):
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `PORT` | `8900` | HTTP port |
+| `HOST` | `127.0.0.1` | Bind address |
+| `TARGET_SERVER_DB` | `./target-server.db` | SQLite file (clients, commands, events) |
+
+**Target hub client** — add to `~/.target/.env` on the machine that runs
+workflows (also readable from the repo-root `.env` when the hub starts):
+
+| Variable | Required | Meaning |
+| --- | --- | --- |
+| `TARGET_SYNC_URL` | yes | Server base URL, e.g. `http://127.0.0.1:8900` (no trailing slash) |
+| `TARGET_SYNC_ENABLED` | no | `true` by default when URL is set; set `false` to disable |
+| `TARGET_SYNC_TOKEN` | no | Bearer client token; **omit** on first run — the hub registers and persists one |
+| `TARGET_SYNC_INTERVAL_MS` | no | Poll cadence (default `30000`) |
+
+Activity reporting (`TARGET_REPORT_*`) and remote sync are independent — you
+can enable either or both.
+
+### Step-by-step setup (local)
+
+**1. Start target-server**
+
+```bash
+cd target-server
+npm ci && npm run ui:install    # first time only
+npm start                       # listens on http://127.0.0.1:8900
+```
+
+Sign in at **http://127.0.0.1:8900/** as `admin@admin.com` /
+`password-target-server` (fresh DB).
+
+**2. Configure the Target hub client**
+
+In the [target](https://github.com/EnmaSuamkf/target) repo (or any machine
+with a hub):
+
+```bash
+mkdir -p ~/.target
+cat >> ~/.target/.env <<'EOF'
+TARGET_SYNC_URL=http://127.0.0.1:8900
+TARGET_SYNC_ENABLED=true
+EOF
+```
+
+**3. Start the hub**
+
+```bash
+cd target
+npm run target:install   # first time only
+npm start                # hub on :8893; sync agent polls every ~30s
+```
+
+On the first sync tick the hub **registers** (`POST /api/sync/register`) and
+stores `client_id` + token under `~/.target/`. Watch the hub log for
+`remote sync registered as client …` and `remote sync enabled → …`.
+
+**4. Create a remote workflow from the dashboard**
+
+1. Open **http://127.0.0.1:8900/** → **Sync clients** panel — your machine
+   should appear (`idle` / `busy`, last seen).
+2. **Remote workflows** panel → pick the client → enter a name → **Create**.
+   This enqueues `workflow.create`.
+3. Within ~30s the hub applies it; the workflow shows `origin=remote` locally
+   (`http://127.0.0.1:8893/`).
+4. Select the remote workflow → **Add step** (repeat for each step) → **Start**
+   when ready. Commands are sequenced; the client acks each with `local_id`.
+
+**5. Verify**
+
+| Where | What to check |
+| --- | --- |
+| Hub UI (`:8893`) | Workflow exists, `origin=remote`, steps present, status moves to `running` after Start |
+| Server **Sync clients** | Client `last_seen_at` updates; availability `idle`/`busy` |
+| Server **Remote workflows** | Row gets `local_id` after create ack |
+| Server **Sync events** | `workflow.created`, `command.ack`, `workflow.status_changed` events |
+
+### Manual smoke test checklist
+
+Use this after changing sync code on either side:
+
+- [ ] **Server up** — `curl http://127.0.0.1:8900/health` → `{"ok":true}`
+- [ ] **Hub sync enabled** — hub log shows `remote sync enabled → http://127.0.0.1:8900`
+- [ ] **Client registered** — Sync clients panel lists your machine; `~/.target/` has sync token in settings
+- [ ] **Create remote workflow** — dashboard form succeeds; hub log shows `sync applied workflow.create`
+- [ ] **Local materialization** — hub shows workflow with **Remote** badge (`origin=remote`)
+- [ ] **Add 2 steps** — hub workflow detail lists both steps; server acks each command
+- [ ] **Start** — hub workflow status → `running`; server Sync events shows lifecycle events
+- [ ] **Heartbeat** — client row updates `last_seen_at` without manual refresh (poll ~4s on dashboard)
+
+Automated equivalent (no manual steps, dynamic port):
+
+```bash
+cd target-server && node --test test/sync-e2e-smoke.test.mjs
+```
+
+### Sync tests
+
+```bash
+npm test              # full suite (ingest, auth, sync, …)
+npm run test:sync     # remote-sync tests only
+```
+
+| File | What it exercises |
+| --- | --- |
+| `sync.test.mjs` | HTTP flow: register → heartbeat → enqueue → poll → ack → events |
+| `sync-db.test.mjs` | SQLite storage layer (clients, commands, sequencing) |
+| `sync-api.test.mjs` | Client-facing `/api/sync/*` routes |
+| `sync-operator.test.mjs` | Dashboard operator routes |
+| `sync-e2e-smoke.test.mjs` | Full stack: operator creates workflow + 2 steps + start, hub sync agent applies |
+
+Tests use throwaway SQLite files and isolated `TARGET_HOME` — no manual setup
+required. The Target hub repo also ships `hub/sync.test.ts` (mock server) and
+`hub/sync-executor.test.ts` (command executor unit tests); run
+`npm run test:sync` from the target repo root.
 
 ## API
 

@@ -12,6 +12,7 @@
  */
 import { randomBytes, randomUUID, scryptSync } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
+import { validateCommand } from "./blueprint.mjs";
 
 let db = null;
 
@@ -72,9 +73,102 @@ export function open(dbPath = process.env.TARGET_SERVER_DB ?? "./target-server.d
 			jwt_secret TEXT NOT NULL,
 			created_at TEXT NOT NULL
 		);
+		CREATE TABLE IF NOT EXISTS clients (
+			id                 TEXT PRIMARY KEY,
+			name               TEXT,
+			token_hash         TEXT NOT NULL,
+			status             TEXT NOT NULL DEFAULT 'active',
+			capabilities_json  TEXT,
+			last_seen_at       TEXT,
+			created_at         TEXT NOT NULL
+		);
+		CREATE TABLE IF NOT EXISTS remote_workflows (
+			id                   TEXT PRIMARY KEY,
+			client_id            TEXT NOT NULL,
+			name                 TEXT,
+			status               TEXT,
+			local_id             TEXT,
+			conversation_context TEXT,
+			sandbox              TEXT NOT NULL DEFAULT 'docker',
+			created_at           TEXT NOT NULL
+		);
+		CREATE TABLE IF NOT EXISTS remote_workflow_steps (
+			id                     TEXT PRIMARY KEY,
+			remote_id              TEXT NOT NULL,
+			step_key               TEXT NOT NULL,
+			order_index            INTEGER NOT NULL,
+			description            TEXT NOT NULL,
+			acceptance_criteria    TEXT,
+			manual_review          INTEGER NOT NULL DEFAULT 0,
+			use_subagent           INTEGER NOT NULL DEFAULT 1,
+			max_retries            INTEGER NOT NULL DEFAULT 0,
+			retry_interval_seconds INTEGER NOT NULL DEFAULT 0,
+			status                 TEXT NOT NULL DEFAULT 'pending',
+			on_client              INTEGER NOT NULL DEFAULT 0,
+			UNIQUE(remote_id, step_key)
+		);
+		CREATE INDEX IF NOT EXISTS idx_remote_workflow_steps_remote ON remote_workflow_steps(remote_id);
+		CREATE TABLE IF NOT EXISTS commands (
+			id            TEXT PRIMARY KEY,
+			client_id     TEXT NOT NULL,
+			remote_id     TEXT,
+			type          TEXT NOT NULL,
+			payload_json  TEXT NOT NULL,
+			sequence      INTEGER NOT NULL,
+			status        TEXT NOT NULL DEFAULT 'pending',
+			created_at    TEXT NOT NULL,
+			acked_at      TEXT
+		);
+		CREATE TABLE IF NOT EXISTS sync_events (
+			id            TEXT PRIMARY KEY,
+			client_id     TEXT NOT NULL,
+			remote_id     TEXT,
+			type          TEXT NOT NULL,
+			payload_json  TEXT NOT NULL,
+			received_at   TEXT NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_commands_client_status ON commands(client_id, status);
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_commands_remote_sequence ON commands(remote_id, sequence);
+		CREATE INDEX IF NOT EXISTS idx_remote_workflows_client ON remote_workflows(client_id);
+		CREATE INDEX IF NOT EXISTS idx_sync_events_client ON sync_events(client_id, received_at);
 	`);
+	migrateSyncSchema(db);
 	seedAuth();
 	return db;
+}
+
+/** Additive migrations for existing target-server.db files. */
+function migrateSyncSchema(database) {
+	const addColumn = (table, name, ddl) => {
+		try {
+			database.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${ddl}`);
+		} catch {
+			// Column already exists.
+		}
+	};
+	addColumn("remote_workflows", "conversation_context", "TEXT");
+	addColumn("remote_workflows", "sandbox", "TEXT NOT NULL DEFAULT 'docker'");
+	addColumn("remote_workflows", "agent", "TEXT");
+	addColumn("remote_workflow_steps", "on_client", "INTEGER NOT NULL DEFAULT 0");
+	addColumn("remote_workflow_steps", "run_selected", "INTEGER NOT NULL DEFAULT 1");
+	database.exec(`
+		CREATE TABLE IF NOT EXISTS remote_workflow_steps (
+			id                     TEXT PRIMARY KEY,
+			remote_id              TEXT NOT NULL,
+			step_key               TEXT NOT NULL,
+			order_index            INTEGER NOT NULL,
+			description            TEXT NOT NULL,
+			acceptance_criteria    TEXT,
+			manual_review          INTEGER NOT NULL DEFAULT 0,
+			use_subagent           INTEGER NOT NULL DEFAULT 1,
+			max_retries            INTEGER NOT NULL DEFAULT 0,
+			retry_interval_seconds INTEGER NOT NULL DEFAULT 0,
+			status                 TEXT NOT NULL DEFAULT 'pending',
+			on_client              INTEGER NOT NULL DEFAULT 0,
+			UNIQUE(remote_id, step_key)
+		);
+		CREATE INDEX IF NOT EXISTS idx_remote_workflow_steps_remote ON remote_workflow_steps(remote_id);
+	`);
 }
 
 function rowToAuthUser(r) {
@@ -1234,5 +1328,792 @@ export function workflowDetail(workflowId) {
 		// the two be compared line for line.
 		usage: workflowUsage(workflowId),
 		events: recentEvents({ workflowId, limit: 50 }),
+	};
+}
+
+// --- Remote sync layer (docs/remote-sync.md) --------------------------------
+
+function rowToClient(r) {
+	if (!r) return null;
+	let capabilities = null;
+	if (r.capabilities_json) {
+		try {
+			capabilities = JSON.parse(r.capabilities_json);
+		} catch {
+			capabilities = null;
+		}
+	}
+	return {
+		id: r.id,
+		name: r.name,
+		tokenHash: r.token_hash,
+		status: r.status,
+		capabilities,
+		lastSeenAt: r.last_seen_at,
+		createdAt: r.created_at,
+	};
+}
+
+function rowToRemoteWorkflow(r) {
+	if (!r) return null;
+	return {
+		id: r.id,
+		clientId: r.client_id,
+		name: r.name,
+		status: r.status,
+		localId: r.local_id,
+		conversationContext: r.conversation_context ?? null,
+		sandbox: r.sandbox ?? "docker",
+		stepCount: r.step_count ?? undefined,
+		stepsPendingSync: r.steps_pending_sync ?? undefined,
+		agent: r.agent ?? null,
+		createdAt: r.created_at,
+	};
+}
+
+function rowToRemoteStep(r) {
+	if (!r) return null;
+	return {
+		id: r.id,
+		remoteId: r.remote_id,
+		stepKey: r.step_key,
+		orderIndex: r.order_index,
+		description: r.description,
+		acceptanceCriteria: r.acceptance_criteria ?? null,
+		manualReview: Boolean(r.manual_review),
+		useSubagent: r.use_subagent !== 0,
+		maxRetries: r.max_retries ?? 0,
+		retryIntervalSeconds: r.retry_interval_seconds ?? 0,
+		status: r.status ?? "pending",
+		onClient: Boolean(r.on_client),
+		runSelected: r.run_selected !== 0,
+	};
+}
+
+function rowToCommand(r) {
+	if (!r) return null;
+	let payload = {};
+	try {
+		payload = JSON.parse(r.payload_json ?? "{}");
+	} catch {
+		payload = {};
+	}
+	return {
+		id: r.id,
+		clientId: r.client_id,
+		remoteId: r.remote_id,
+		type: r.type,
+		payload,
+		sequence: r.sequence,
+		status: r.status,
+		createdAt: r.created_at,
+		ackedAt: r.acked_at,
+	};
+}
+
+function rowToSyncEvent(r) {
+	if (!r) return null;
+	let payload = {};
+	try {
+		payload = JSON.parse(r.payload_json ?? "{}");
+	} catch {
+		payload = {};
+	}
+	return {
+		id: r.id,
+		clientId: r.client_id,
+		remoteId: r.remote_id,
+		type: r.type,
+		payload,
+		receivedAt: r.received_at,
+	};
+}
+
+export function getCommandById(id) {
+	return rowToCommand(open().prepare("SELECT * FROM commands WHERE id = ?").get(id));
+}
+
+/** Look up a sync client by hashed bearer token. */
+export function getClientByTokenHash(tokenHash) {
+	return rowToClient(open().prepare("SELECT * FROM clients WHERE token_hash = ?").get(tokenHash));
+}
+
+/** Look up a sync client by id. */
+export function getClientById(id) {
+	return rowToClient(open().prepare("SELECT * FROM clients WHERE id = ?").get(id));
+}
+
+/** Set local_id on a remote workflow after a successful command ack. */
+export function updateRemoteWorkflowLocalId({ remoteId, clientId, localId }) {
+	const info = open()
+		.prepare("UPDATE remote_workflows SET local_id = ? WHERE id = ? AND client_id = ?")
+		.run(localId, remoteId, clientId);
+	return info.changes > 0;
+}
+
+/** Insert or update a sync client row (registration / heartbeat). */
+export function upsertClient({
+	id,
+	name = null,
+	tokenHash,
+	status = "active",
+	capabilities = null,
+	lastSeenAt = null,
+	createdAt = null,
+}) {
+	const now = createdAt ?? new Date().toISOString();
+	const capabilitiesJson = capabilities == null ? null : JSON.stringify(capabilities);
+	open()
+		.prepare(
+			`INSERT INTO clients (id, name, token_hash, status, capabilities_json, last_seen_at, created_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)
+			 ON CONFLICT(id) DO UPDATE SET
+			   name = COALESCE(excluded.name, clients.name),
+			   token_hash = COALESCE(excluded.token_hash, clients.token_hash),
+			   status = COALESCE(excluded.status, clients.status),
+			   capabilities_json = COALESCE(excluded.capabilities_json, clients.capabilities_json),
+			   last_seen_at = COALESCE(excluded.last_seen_at, clients.last_seen_at)`,
+		)
+		.run(id, name, tokenHash, status, capabilitiesJson, lastSeenAt ?? now, now);
+	return rowToClient(open().prepare("SELECT * FROM clients WHERE id = ?").get(id));
+}
+
+/** List registered sync clients, newest first. */
+export function listClients() {
+	return open()
+		.prepare("SELECT * FROM clients ORDER BY created_at DESC")
+		.all()
+		.map(rowToClient);
+}
+
+/** Default: 3× the usual 30s heartbeat interval — no heartbeat means offline. */
+export const SYNC_CLIENT_ONLINE_TTL_MS = Number.parseInt(
+	process.env.TARGET_SYNC_CLIENT_ONLINE_TTL_MS ?? "90000",
+	10,
+);
+
+/** True when the client heartbeated recently enough to count as connected. */
+export function isSyncClientOnline(client, nowMs = Date.now(), ttlMs = SYNC_CLIENT_ONLINE_TTL_MS) {
+	if (!client || client.status !== "active" || !client.lastSeenAt) return false;
+	const seen = Date.parse(client.lastSeenAt);
+	if (!Number.isFinite(seen)) return false;
+	return nowMs - seen <= ttlMs;
+}
+
+/** Clients the operator can reach right now (recent heartbeat). */
+export function listOnlineClients(ttlMs = SYNC_CLIENT_ONLINE_TTL_MS) {
+	const now = Date.now();
+	return listClients().filter((c) => isSyncClientOnline(c, now, ttlMs));
+}
+
+/** Enqueue a command for a client; sequence is per remote_id. */
+export function enqueueCommand({
+	id = null,
+	clientId,
+	remoteId = null,
+	type,
+	payload = {},
+	createdAt = null,
+}) {
+	const v = validateCommand(type, payload);
+	if (!v.ok) {
+		const err = new Error("invalid command payload");
+		err.statusCode = 400;
+		err.errors = v.errors;
+		throw err;
+	}
+	const db = open();
+	const commandId = id ?? randomUUID();
+	const now = createdAt ?? new Date().toISOString();
+	const validatedPayload = v.value;
+	db.exec("BEGIN IMMEDIATE");
+	try {
+		const maxRow = db.prepare("SELECT COALESCE(MAX(sequence), 0) AS mx FROM commands WHERE remote_id = ?").get(remoteId);
+		const sequence = (maxRow?.mx ?? 0) + 1;
+		db.prepare(
+			`INSERT INTO commands (id, client_id, remote_id, type, payload_json, sequence, status, created_at, acked_at)
+			 VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, NULL)`,
+		).run(commandId, clientId, remoteId, type, JSON.stringify(validatedPayload), sequence, now);
+		db.exec("COMMIT");
+	} catch (err) {
+		db.exec("ROLLBACK");
+		throw err;
+	}
+	return getCommandById(commandId);
+}
+
+/**
+ * Claim pending commands for a client (pending → delivered).
+ * Per remote_id, only the lowest pending sequence is claimable once prior
+ * commands in that pipeline are acked or failed.
+ */
+export function claimPendingCommands(clientId, { limit = 10 } = {}) {
+	const db = open();
+	const claimed = [];
+	db.exec("BEGIN IMMEDIATE");
+	try {
+		const pending = db
+			.prepare(
+				`SELECT * FROM commands
+				 WHERE client_id = ? AND status = 'pending'
+				 ORDER BY created_at ASC, sequence ASC`,
+			)
+			.all(clientId);
+		const canClaim = db.prepare(
+			`SELECT status FROM commands WHERE remote_id = ? AND sequence = ? LIMIT 1`,
+		);
+		const markDelivered = db.prepare(
+			`UPDATE commands SET status = 'delivered' WHERE id = ? AND status = 'pending'`,
+		);
+		for (const row of pending) {
+			if (claimed.length >= limit) break;
+			if (row.sequence > 1 && row.remote_id) {
+				const prev = canClaim.get(row.remote_id, row.sequence - 1);
+				if (!prev || (prev.status !== "acked" && prev.status !== "failed")) continue;
+			}
+			const info = markDelivered.run(row.id);
+			if (info.changes > 0) {
+				claimed.push(rowToCommand({ ...row, status: "delivered" }));
+			}
+		}
+		db.exec("COMMIT");
+	} catch (err) {
+		db.exec("ROLLBACK");
+		throw err;
+	}
+	return claimed;
+}
+
+/** Acknowledge a delivered command (delivered → acked | failed). */
+export function ackCommand({ commandId, clientId, status, ackedAt = null }) {
+	if (status !== "acked" && status !== "failed") {
+		throw new Error("ack status must be acked or failed");
+	}
+	const now = ackedAt ?? new Date().toISOString();
+	const info = open()
+		.prepare(
+			`UPDATE commands
+			 SET status = ?, acked_at = ?
+			 WHERE id = ? AND client_id = ? AND status IN ('delivered', 'pending')`,
+		)
+		.run(status, now, commandId, clientId);
+	if (info.changes === 0) {
+		const existing = getCommandById(commandId);
+		if (existing?.clientId === clientId && (existing.status === "acked" || existing.status === "failed")) {
+			return { ok: true, alreadyRecorded: true, command: existing };
+		}
+		return { ok: false, alreadyRecorded: false, command: existing };
+	}
+	return { ok: true, alreadyRecorded: false, command: getCommandById(commandId) };
+}
+
+/** Insert a sync event idempotently by event id. Returns inserted | duplicate. */
+export function insertSyncEvent({
+	id,
+	clientId,
+	remoteId = null,
+	type,
+	payload = {},
+	receivedAt = null,
+}) {
+	const now = receivedAt ?? new Date().toISOString();
+	const info = open()
+		.prepare(
+			`INSERT OR IGNORE INTO sync_events (id, client_id, remote_id, type, payload_json, received_at)
+			 VALUES (?, ?, ?, ?, ?, ?)`,
+		)
+		.run(id, clientId, remoteId, type, JSON.stringify(payload), now);
+	return info.changes > 0 ? "inserted" : "duplicate";
+}
+
+/** Look up a remote workflow by id. */
+export function getRemoteWorkflowById(id) {
+	return rowToRemoteWorkflow(open().prepare("SELECT * FROM remote_workflows WHERE id = ?").get(id));
+}
+
+/** Insert a remote workflow row. */
+export function createRemoteWorkflow({
+	id = null,
+	clientId,
+	name,
+	status = "pending",
+	conversationContext = null,
+	sandbox = "docker",
+	agent = null,
+	createdAt = null,
+}) {
+	const remoteId = id ?? randomUUID();
+	const now = createdAt ?? new Date().toISOString();
+	open()
+		.prepare(
+			`INSERT INTO remote_workflows (id, client_id, name, status, local_id, conversation_context, sandbox, agent, created_at)
+			 VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?)`,
+		)
+		.run(remoteId, clientId, name, status, conversationContext, sandbox, agent, now);
+	return getRemoteWorkflowById(remoteId);
+}
+
+/** Update conversation context on a remote workflow (server-side plan). */
+export function updateRemoteWorkflowContext(id, conversationContext) {
+	const info = open()
+		.prepare("UPDATE remote_workflows SET conversation_context = ? WHERE id = ?")
+		.run(conversationContext, id);
+	return info.changes > 0 ? getRemoteWorkflowById(id) : null;
+}
+
+/** Count task steps planned for a remote workflow. */
+export function countRemoteSteps(remoteId) {
+	const row = open()
+		.prepare("SELECT COUNT(*) AS n FROM remote_workflow_steps WHERE remote_id = ?")
+		.get(remoteId);
+	return row?.n ?? 0;
+}
+
+/** Mark a mirrored step as present on the client (command acked). */
+export function markRemoteStepOnClient(remoteId, stepKey) {
+	if (!remoteId || !stepKey) return false;
+	const info = open()
+		.prepare("UPDATE remote_workflow_steps SET on_client = 1 WHERE remote_id = ? AND step_key = ?")
+		.run(remoteId, stepKey);
+	return info.changes > 0;
+}
+
+/** Mark a step as waiting for the client to apply a pending change. */
+export function markRemoteStepPendingSync(remoteId, stepKey) {
+	if (!remoteId || !stepKey) return false;
+	const info = open()
+		.prepare("UPDATE remote_workflow_steps SET on_client = 0 WHERE remote_id = ? AND step_key = ?")
+		.run(remoteId, stepKey);
+	return info.changes > 0;
+}
+
+/** Reconcile on_client from command queue (acked vs in-flight). */
+export function refreshRemoteStepClientSync(remoteId) {
+	const db = open();
+	db.prepare(
+		`UPDATE remote_workflow_steps SET on_client = 1
+		 WHERE remote_id = ?
+		   AND step_key IN (
+		     SELECT json_extract(payload_json, '$.step_key')
+		     FROM commands
+		     WHERE remote_id = ? AND type IN ('step.add', 'step.edit') AND status = 'acked'
+		   )`,
+	).run(remoteId, remoteId);
+	db.prepare(
+		`UPDATE remote_workflow_steps SET on_client = 0
+		 WHERE remote_id = ?
+		   AND step_key IN (
+		     SELECT json_extract(payload_json, '$.step_key')
+		     FROM commands
+		     WHERE remote_id = ? AND type IN ('step.add', 'step.edit') AND status IN ('pending', 'delivered')
+		   )`,
+	).run(remoteId, remoteId);
+}
+
+/** Drop a remote workflow row and its mirrored plan after the client confirms delete. */
+export function removeRemoteWorkflow(remoteId) {
+	const db = open();
+	db.exec("BEGIN IMMEDIATE");
+	try {
+		db.prepare("DELETE FROM remote_workflow_steps WHERE remote_id = ?").run(remoteId);
+		db.prepare("DELETE FROM remote_workflows WHERE id = ?").run(remoteId);
+		db.exec("COMMIT");
+	} catch (err) {
+		db.exec("ROLLBACK");
+		throw err;
+	}
+	return true;
+}
+
+function isRemoteWorkflowAlreadyGoneError(message) {
+	if (typeof message !== "string" || !message) return false;
+	return /not mapped locally|unknown workflow/i.test(message);
+}
+
+function revertRemoteWorkflowDeleteState(remoteId) {
+	const workflow = getRemoteWorkflowById(remoteId);
+	if (!workflow || workflow.status !== "deleting") return;
+	const steps = listRemoteSteps(remoteId);
+	const allDone =
+		steps.length > 0 &&
+		steps.every((s) => s.status === "done" || s.status === "completed" || s.status === "failed");
+	updateRemoteWorkflowStatus(remoteId, allDone ? "completed" : "draft");
+}
+
+/** Remove or revert remote workflows stuck in deleting after the delete command finished. */
+export function reconcileStuckDeletingRemoteWorkflows() {
+	const db = open();
+	const acked = db
+		.prepare(
+			`SELECT rw.id FROM remote_workflows rw
+			 WHERE rw.status = 'deleting'
+			   AND EXISTS (
+			     SELECT 1 FROM commands c
+			     WHERE c.remote_id = rw.id AND c.type = 'workflow.delete' AND c.status = 'acked'
+			   )`,
+		)
+		.all();
+	for (const row of acked) removeRemoteWorkflow(row.id);
+
+	const failed = db
+		.prepare(
+			`SELECT rw.id FROM remote_workflows rw
+			 WHERE rw.status = 'deleting'
+			   AND EXISTS (
+			     SELECT 1 FROM commands c
+			     WHERE c.remote_id = rw.id AND c.type = 'workflow.delete' AND c.status = 'failed'
+			   )
+			   AND NOT EXISTS (
+			     SELECT 1 FROM commands c
+			     WHERE c.remote_id = rw.id AND c.type = 'workflow.delete'
+			       AND c.status IN ('pending', 'delivered')
+			   )`,
+		)
+		.all();
+	for (const row of failed) {
+		const latestFail = db
+			.prepare(
+				`SELECT payload_json FROM sync_events
+				 WHERE remote_id = ? AND type = 'command.ack'
+				 ORDER BY received_at DESC LIMIT 30`,
+			)
+			.all(row.id)
+			.map((r) => {
+				try {
+					return JSON.parse(r.payload_json ?? "{}");
+				} catch {
+					return {};
+				}
+			})
+			.find((p) => p.status === "failed" && isRemoteWorkflowAlreadyGoneError(p.error?.message));
+		if (latestFail) removeRemoteWorkflow(row.id);
+		else revertRemoteWorkflowDeleteState(row.id);
+	}
+}
+
+/** After a command finishes on the client, update the server-side plan mirror. */
+export function applyCommandAckToPlan(command) {
+	if (!command?.remoteId) return;
+	if (command.type === "workflow.delete") {
+		if (command.status === "acked") {
+			removeRemoteWorkflow(command.remoteId);
+			return;
+		}
+		if (command.status === "failed") {
+			if (isRemoteWorkflowAlreadyGoneError(command.ackError)) {
+				removeRemoteWorkflow(command.remoteId);
+				return;
+			}
+			revertRemoteWorkflowDeleteState(command.remoteId);
+			return;
+		}
+	}
+	if (command.status !== "acked") return;
+	if (command.type === "step.add" || command.type === "step.edit") {
+		const stepKey = command.payload?.step_key;
+		if (typeof stepKey === "string" && stepKey) markRemoteStepOnClient(command.remoteId, stepKey);
+	}
+}
+
+/** List planned steps for a remote workflow in run order. */
+export function listRemoteSteps(remoteId) {
+	refreshRemoteStepClientSync(remoteId);
+	return open()
+		.prepare("SELECT * FROM remote_workflow_steps WHERE remote_id = ? ORDER BY order_index ASC, step_key ASC")
+		.all(remoteId)
+		.map(rowToRemoteStep);
+}
+
+/** Insert or replace a planned step row (operator plan mirror). */
+export function upsertRemoteStep({
+	remoteId,
+	stepKey,
+	orderIndex,
+	description,
+	acceptanceCriteria = null,
+	manualReview = false,
+	useSubagent = true,
+	maxRetries = 0,
+	retryIntervalSeconds = 0,
+	status = "pending",
+}) {
+	const id = randomUUID();
+	open()
+		.prepare(
+			`INSERT INTO remote_workflow_steps
+			 (id, remote_id, step_key, order_index, description, acceptance_criteria, manual_review, use_subagent, max_retries, retry_interval_seconds, status)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 ON CONFLICT(remote_id, step_key) DO UPDATE SET
+			   order_index = excluded.order_index,
+			   description = excluded.description,
+			   acceptance_criteria = excluded.acceptance_criteria,
+			   manual_review = excluded.manual_review,
+			   use_subagent = excluded.use_subagent,
+			   max_retries = excluded.max_retries,
+			   retry_interval_seconds = excluded.retry_interval_seconds,
+			   status = COALESCE(excluded.status, remote_workflow_steps.status)`,
+		)
+		.run(
+			id,
+			remoteId,
+			stepKey,
+			orderIndex,
+			description,
+			acceptanceCriteria,
+			manualReview ? 1 : 0,
+			useSubagent ? 1 : 0,
+			maxRetries,
+			retryIntervalSeconds,
+			status,
+		);
+	return open()
+		.prepare("SELECT * FROM remote_workflow_steps WHERE remote_id = ? AND step_key = ?")
+		.get(remoteId, stepKey);
+}
+
+/** Remove a planned step. */
+export function deleteRemoteStep(remoteId, stepKey) {
+	const info = open()
+		.prepare("DELETE FROM remote_workflow_steps WHERE remote_id = ? AND step_key = ?")
+		.run(remoteId, stepKey);
+	return info.changes > 0;
+}
+
+/** Update step status from client events. */
+export function updateRemoteStepStatus(remoteId, stepKey, status) {
+	const info = open()
+		.prepare("UPDATE remote_workflow_steps SET status = ? WHERE remote_id = ? AND step_key = ?")
+		.run(status, remoteId, stepKey);
+	return info.changes > 0;
+}
+
+/** Reorder a step and compact order_index for siblings. */
+export function moveRemoteStep(remoteId, stepKey, toIndex) {
+	const db = open();
+	const steps = listRemoteSteps(remoteId);
+	const current = steps.find((s) => s.stepKey === stepKey);
+	if (!current) return false;
+	const without = steps.filter((s) => s.stepKey !== stepKey);
+	const clamped = Math.max(0, Math.min(toIndex, without.length));
+	without.splice(clamped, 0, current);
+	db.exec("BEGIN IMMEDIATE");
+	try {
+		for (let i = 0; i < without.length; i++) {
+			db.prepare("UPDATE remote_workflow_steps SET order_index = ? WHERE remote_id = ? AND step_key = ?").run(
+				i,
+				remoteId,
+				without[i].stepKey,
+			);
+		}
+		db.exec("COMMIT");
+	} catch (err) {
+		db.exec("ROLLBACK");
+		throw err;
+	}
+	return true;
+}
+
+/** Mirror an enqueued command into the server-side plan (best-effort). */
+export function mirrorCommandToPlan({ remoteId, type, payload = {} }) {
+	if (!remoteId) return;
+	if (type === "step.add") {
+		const stepKey = String(payload.step_key ?? "");
+		const description = String(payload.description ?? "");
+		if (!stepKey || !description.trim()) return;
+		const orderIndex =
+			typeof payload.order_index === "number" ? payload.order_index : countRemoteSteps(remoteId);
+		upsertRemoteStep({
+			remoteId,
+			stepKey,
+			orderIndex,
+			description,
+			acceptanceCriteria: payload.acceptance_criteria?.trim() || null,
+			manualReview: payload.manual_review === true,
+			useSubagent: payload.use_subagent !== false,
+			maxRetries: payload.max_retries ?? 0,
+			retryIntervalSeconds: payload.retry_interval_seconds ?? 0,
+		});
+		return;
+	}
+	if (type === "step.edit") {
+		const stepKey = String(payload.step_key ?? "");
+		if (!stepKey) return;
+		markRemoteStepPendingSync(remoteId, stepKey);
+		const existing = open()
+			.prepare("SELECT * FROM remote_workflow_steps WHERE remote_id = ? AND step_key = ?")
+			.get(remoteId, stepKey);
+		if (!existing) return;
+		upsertRemoteStep({
+			remoteId,
+			stepKey,
+			orderIndex: existing.order_index,
+			description: typeof payload.description === "string" ? payload.description : existing.description,
+			acceptanceCriteria:
+				typeof payload.acceptance_criteria === "string"
+					? payload.acceptance_criteria || null
+					: existing.acceptance_criteria,
+			manualReview:
+				typeof payload.manual_review === "boolean" ? payload.manual_review : Boolean(existing.manual_review),
+			useSubagent:
+				typeof payload.use_subagent === "boolean" ? payload.use_subagent : existing.use_subagent !== 0,
+			maxRetries: typeof payload.max_retries === "number" ? payload.max_retries : existing.max_retries,
+			retryIntervalSeconds:
+				typeof payload.retry_interval_seconds === "number"
+					? payload.retry_interval_seconds
+					: existing.retry_interval_seconds,
+			status: existing.status,
+		});
+		return;
+	}
+	if (type === "step.remove") {
+		deleteRemoteStep(remoteId, String(payload.step_key ?? ""));
+		return;
+	}
+	if (type === "step.move") {
+		moveRemoteStep(remoteId, String(payload.step_key ?? ""), payload.to_index ?? 0);
+	}
+}
+
+/** Apply client sync events to the mirrored plan (status only). */
+export function mirrorSyncEventToPlan({ remoteId, type, payload = {} }) {
+	if (!remoteId) return;
+	if (type === "workflow.status_changed" && typeof payload.to === "string") {
+		const workflow = getRemoteWorkflowById(remoteId);
+		if (workflow?.status === "deleting") return;
+		updateRemoteWorkflowStatus(remoteId, payload.to);
+		return;
+	}
+	if (type === "step.status_changed") {
+		const stepKey = String(payload.step_key ?? "");
+		const to = String(payload.to ?? "");
+		if (stepKey && to) {
+			updateRemoteStepStatus(remoteId, stepKey, to);
+			markRemoteStepOnClient(remoteId, stepKey);
+		}
+		return;
+	}
+	if (type === "command.ack" && typeof payload.command_id === "string") {
+		const command = getCommandById(payload.command_id);
+		if (!command) return;
+		const status = payload.status === "acked" ? "acked" : payload.status === "failed" ? "failed" : null;
+		if (!status) return;
+		applyCommandAckToPlan({
+			...command,
+			status,
+			ackError: typeof payload.error?.message === "string" ? payload.error.message : undefined,
+		});
+	}
+}
+
+/** Update remote workflow status. Returns updated row or null if not found. */
+export function updateRemoteWorkflowStatus(id, status) {
+	const info = open().prepare("UPDATE remote_workflows SET status = ? WHERE id = ?").run(status, id);
+	return info.changes > 0 ? getRemoteWorkflowById(id) : null;
+}
+
+/** List sync events, newest first. */
+export function listSyncEvents({ clientId = null, remoteId = null, limit = 50 } = {}) {
+	const lim = Math.min(200, Math.max(1, limit));
+	const clauses = [];
+	const params = [];
+	if (clientId) {
+		clauses.push("client_id = ?");
+		params.push(clientId);
+	}
+	if (remoteId) {
+		clauses.push("remote_id = ?");
+		params.push(remoteId);
+	}
+	let sql = "SELECT * FROM sync_events";
+	if (clauses.length) sql += ` WHERE ${clauses.join(" AND ")}`;
+	sql += " ORDER BY received_at DESC LIMIT ?";
+	params.push(lim);
+	return open()
+		.prepare(sql)
+		.all(...params)
+		.map(rowToSyncEvent);
+}
+
+/** Step keys the operator marked to run on the next start/resume/restart. */
+export function getRunSelectedStepKeys(remoteId) {
+	return open()
+		.prepare(
+			`SELECT step_key FROM remote_workflow_steps
+			 WHERE remote_id = ? AND run_selected = 1
+			 ORDER BY order_index ASC, step_key ASC`,
+		)
+		.all(remoteId)
+		.map((row) => row.step_key);
+}
+
+/** Persist which planned steps the operator wants to run. */
+export function updateRemoteStepRunSelection(remoteId, stepKeys) {
+	const selected = new Set(stepKeys);
+	const rows = open()
+		.prepare("SELECT step_key FROM remote_workflow_steps WHERE remote_id = ?")
+		.all(remoteId);
+	const db = open();
+	for (const row of rows) {
+		db.prepare("UPDATE remote_workflow_steps SET run_selected = ? WHERE remote_id = ? AND step_key = ?").run(
+			selected.has(row.step_key) ? 1 : 0,
+			remoteId,
+			row.step_key,
+		);
+	}
+	return getRunSelectedStepKeys(remoteId);
+}
+
+/** Count mirrored steps not yet confirmed on the client. */
+export function countStepsPendingSync(remoteId) {
+	refreshRemoteStepClientSync(remoteId);
+	const row = open()
+		.prepare("SELECT COUNT(*) AS n FROM remote_workflow_steps WHERE remote_id = ? AND on_client = 0")
+		.get(remoteId);
+	return row?.n ?? 0;
+}
+
+/** List remote workflows, optionally filtered by client. */
+export function listRemoteWorkflows({ clientId = null } = {}) {
+	reconcileStuckDeletingRemoteWorkflows();
+	const sql = clientId
+		? `SELECT rw.*, (SELECT COUNT(*) FROM remote_workflow_steps rs WHERE rs.remote_id = rw.id) AS step_count
+		   FROM remote_workflows rw WHERE rw.client_id = ? ORDER BY rw.created_at DESC`
+		: `SELECT rw.*, (SELECT COUNT(*) FROM remote_workflow_steps rs WHERE rs.remote_id = rw.id) AS step_count
+		   FROM remote_workflows rw ORDER BY rw.created_at DESC`;
+	const rows = clientId ? open().prepare(sql).all(clientId) : open().prepare(sql).all();
+	for (const row of rows) refreshRemoteStepClientSync(row.id);
+	const pendingByRemote = open()
+		.prepare(
+			`SELECT remote_id, COUNT(*) AS steps_pending_sync
+			 FROM remote_workflow_steps WHERE on_client = 0 GROUP BY remote_id`,
+		)
+		.all();
+	const pendingMap = Object.fromEntries(pendingByRemote.map((p) => [p.remote_id, p.steps_pending_sync]));
+	return rows.map((row) =>
+		rowToRemoteWorkflow({ ...row, steps_pending_sync: pendingMap[row.id] ?? 0 }),
+	);
+}
+
+/** Commands waiting for the client to poll or ack. */
+export function listInFlightCommands(remoteId) {
+	return open()
+		.prepare(
+			`SELECT * FROM commands
+			 WHERE remote_id = ? AND status IN ('pending', 'delivered')
+			 ORDER BY sequence ASC`,
+		)
+		.all(remoteId)
+		.map(rowToCommand);
+}
+
+/** Remote workflow with its planned steps (operator detail view). */
+export function getRemoteWorkflowDetail(id) {
+	const workflow = getRemoteWorkflowById(id);
+	if (!workflow) return null;
+	const steps = listRemoteSteps(id);
+	return {
+		workflow: { ...workflow, stepCount: steps.length, stepsPendingSync: steps.filter((s) => !s.onClient).length },
+		steps,
+		pendingCommands: listInFlightCommands(id),
 	};
 }

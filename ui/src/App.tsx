@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { kindLabel, kindTip } from "./api/kinds.ts";
 import { forgotPassword, logout } from "./api/auth.ts";
 import type {
@@ -12,6 +12,10 @@ import type {
 	WorkflowNamesResponse,
 	WorkflowRow,
 	WorkflowsResponse,
+	SyncClientsResponse,
+	SyncEventsResponse,
+	SyncRemoteWorkflowDetailResponse,
+	SyncRemoteWorkflowsResponse,
 } from "./api/types.ts";
 import { EMPTY_FILTERS } from "./api/types.ts";
 import { Bars } from "./components/Bars.tsx";
@@ -21,6 +25,8 @@ import { InstancesTable } from "./components/InstancesTable.tsx";
 import { Kpi } from "./components/Kpi.tsx";
 import { Pagination } from "./components/Pagination.tsx";
 import { TargetMark } from "./components/TargetMark.tsx";
+import { RemoteWorkflowsPanel } from "./components/RemoteWorkflowsPanel.tsx";
+import { SyncClientsPanel } from "./components/SyncClientsPanel.tsx";
 import { UsersPanel } from "./components/UsersPanel.tsx";
 import { WorkflowDetail } from "./components/WorkflowDetail.tsx";
 import { WorkflowsTable } from "./components/WorkflowsTable.tsx";
@@ -29,6 +35,8 @@ import { compactNumber, localToIso } from "./lib/format.ts";
 
 const POLL_MS = 4000;
 const DEFAULT_PAGE_SIZE = 25;
+
+type DashboardTab = "activity" | "remote";
 
 function ChangePasswordButton({ email }: { email: string }) {
 	const [sent, setSent] = useState(false);
@@ -68,6 +76,7 @@ function ChangePasswordButton({ email }: { email: string }) {
  * always answer the same question.
  */
 export function App({ user, onSignOut }: { user: AuthUser; onSignOut: () => void }) {
+	const [tab, setTab] = useState<DashboardTab>("activity");
 	const [filters, setFilters] = useState<Filters>({ ...EMPTY_FILTERS });
 	// Workflow list paging. The list is unbounded — a busy fleet reports
 	// thousands — so the dashboard asks for one page and the server never returns
@@ -134,6 +143,30 @@ export function App({ user, onSignOut }: { user: AuthUser; onSignOut: () => void
 		POLL_MS,
 	);
 
+	const [syncRefreshKey, setSyncRefreshKey] = useState(0);
+	const syncRefresh = useCallback(() => setSyncRefreshKey((k) => k + 1), []);
+	const remoteActive = tab === "remote";
+	const syncQuery = remoteActive && syncRefreshKey ? `?_=${syncRefreshKey}` : "";
+	const { data: syncClients } = useApi<SyncClientsResponse>(
+		remoteActive ? `/api/sync/clients${syncQuery}` : null,
+		POLL_MS,
+	);
+	const { data: syncWorkflows } = useApi<SyncRemoteWorkflowsResponse>(
+		remoteActive ? `/api/sync/remote-workflows${syncQuery}` : null,
+		POLL_MS,
+	);
+	const [selectedRemoteId, setSelectedRemoteId] = useState("");
+	const syncDetailPath =
+		remoteActive && selectedRemoteId
+			? `/api/sync/remote-workflows/${encodeURIComponent(selectedRemoteId)}${syncQuery}`
+			: null;
+	const { data: syncWorkflowDetail } = useApi<SyncRemoteWorkflowDetailResponse>(syncDetailPath, POLL_MS);
+	const syncEventsPath =
+		remoteActive && selectedRemoteId
+			? `/api/sync/events?remote_id=${encodeURIComponent(selectedRemoteId)}&limit=30`
+			: null;
+	const { data: syncEvents } = useApi<SyncEventsResponse>(syncEventsPath, POLL_MS);
+
 	// The list is live: workflows can drop out of range under a reader parked on
 	// the last page. Fall back to the new last page instead of showing nothing.
 	const total = wfs?.total ?? 0;
@@ -189,100 +222,152 @@ export function App({ user, onSignOut }: { user: AuthUser; onSignOut: () => void
 			) : null}
 
 			<main className="shell">
-				<h1 className="page-title">Activity across the fleet</h1>
-				<p className="page-sub">
-					Workflow runs, steps, token usage and errors reported by every Target instance pointed at this server.
-				</p>
+				<nav className="dash-tabs" aria-label="Dashboard sections">
+					<button
+						type="button"
+						className={`dash-tab${tab === "activity" ? " dash-tab--active" : ""}`}
+						onClick={() => setTab("activity")}
+					>
+						Activity
+					</button>
+					<button
+						type="button"
+						className={`dash-tab${tab === "remote" ? " dash-tab--active" : ""}`}
+						onClick={() => setTab("remote")}
+					>
+						Remote control
+					</button>
+				</nav>
 
-				{statsErr ? <div className="err">{`API error: ${statsErr}`}</div> : null}
+				{tab === "activity" ? (
+					<>
+						<h1 className="page-title">Activity across the fleet</h1>
+						<p className="page-sub">
+							Workflow runs, steps, token usage and errors reported by every Target instance pointed at this server.
+						</p>
 
-				<FilterBar
-					filters={filters}
-					onChange={setFilters}
-					users={users?.users ?? []}
-					instances={inst?.instances ?? []}
-					workflows={workflowOptions}
-					kinds={kinds}
-					agents={allStats?.agents ?? stats?.agents ?? []}
-					sandboxes={allStats?.sandboxes ?? stats?.sandboxes ?? []}
-					matched={stats ? stats.totalEvents : null}
-				/>
+						{statsErr ? <div className="err">{`API error: ${statsErr}`}</div> : null}
 
-				<div className="kpis">
-					<Kpi label="Events" value={stats ? stats.totalEvents.toLocaleString() : "..."} tone="accent" />
-					<Kpi label="Instances" value={stats ? stats.totalInstances : "..."} />
-					<Kpi label="Workflows" value={stats ? stats.workflows : "..."} />
-					<Kpi label="Step failures" value={stats ? stats.failures : "..."} tone={stats && stats.failures ? "danger" : ""} />
-					{/* Input is the FULL input — new + cache creation + cache read — which
-					    is what the operator's client reports as "in". The compact hint
-					    below each is the client's own abbreviation, so the two can be
-					    read against each other without arithmetic. */}
-					<Kpi
-						label="Input tokens"
-						value={stats ? stats.usage.inputTokens.toLocaleString() : "..."}
-						hint={stats ? compactNumber(stats.usage.inputTokens) : null}
-					/>
-					<Kpi
-						label="Output tokens"
-						value={stats ? stats.usage.outputTokens.toLocaleString() : "..."}
-						hint={stats ? compactNumber(stats.usage.outputTokens) : null}
-					/>
-				</div>
+						<FilterBar
+							filters={filters}
+							onChange={setFilters}
+							users={users?.users ?? []}
+							instances={inst?.instances ?? []}
+							workflows={workflowOptions}
+							kinds={kinds}
+							agents={allStats?.agents ?? stats?.agents ?? []}
+							sandboxes={allStats?.sandboxes ?? stats?.sandboxes ?? []}
+							matched={stats ? stats.totalEvents : null}
+						/>
 
-				<div className="panel" id="dashboard-accounts">
-					<h2>Dashboard accounts</h2>
-					<div className="panel-note">Invite colleagues who can sign in to this dashboard. Distinct from the User filter above, which filters reported activity.</div>
-					<UsersPanel currentUser={user} />
-				</div>
+						<div className="kpis">
+							<Kpi label="Events" value={stats ? stats.totalEvents.toLocaleString() : "..."} tone="accent" />
+							<Kpi label="Instances" value={stats ? stats.totalInstances : "..."} />
+							<Kpi label="Workflows" value={stats ? stats.workflows : "..."} />
+							<Kpi label="Step failures" value={stats ? stats.failures : "..."} tone={stats && stats.failures ? "danger" : ""} />
+							{/* Input is the FULL input — new + cache creation + cache read — which
+							    is what the operator's client reports as "in". The compact hint
+							    below each is the client's own abbreviation, so the two can be
+							    read against each other without arithmetic. */}
+							<Kpi
+								label="Input tokens"
+								value={stats ? stats.usage.inputTokens.toLocaleString() : "..."}
+								hint={stats ? compactNumber(stats.usage.inputTokens) : null}
+							/>
+							<Kpi
+								label="Output tokens"
+								value={stats ? stats.usage.outputTokens.toLocaleString() : "..."}
+								hint={stats ? compactNumber(stats.usage.outputTokens) : null}
+							/>
+						</div>
 
-				<div className="panel">
-					<h2>Workflows</h2>
-					<WorkflowsTable workflows={wfs?.workflows ?? null} selectedId={filters.workflow} onSelect={selectWorkflow} />
-					<Pagination
-						total={wfs ? wfs.total : null}
-						page={page}
-						pageSize={pageSize}
-						shown={wfs?.workflows.length ?? 0}
-						onPage={setPage}
-						onPageSize={(n) => {
-							setPageSize(n);
-							setPage(0);
-						}}
-						label="workflows"
-					/>
-					<div className="panel-note">Click a workflow to see its steps and events. Honours the filters above.</div>
-				</div>
+						<div className="panel">
+							<h2>Workflows</h2>
+							<WorkflowsTable workflows={wfs?.workflows ?? null} selectedId={filters.workflow} onSelect={selectWorkflow} />
+							<Pagination
+								total={wfs ? wfs.total : null}
+								page={page}
+								pageSize={pageSize}
+								shown={wfs?.workflows.length ?? 0}
+								onPage={setPage}
+								onPageSize={(n) => {
+									setPageSize(n);
+									setPage(0);
+								}}
+								label="workflows"
+							/>
+							<div className="panel-note">Click a workflow to see its steps and events. Honours the filters above.</div>
+						</div>
 
-				{filters.workflow ? (
-					<div className="panel wf-detail">
-						<h2>Workflow detail</h2>
-						<WorkflowDetail detail={wfDetail} error={wfDetailErr} onClose={() => selectWorkflow("")} />
-					</div>
-				) : null}
+						{filters.workflow ? (
+							<div className="panel wf-detail">
+								<h2>Workflow detail</h2>
+								<WorkflowDetail detail={wfDetail} error={wfDetailErr} onClose={() => selectWorkflow("")} />
+							</div>
+						) : null}
 
-				<div className="panel">
-					<h2>Reporting instances (the fleet)</h2>
-					<InstancesTable instances={inst?.instances ?? null} />
-				</div>
+						<div className="panel">
+							<h2>Reporting instances (the fleet)</h2>
+							<InstancesTable instances={inst?.instances ?? null} />
+						</div>
 
-				<div className="grid">
-					<div className="panel">
-						<h2>Events by kind</h2>
-						<Bars rows={stats?.byKind ?? []} keyName="kind" valName="count" keyLabel={kindLabel} keyTip={kindTip} />
-						<div className="panel-note">Honours the filters above.</div>
-					</div>
-					<div className="panel">
-						<h2>Client versions</h2>
-						<Bars rows={stats?.byVersion ?? []} keyName="version" valName="count" />
-					</div>
-				</div>
+						<div className="grid">
+							<div className="panel">
+								<h2>Events by kind</h2>
+								<Bars rows={stats?.byKind ?? []} keyName="kind" valName="count" keyLabel={kindLabel} keyTip={kindTip} />
+								<div className="panel-note">Honours the filters above.</div>
+							</div>
+							<div className="panel">
+								<h2>Client versions</h2>
+								<Bars rows={stats?.byVersion ?? []} keyName="version" valName="count" />
+							</div>
+						</div>
 
-				<div style={{ height: "var(--space-6)" }} />
+						<div style={{ height: "var(--space-6)" }} />
 
-				<div className="panel">
-					<h2>Live event feed</h2>
-					<EventFeed events={evs?.events ?? null} />
-				</div>
+						<div className="panel">
+							<h2>Live event feed</h2>
+							<EventFeed events={evs?.events ?? null} />
+						</div>
+
+						<div className="panel" id="dashboard-accounts">
+							<h2>Dashboard accounts</h2>
+							<div className="panel-note">Invite colleagues who can sign in to this dashboard. Distinct from the User filter above, which filters reported activity.</div>
+							<UsersPanel currentUser={user} />
+						</div>
+					</>
+				) : (
+					<>
+						<h1 className="page-title">Remote control</h1>
+						<p className="page-sub">
+							Sync clients and create or manage workflows on connected Target machines. Commands are queued for the sync agent to poll.
+						</p>
+
+						<div className="panel" id="sync-clients">
+							<h2>Sync clients</h2>
+							<div className="panel-note">Target machines registered for remote control. Availability comes from client heartbeats.</div>
+							<SyncClientsPanel clients={syncClients?.clients ?? null} />
+						</div>
+
+						<div className="panel" id="sync-remote-workflows">
+							<h2>Remote workflows</h2>
+							<div className="panel-note">Create and control workflows on connected clients.</div>
+							<RemoteWorkflowsPanel
+								clients={syncClients?.clients ?? null}
+								workflows={syncWorkflows?.remote_workflows ?? null}
+								detail={syncWorkflowDetail ?? null}
+								events={syncEvents?.events ?? null}
+								selectedId={selectedRemoteId}
+								onSelect={setSelectedRemoteId}
+								onRefresh={syncRefresh}
+								onOpenInActivity={(localId) => {
+									setTab("activity");
+									setFilters((f) => ({ ...f, workflow: localId }));
+								}}
+							/>
+						</div>
+					</>
+				)}
 			</main>
 		</>
 	);

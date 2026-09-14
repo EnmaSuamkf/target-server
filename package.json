@@ -8,8 +8,12 @@
     "node": ">=24"
   },
   "scripts": {
+    "prestart": "node scripts/check-node.mjs",
     "start": "node server.mjs",
+    "pretest": "node scripts/check-node.mjs",
     "test": "node --test",
+    "test:sync": "node --test test/sync.test.mjs test/sync-db.test.mjs test/sync-api.test.mjs test/sync-operator.test.mjs test/sync-e2e-smoke.test.mjs",
+    "preui:install": "node scripts/check-node.mjs",
     "ui:install": "npm --prefix ui install && npm --prefix ui run build",
     "build": "npm --prefix ui run build",
     "ui:dev": "npm --prefix ui run dev",
