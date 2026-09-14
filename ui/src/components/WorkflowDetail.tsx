@@ -11,6 +11,8 @@ interface WorkflowDetailProps {
 	detail: WorkflowDetailResponse | null;
 	error: string | null;
 	onClose: () => void;
+	/** Hide the close control when embedded inside another panel. */
+	embedded?: boolean;
 }
 
 /**
@@ -27,8 +29,9 @@ interface WorkflowDetailProps {
  * way the operator's own client prints it — the point of reporting usage at all
  * is that the two agree.
  */
-export function WorkflowDetail({ detail, error, onClose }: WorkflowDetailProps) {
+export function WorkflowDetail({ detail, error, onClose, embedded = false }: WorkflowDetailProps) {
 	const [view, setView] = useState<"canvas" | "list">("canvas");
+	const [showAllUsageSessions, setShowAllUsageSessions] = useState(false);
 	if (error) return <div className="err">{`Workflow detail: ${error}`}</div>;
 	if (!detail) return <div className="empty">Loading workflow...</div>;
 	const w = detail.workflow;
@@ -40,6 +43,10 @@ export function WorkflowDetail({ detail, error, onClose }: WorkflowDetailProps) 
 	// the same as a workflow that never reported a snapshot.
 	const usage = detail.usage;
 	const sessions = usage?.sessions ?? [];
+	// Restarts create a new Claude session each time — mirror the hub and show the
+	// current one by default, not every historical context bar stacked together.
+	const visibleSessions =
+		showAllUsageSessions || sessions.length <= 1 ? sessions : sessions.slice(0, 1);
 	return (
 		<>
 			<div className="wf-detail-head">
@@ -49,9 +56,11 @@ export function WorkflowDetail({ detail, error, onClose }: WorkflowDetailProps) 
 				<AgentBadge agent={w.agent} />
 				<SandboxBadge sandbox={w.sandbox} image={w.image} />
 				{w.user ? <span className="wf-user">{w.user}</span> : null}
-				<button type="button" className="btn btn--ghost wf-close" onClick={onClose}>
-					Close
-				</button>
+				{embedded ? null : (
+					<button type="button" className="btn btn--ghost wf-close" onClick={onClose}>
+						Close
+					</button>
+				)}
 			</div>
 
 			<div className="wf-view-switch">
@@ -91,12 +100,23 @@ export function WorkflowDetail({ detail, error, onClose }: WorkflowDetailProps) 
 			) : (
 				<>
 					{sessions.length > 1 ? (
-						<div className="panel-note">
-							{`${sessions.length} sessions · in ${compactNumber(usage?.inputTokens ?? 0)} · out ${compactNumber(usage?.outputTokens ?? 0)} in total`}
+						<div className="panel-note usage-summary">
+							<span>
+								{showAllUsageSessions
+									? `${sessions.length} sessions · in ${compactNumber(usage?.inputTokens ?? 0)} · out ${compactNumber(usage?.outputTokens ?? 0)} in total`
+									: `Latest of ${sessions.length} sessions · in ${compactNumber(visibleSessions[0]?.inputTokens ?? 0)} · out ${compactNumber(visibleSessions[0]?.outputTokens ?? 0)}`}
+							</span>
+							<button
+								type="button"
+								className="btn btn--sm btn--ghost"
+								onClick={() => setShowAllUsageSessions((v) => !v)}
+							>
+								{showAllUsageSessions ? "Show latest only" : `Show all ${sessions.length} sessions`}
+							</button>
 						</div>
 					) : null}
 					<div className="usage-list">
-						{sessions.map((u) => (
+						{visibleSessions.map((u) => (
 							<UsageMeter key={u.sessionId ?? u.receivedAt} usage={u} />
 						))}
 					</div>

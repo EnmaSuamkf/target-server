@@ -57,7 +57,95 @@ const STATUS_TONES: Record<string, string> = {
 	failed: "badge badge--danger",
 	draft: "badge badge--neutral",
 	pending: "badge badge--neutral",
+	deleting: "badge badge--warn",
 };
+
+const SYNC_ARROWS_SVG = (
+	<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" aria-hidden="true">
+		<path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" strokeLinecap="round" strokeLinejoin="round" />
+		<path d="M3 3v5h5" strokeLinecap="round" strokeLinejoin="round" />
+		<path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" strokeLinecap="round" strokeLinejoin="round" />
+		<path d="M16 16h5v5" strokeLinecap="round" strokeLinejoin="round" />
+	</svg>
+);
+
+/** Sync indicator — same sync icon; spins while syncing, static green when synced. */
+function SyncLinkIcon({ synced, title }: { synced: boolean; title: string }) {
+	return (
+		<span
+			className={`sync-link-icon${synced ? " sync-link-icon--synced" : " sync-link-icon--syncing"}`}
+			title={title}
+			aria-label={title}
+			role="img"
+		>
+			{SYNC_ARROWS_SVG}
+		</span>
+	);
+}
+
+const STEP_ACKED = new Set(["running", "waiting", "done", "completed", "failed"]);
+
+/** Whether a mirrored step is confirmed on the client. */
+export function isStepSyncedOnClient(
+	step: { on_client?: boolean; status?: string | null },
+	workflowOnClient: boolean,
+): boolean {
+	if (!workflowOnClient) return false;
+	const s = step.status ?? "pending";
+	return Boolean(step.on_client) || STEP_ACKED.has(s);
+}
+
+/** Count steps still waiting to be applied on the client. */
+export function countStepsPendingSync(
+	steps: { on_client?: boolean; status?: string | null }[],
+	workflowOnClient: boolean,
+): number {
+	if (!workflowOnClient) return 0;
+	return steps.filter((step) => !isStepSyncedOnClient(step, true)).length;
+}
+
+/** Whether a remote workflow is fully synced (on client and every step applied). */
+export function ClientSyncBadge({
+	localId,
+	stepsPendingSync = 0,
+}: {
+	localId: string | null;
+	stepsPendingSync?: number;
+}) {
+	const workflowOnClient = Boolean(localId);
+	const synced = workflowOnClient && stepsPendingSync === 0;
+	const title = !workflowOnClient
+		? "Syncing to client — waiting for workflow.create to be applied"
+		: stepsPendingSync > 0
+			? `Syncing to client — ${stepsPendingSync} step${stepsPendingSync === 1 ? "" : "s"} still applying`
+			: `Synced to client · ${localId}`;
+	return <SyncLinkIcon synced={synced} title={title} />;
+}
+
+/** Step sync indicator — same icon language as the workflow badge. */
+export function StepClientBadge({
+	status,
+	workflowOnClient,
+	onClient = false,
+}: {
+	status: StepStatus | string | null;
+	workflowOnClient: boolean;
+	onClient?: boolean;
+}) {
+	const s = status ?? "pending";
+	const synced = isStepSyncedOnClient({ on_client: onClient, status: s }, workflowOnClient);
+	const title = !workflowOnClient
+		? "Syncing — workflow not on client yet"
+		: synced
+			? `Synced on client · step status: ${s}`
+			: "Syncing — waiting for step changes to be applied on the client";
+	return (
+		<span className="sync-step-client">
+			<SyncLinkIcon synced={synced} title={title} />
+			<StatusBadge status={s as StepStatus} />
+		</span>
+	);
+}
 
 /** Workflow/step run state → the badge tone the hub gives that state. */
 export function StatusBadge({ status }: { status: WorkflowStatus | StepStatus | null }) {

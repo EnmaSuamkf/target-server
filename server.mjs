@@ -6,6 +6,7 @@
  * JWT auth guards /api/* (except /api/auth/*); ingest keeps its own token.
  */
 import { createServer } from "node:http";
+import { randomUUID } from "node:crypto";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
@@ -22,7 +23,7 @@ import {
 	verifyPassword,
 	hashPassword,
 } from "./auth.mjs";
-import { validate } from "./blueprint.mjs";
+import { validate, validateSyncEventBatch } from "./blueprint.mjs";
 import {
 	DEFAULT_ADMIN_EMAIL,
 	DEFAULT_ADMIN_PASSWORD,
@@ -55,6 +56,29 @@ import {
 	stats,
 	upsertInstance,
 	workflowDetail,
+	upsertClient,
+	getClientByTokenHash,
+	claimPendingCommands,
+	ackCommand,
+	insertSyncEvent,
+	listSyncEvents,
+	updateRemoteWorkflowLocalId,
+	updateRemoteWorkflowContext,
+	listClients,
+	listOnlineClients,
+	getClientById,
+	listRemoteWorkflows,
+	getRemoteWorkflowById,
+	getRemoteWorkflowDetail,
+	getRunSelectedStepKeys,
+	updateRemoteStepRunSelection,
+	createRemoteWorkflow,
+	updateRemoteWorkflowStatus,
+	mirrorCommandToPlan,
+	mirrorSyncEventToPlan,
+	applyCommandAckToPlan,
+	enqueueCommand,
+	getCommandById,
 } from "./db.mjs";
 import { initMailer, isDeliveringTransport, mailTransportName, sendMail } from "./mailer.mjs";
 import { inviteMail, resetMail, withToken } from "./mail-templates.mjs";
@@ -531,6 +555,484 @@ async function handleAuthRoute(req, res, pathname) {
 	return false;
 }
 
+function syncCommandToApi(cmd) {
+	return {
+		id: cmd.id,
+		type: cmd.type,
+		remote_id: cmd.remoteId,
+		sequence: cmd.sequence,
+		payload: cmd.payload,
+		status: cmd.status,
+		created_at: cmd.createdAt,
+	};
+}
+
+function normalizeClientRunners(raw) {
+	if (!Array.isArray(raw)) return [];
+	return raw
+		.filter((r) => r && typeof r.id === "string")
+		.map((r) => ({
+			id: r.id,
+			installed: r.installed === true,
+		}));
+}
+
+function syncClientToApi(client) {
+	const caps = client.capabilities ?? null;
+	return {
+		id: client.id,
+		name: client.name,
+		status: client.status,
+		availability: caps?.availability ?? null,
+		capabilities: caps
+			? {
+					commands: Array.isArray(caps.commands) ? caps.commands : [],
+					version: typeof caps.version === "string" ? caps.version : null,
+					instance_id: typeof caps.instance_id === "string" ? caps.instance_id : null,
+					runners: normalizeClientRunners(caps.runners),
+				}
+			: null,
+		last_seen_at: client.lastSeenAt,
+		created_at: client.createdAt,
+	};
+}
+
+function validateClientAgent(client, agent) {
+	if (!agent) return null;
+	const runners = normalizeClientRunners(client.capabilities?.runners);
+	if (!runners.length) return null;
+	const match = runners.find((r) => r.id === agent);
+	if (!match) {
+		return {
+			field: "agent",
+			code: "unknown_runner",
+			message: `Client has not reported runner “${agent}”`,
+		};
+	}
+	if (!match.installed) {
+		return {
+			field: "agent",
+			code: "runner_not_installed",
+			message: `Runner “${agent}” is not installed on the client`,
+		};
+	}
+	return null;
+}
+
+function syncEventToApi(event) {
+	return {
+		id: event.id,
+		client_id: event.clientId,
+		remote_id: event.remoteId,
+		type: event.type,
+		payload: event.payload,
+		received_at: event.receivedAt,
+	};
+}
+
+function remoteWorkflowToApi(rwf) {
+	return {
+		id: rwf.id,
+		client_id: rwf.clientId,
+		name: rwf.name,
+		status: rwf.status,
+		local_id: rwf.localId,
+		sandbox: rwf.sandbox ?? "docker",
+		conversation_context: rwf.conversationContext ?? null,
+		step_count: rwf.stepCount ?? 0,
+		steps_pending_sync: rwf.stepsPendingSync ?? 0,
+		agent: rwf.agent ?? null,
+		created_at: rwf.createdAt,
+	};
+}
+
+function remoteStepToApi(step) {
+	return {
+		step_key: step.stepKey,
+		order_index: step.orderIndex,
+		description: step.description,
+		acceptance_criteria: step.acceptanceCriteria,
+		manual_review: step.manualReview,
+		use_subagent: step.useSubagent,
+		max_retries: step.maxRetries,
+		retry_interval_seconds: step.retryIntervalSeconds,
+		status: step.status,
+		on_client: step.onClient,
+		run_selected: step.runSelected !== false,
+	};
+}
+
+const RUN_WORKFLOW_COMMANDS = new Set(["workflow.start", "workflow.resume", "workflow.restart"]);
+
+function resolveRunCommandPayload(remoteId, type, payload = {}) {
+	if (!RUN_WORKFLOW_COMMANDS.has(type)) return payload;
+	const next = { ...payload };
+	if (Array.isArray(next.step_keys) && next.step_keys.length > 0) {
+		updateRemoteStepRunSelection(remoteId, next.step_keys);
+		return next;
+	}
+	const saved = getRunSelectedStepKeys(remoteId);
+	if (saved.length) return { ...next, step_keys: saved };
+	return next;
+}
+
+function isOperatorSyncPath(pathname, method) {
+	if (method === "GET" && pathname === "/api/sync/clients") return true;
+	if (method === "GET" && pathname === "/api/sync/events") return true;
+	if (pathname === "/api/sync/remote-workflows" && (method === "GET" || method === "POST")) return true;
+	if (method === "GET" && /^\/api\/sync\/remote-workflows\/[^/]+$/.test(pathname)) return true;
+	if (method === "PATCH" && /^\/api\/sync\/remote-workflows\/[^/]+$/.test(pathname)) return true;
+	if (method === "PATCH" && /^\/api\/sync\/remote-workflows\/[^/]+\/run-selection$/.test(pathname)) return true;
+	if (method === "POST" && /^\/api\/sync\/remote-workflows\/[^/]+\/commands$/.test(pathname)) return true;
+	if (method === "DELETE" && /^\/api\/sync\/remote-workflows\/[^/]+$/.test(pathname)) return true;
+	return false;
+}
+
+async function requireSyncClient(req, res) {
+	const auth = req.headers.authorization ?? "";
+	if (!auth.startsWith("Bearer ")) {
+		sendJson(res, 401, { error: "unauthorized" });
+		return null;
+	}
+	const client = getClientByTokenHash(hashToken(auth.slice(7)));
+	if (!client || client.status !== "active") {
+		sendJson(res, 401, { error: "unauthorized" });
+		return null;
+	}
+	return client;
+}
+
+async function handleSyncRoute(req, res, pathname, url) {
+	if (isOperatorSyncPath(pathname, req.method)) return false;
+
+	if (req.method === "POST" && pathname === "/api/sync/register") {
+		const body = await readJson(req, res);
+		if (!body) return true;
+		const v = validate("sync.register", body);
+		if (!v.ok) return sendJson(res, 400, { errors: v.errors });
+		const clientId = randomUUID();
+		const clientToken = `sync_${randomTokenBytes().toString("hex")}`;
+		const tokenHash = hashToken(clientToken);
+		const now = new Date().toISOString();
+		const capabilities = { ...(v.value.capabilities ?? {}) };
+		if (v.value.instance_id) capabilities.instance_id = v.value.instance_id;
+		if (v.value.version) capabilities.version = v.value.version;
+		const client = upsertClient({
+			id: clientId,
+			name: v.value.name ?? v.value.display_name ?? null,
+			tokenHash,
+			capabilities: Object.keys(capabilities).length ? capabilities : null,
+			lastSeenAt: now,
+			createdAt: now,
+		});
+		return sendJson(res, 201, {
+			client_id: client.id,
+			client_token: clientToken,
+			created_at: client.createdAt,
+		});
+	}
+
+	const client = await requireSyncClient(req, res);
+	if (!client) return true;
+
+	if (req.method === "POST" && pathname === "/api/sync/heartbeat") {
+		const body = await readJson(req, res);
+		if (!body) return true;
+		const v = validate("sync.heartbeat", body);
+		if (!v.ok) return sendJson(res, 400, { errors: v.errors });
+		const now = new Date().toISOString();
+		const capabilities = {
+			...(client.capabilities ?? {}),
+			...(v.value.capabilities ?? {}),
+			availability: v.value.status,
+		};
+		const version = v.value.version ?? v.value.hub_version;
+		if (version) capabilities.version = version;
+		upsertClient({
+			id: client.id,
+			tokenHash: client.tokenHash,
+			capabilities,
+			lastSeenAt: now,
+		});
+		return sendJson(res, 200, { ok: true, server_time: now });
+	}
+
+	if (req.method === "GET" && pathname === "/api/sync/commands") {
+		let limit = Number.parseInt(url.searchParams.get("limit") ?? "10", 10);
+		if (!Number.isFinite(limit) || limit < 1) limit = 10;
+		if (limit > 50) limit = 50;
+		const commands = claimPendingCommands(client.id, { limit }).map(syncCommandToApi);
+		return sendJson(res, 200, { commands });
+	}
+
+	const ackMatch = pathname.match(/^\/api\/sync\/commands\/([^/]+)\/ack$/);
+	if (req.method === "POST" && ackMatch) {
+		const body = await readJson(req, res);
+		if (!body) return true;
+		const v = validate("sync.command_ack", body);
+		if (!v.ok) return sendJson(res, 400, { errors: v.errors });
+		const ackStatus = v.value.status === "applied" ? "acked" : "failed";
+		const result = ackCommand({
+			commandId: ackMatch[1],
+			clientId: client.id,
+			status: ackStatus,
+		});
+		if (!result.ok) {
+			if (!result.command) return sendJson(res, 404, { error: "command_not_found" });
+			return sendJson(res, 409, { error: "invalid_command_state" });
+		}
+		if (ackStatus === "acked" && v.value.local_id && v.value.remote_id) {
+			updateRemoteWorkflowLocalId({
+				remoteId: v.value.remote_id,
+				clientId: client.id,
+				localId: v.value.local_id,
+			});
+		}
+		if (
+			result.command &&
+			(ackStatus === "acked" || (ackStatus === "failed" && result.command.type === "workflow.delete"))
+		) {
+			applyCommandAckToPlan({
+				...result.command,
+				status: ackStatus,
+				ackError: typeof v.value.error?.message === "string" ? v.value.error.message : undefined,
+			});
+		}
+		return sendJson(res, 200, {
+			command_id: ackMatch[1],
+			status: ackStatus,
+			already_recorded: result.alreadyRecorded,
+		});
+	}
+
+	if (req.method === "POST" && pathname === "/api/sync/events") {
+		const body = await readJson(req, res);
+		if (!body) return true;
+		const v = validateSyncEventBatch(body);
+		if (!v.ok) return sendJson(res, 400, { errors: v.errors });
+		const accepted = [];
+		const duplicates = [];
+		for (const event of v.value.events) {
+			const outcome = insertSyncEvent({
+				id: event.id,
+				clientId: client.id,
+				remoteId: event.remote_id || null,
+				type: event.type,
+				payload: event.payload ?? {},
+				receivedAt: event.created_at,
+			});
+			if (outcome === "inserted") {
+				accepted.push(event.id);
+				mirrorSyncEventToPlan({
+					remoteId: event.remote_id || null,
+					type: event.type,
+					payload: event.payload ?? {},
+				});
+			} else duplicates.push(event.id);
+		}
+		return sendJson(res, 200, { accepted, rejected: [], duplicates });
+	}
+
+	return false;
+}
+
+async function handleOperatorSyncRoute(req, res, pathname, url) {
+	if (!isOperatorSyncPath(pathname, req.method)) return false;
+
+	if (req.method === "GET" && pathname === "/api/sync/clients") {
+		return sendJson(res, 200, { clients: listOnlineClients().map(syncClientToApi) });
+	}
+
+	if (req.method === "GET" && pathname === "/api/sync/events") {
+		const clientId = url.searchParams.get("client_id") || null;
+		const remoteId = url.searchParams.get("remote_id") || null;
+		let limit = Number.parseInt(url.searchParams.get("limit") ?? "50", 10);
+		if (!Number.isFinite(limit) || limit < 1) limit = 50;
+		const events = listSyncEvents({ clientId, remoteId, limit }).map(syncEventToApi);
+		return sendJson(res, 200, { events });
+	}
+
+	if (req.method === "GET" && pathname === "/api/sync/remote-workflows") {
+		const clientId = url.searchParams.get("client_id") || null;
+		const workflows = listRemoteWorkflows({ clientId }).map(remoteWorkflowToApi);
+		return sendJson(res, 200, { remote_workflows: workflows });
+	}
+
+	const remoteDetailMatch = pathname.match(/^\/api\/sync\/remote-workflows\/([^/]+)$/);
+	if (req.method === "GET" && remoteDetailMatch) {
+		const detail = getRemoteWorkflowDetail(remoteDetailMatch[1]);
+		if (!detail) return sendJson(res, 404, { error: "remote_workflow_not_found" });
+		return sendJson(res, 200, {
+			remote_workflow: remoteWorkflowToApi(detail.workflow),
+			steps: detail.steps.map(remoteStepToApi),
+			pending_commands: detail.pendingCommands.map(syncCommandToApi),
+		});
+	}
+
+	if (req.method === "PATCH" && remoteDetailMatch) {
+		const body = await readJson(req, res);
+		if (!body) return true;
+		const remoteWorkflow = getRemoteWorkflowById(remoteDetailMatch[1]);
+		if (!remoteWorkflow) return sendJson(res, 404, { error: "remote_workflow_not_found" });
+		const context =
+			typeof body.conversation_context === "string" ? body.conversation_context.trim() : null;
+		if (context === null) return sendJson(res, 400, { error: "conversation_context_required" });
+		const updated = updateRemoteWorkflowContext(remoteWorkflow.id, context);
+		let contextCommand = null;
+		try {
+			contextCommand = enqueueCommand({
+				clientId: remoteWorkflow.clientId,
+				remoteId: remoteWorkflow.id,
+				type: "workflow.set_context",
+				payload: { conversation_context: context },
+			});
+			mirrorCommandToPlan({
+				remoteId: remoteWorkflow.id,
+				type: "workflow.set_context",
+				payload: { conversation_context: context },
+			});
+		} catch (err) {
+			if (err.statusCode === 400) return sendJson(res, 400, { errors: err.errors });
+			throw err;
+		}
+		return sendJson(res, 200, {
+			remote_workflow: remoteWorkflowToApi(updated),
+			command: syncCommandToApi(contextCommand),
+		});
+	}
+
+	if (req.method === "POST" && pathname === "/api/sync/remote-workflows") {
+		const body = await readJson(req, res);
+		if (!body) return true;
+		const v = validate("sync.remote_workflow.create", body);
+		if (!v.ok) return sendJson(res, 400, { errors: v.errors });
+		const client = getClientById(v.value.client_id);
+		if (!client || client.status !== "active") {
+			return sendJson(res, 404, { error: "client_not_found" });
+		}
+		const agentError = validateClientAgent(client, v.value.agent);
+		if (agentError) return sendJson(res, 422, { errors: [agentError] });
+		const remoteId = randomUUID();
+		const conversationContext = v.value.conversation_context?.trim() || null;
+		const remoteWorkflow = createRemoteWorkflow({
+			id: remoteId,
+			clientId: client.id,
+			name: v.value.name,
+			status: "pending",
+			conversationContext,
+			sandbox: "docker",
+			agent: v.value.agent ?? null,
+		});
+		const payload = { name: v.value.name, sandbox: "docker" };
+		if (v.value.agent) payload.agent = v.value.agent;
+		let command;
+		let contextCommand = null;
+		try {
+			command = enqueueCommand({
+				clientId: client.id,
+				remoteId,
+				type: "workflow.create",
+				payload,
+			});
+			if (conversationContext) {
+				contextCommand = enqueueCommand({
+					clientId: client.id,
+					remoteId,
+					type: "workflow.set_context",
+					payload: { conversation_context: conversationContext },
+				});
+			}
+		} catch (err) {
+			if (err.statusCode === 400) return sendJson(res, 400, { errors: err.errors });
+			throw err;
+		}
+		return sendJson(res, 201, {
+			remote_workflow: remoteWorkflowToApi(remoteWorkflow),
+			command: syncCommandToApi(command),
+			context_command: contextCommand ? syncCommandToApi(contextCommand) : null,
+		});
+	}
+
+	const runSelectionMatch = pathname.match(/^\/api\/sync\/remote-workflows\/([^/]+)\/run-selection$/);
+	if (req.method === "PATCH" && runSelectionMatch) {
+		const body = await readJson(req, res);
+		if (!body) return true;
+		const v = validate("sync.remote_workflow.run_selection", body);
+		if (!v.ok) return sendJson(res, 400, { errors: v.errors });
+		const remoteWorkflow = getRemoteWorkflowById(runSelectionMatch[1]);
+		if (!remoteWorkflow) return sendJson(res, 404, { error: "remote_workflow_not_found" });
+		const stepKeys = updateRemoteStepRunSelection(remoteWorkflow.id, v.value.step_keys);
+		const detail = getRemoteWorkflowDetail(remoteWorkflow.id);
+		return sendJson(res, 200, {
+			step_keys: stepKeys,
+			steps: detail.steps.map(remoteStepToApi),
+		});
+	}
+
+	const commandMatch = pathname.match(/^\/api\/sync\/remote-workflows\/([^/]+)\/commands$/);
+	if (req.method === "POST" && commandMatch) {
+		const body = await readJson(req, res);
+		if (!body) return true;
+		const v = validate("sync.remote_workflow.enqueue_command", body);
+		if (!v.ok) return sendJson(res, 400, { errors: v.errors });
+		const remoteWorkflow = getRemoteWorkflowById(commandMatch[1]);
+		if (!remoteWorkflow) return sendJson(res, 404, { error: "remote_workflow_not_found" });
+		const payload = resolveRunCommandPayload(remoteWorkflow.id, v.value.type, v.value.payload ?? {});
+		if (RUN_WORKFLOW_COMMANDS.has(v.value.type) && (!Array.isArray(payload.step_keys) || !payload.step_keys.length)) {
+			return sendJson(res, 422, {
+				errors: [{ field: "payload.step_keys", code: "required", message: "Select at least one step to run" }],
+			});
+		}
+		let command;
+		try {
+			command = enqueueCommand({
+				clientId: remoteWorkflow.clientId,
+				remoteId: remoteWorkflow.id,
+				type: v.value.type,
+				payload,
+			});
+			mirrorCommandToPlan({
+				remoteId: remoteWorkflow.id,
+				type: v.value.type,
+				payload,
+			});
+		} catch (err) {
+			if (err.statusCode === 400) return sendJson(res, 400, { errors: err.errors });
+			throw err;
+		}
+		return sendJson(res, 201, { command: syncCommandToApi(command) });
+	}
+
+	const deleteMatch = pathname.match(/^\/api\/sync\/remote-workflows\/([^/]+)$/);
+	if (req.method === "DELETE" && deleteMatch) {
+		const remoteWorkflow = getRemoteWorkflowById(deleteMatch[1]);
+		if (!remoteWorkflow) return sendJson(res, 404, { error: "remote_workflow_not_found" });
+		let body = {};
+		if (req.headers["content-type"]?.includes("application/json")) {
+			const parsed = await readJson(req, res);
+			if (!parsed) return true;
+			body = parsed;
+		}
+		const payload = body.force === true ? { force: true } : {};
+		let command;
+		try {
+			command = enqueueCommand({
+				clientId: remoteWorkflow.clientId,
+				remoteId: remoteWorkflow.id,
+				type: "workflow.delete",
+				payload,
+			});
+		} catch (err) {
+			if (err.statusCode === 400) return sendJson(res, 400, { errors: err.errors });
+			throw err;
+		}
+		updateRemoteWorkflowStatus(remoteWorkflow.id, "deleting");
+		return sendJson(res, 200, { command: syncCommandToApi(command) });
+	}
+
+	return false;
+}
+
 const server = createServer(async (req, res) => {
 	try {
 		const url = new URL(req.url, `http://${req.headers.host ?? HOST}`);
@@ -544,9 +1046,19 @@ const server = createServer(async (req, res) => {
 			if (handled !== false) return;
 		}
 
+		if (pathname.startsWith("/api/sync/")) {
+			const handled = await handleSyncRoute(req, res, pathname, url);
+			if (handled !== false) return;
+		}
+
 		if (pathname.startsWith("/api/") && !AUTH_DISABLED) {
 			const user = await requireAuth(req, res);
 			if (!user) return;
+		}
+
+		if (pathname.startsWith("/api/sync/")) {
+			const handled = await handleOperatorSyncRoute(req, res, pathname, url);
+			if (handled !== false) return;
 		}
 
 		const filters = {

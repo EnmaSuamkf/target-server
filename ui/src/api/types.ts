@@ -250,3 +250,91 @@ export interface FieldError {
 	code: string;
 	message: string;
 }
+
+/** Sync client registered for remote control (`GET /api/sync/clients`). */
+export interface SyncClientRow {
+	id: string;
+	name: string | null;
+	status: string;
+	availability: "idle" | "busy" | null;
+	capabilities: {
+		commands: string[];
+		version: string | null;
+		instance_id: string | null;
+		runners?: { id: string; installed: boolean }[];
+	} | null;
+	last_seen_at: string | null;
+	created_at: string;
+}
+
+export interface SyncClientsResponse {
+	clients: SyncClientRow[];
+}
+
+/** Server-managed workflow on a client machine. */
+export interface SyncRemoteWorkflowRow {
+	id: string;
+	client_id: string;
+	name: string | null;
+	status: string | null;
+	local_id: string | null;
+	sandbox: string | null;
+	agent: string | null;
+	conversation_context: string | null;
+	step_count: number;
+	steps_pending_sync: number;
+	created_at: string;
+}
+
+/** Planned step mirrored on the server (operator view). */
+export interface SyncRemoteStepRow {
+	step_key: string;
+	order_index: number;
+	description: string;
+	acceptance_criteria: string | null;
+	manual_review: boolean;
+	use_subagent: boolean;
+	max_retries: number;
+	retry_interval_seconds: number;
+	status: string;
+	on_client: boolean;
+	run_selected: boolean;
+}
+
+export interface SyncCommand {
+	id: string;
+	type: string;
+	remote_id: string | null;
+	sequence: number;
+	payload: Record<string, unknown>;
+	status: string;
+	created_at: string;
+}
+
+export interface SyncRemoteWorkflowDetailResponse {
+	remote_workflow: SyncRemoteWorkflowRow;
+	steps: SyncRemoteStepRow[];
+	pending_commands: SyncCommand[];
+}
+
+export interface SyncRemoteWorkflowsResponse {
+	remote_workflows: SyncRemoteWorkflowRow[];
+}
+
+export interface SyncCreateRemoteWorkflowResponse {
+	remote_workflow: SyncRemoteWorkflowRow;
+	command: SyncCommand;
+}
+
+export interface SyncEventRow {
+	id: string;
+	client_id: string;
+	remote_id: string | null;
+	type: string;
+	payload: Record<string, unknown>;
+	received_at: string;
+}
+
+export interface SyncEventsResponse {
+	events: SyncEventRow[];
+}

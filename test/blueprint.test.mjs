@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { validate } from "../blueprint.mjs";
+import { BLUEPRINTS, validate, validateCommand } from "../blueprint.mjs";
 
 test("blueprint normalises email", () => {
 	const r = validate("auth.login", { email: "  ADMIN@Example.COM ", password: "x" });
@@ -36,4 +36,58 @@ test("blueprint error shape", () => {
 		assert.match(e.code, /.+/);
 		assert.match(e.message, /.+/);
 	}
+});
+
+test("sync route blueprints exist", () => {
+	for (const name of ["sync.register", "sync.heartbeat", "sync.command_ack", "sync.events"]) {
+		assert.ok(name in BLUEPRINTS, name);
+	}
+});
+
+test("command payload: workflow.create requires name", () => {
+	const ok = validateCommand("workflow.create", { name: "Demo", workdir: "/tmp" });
+	assert.equal(ok.ok, true);
+	const bad = validateCommand("workflow.create", { workdir: "/tmp" });
+	assert.equal(bad.ok, false);
+	assert.ok(bad.errors.some((e) => e.field === "name"));
+});
+
+test("command payload: step.add requires step_key and description", () => {
+	const ok = validateCommand("step.add", { step_key: "s1", description: "Do work" });
+	assert.equal(ok.ok, true);
+	const bad = validateCommand("step.add", { step_key: "s1" });
+	assert.equal(bad.ok, false);
+	assert.ok(bad.errors.some((e) => e.field === "description"));
+});
+
+test("command payload: workflow.start accepts empty payload", () => {
+	const r = validateCommand("workflow.start", {});
+	assert.equal(r.ok, true);
+});
+
+test("command payload: workflow.start accepts step_keys", () => {
+	const r = validateCommand("workflow.start", { step_keys: ["step-1", "step-2"] });
+	assert.equal(r.ok, true);
+	assert.deepEqual(r.value.step_keys, ["step-1", "step-2"]);
+});
+
+test("enqueue_command request keeps step_keys in payload", () => {
+	const r = validate("sync.remote_workflow.enqueue_command", {
+		type: "workflow.restart",
+		payload: { step_keys: ["step-2"] },
+	});
+	assert.equal(r.ok, true);
+	assert.deepEqual(r.value.payload.step_keys, ["step-2"]);
+});
+
+test("unknown command type returns field error on type", () => {
+	const r = validateCommand("workflow.nope", {});
+	assert.equal(r.ok, false);
+	assert.ok(r.errors.some((e) => e.field === "type" && e.code === "unknown_command_type"));
+});
+
+test("sync heartbeat rejects invalid status with field errors", () => {
+	const r = validate("sync.heartbeat", { status: "away" });
+	assert.equal(r.ok, false);
+	assert.ok(r.errors.some((e) => e.field === "status"));
 });
