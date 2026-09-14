@@ -7,18 +7,25 @@ import { StepNotes } from "./StepNotes.tsx";
  * Workflow steps as cards — the same read-only shape as the Target hub's step
  * list: description, meta badges, acceptance criteria, and sticky notes.
  */
-export function StepCanvas({ steps }: { steps: WorkflowStep[] | null }) {
+export function StepCanvas({
+	steps,
+	planMode = false,
+}: {
+	steps: WorkflowStep[] | null;
+	/** Structural preview only — no run-state badges or styling. */
+	planMode?: boolean;
+}) {
 	if (!steps || steps.length === 0) return <div className="empty">No steps reported for this workflow yet.</div>;
 	return (
 		<ol className="step-list">
 			{steps.map((s) => (
-				<StepCard key={s.stepId} step={s} />
+				<StepCard key={s.stepId} step={s} planMode={planMode} />
 			))}
 		</ol>
 	);
 }
 
-function StepCard({ step }: { step: WorkflowStep }): React.JSX.Element {
+function StepCard({ step, planMode }: { step: WorkflowStep; planMode: boolean }): React.JSX.Element {
 	const isContext = step.kind === "context";
 	const statusLabel =
 		step.status === "running" && step.phase === "judge" ? "judging" : (step.status ?? "pending");
@@ -28,8 +35,8 @@ function StepCard({ step }: { step: WorkflowStep }): React.JSX.Element {
 	const retryCount = step.retryCount ?? 0;
 	const cardClass = [
 		"step-card",
-		step.status === "running" ? "step-card--running" : "",
-		step.status === "waiting" ? "step-card--waiting" : "",
+		!planMode && step.status === "running" ? "step-card--running" : "",
+		!planMode && step.status === "waiting" ? "step-card--waiting" : "",
 	]
 		.filter(Boolean)
 		.join(" ");
@@ -39,7 +46,7 @@ function StepCard({ step }: { step: WorkflowStep }): React.JSX.Element {
 			<div className="step-card__head">
 				<span className="step-card__index">{isContext ? "ctx" : (step.orderIndex ?? 0) + 1}</span>
 				<p className="step-card__desc">{step.description ?? "(no description reported)"}</p>
-				<StatusBadge status={statusLabel} />
+				{planMode ? null : <StatusBadge status={statusLabel} />}
 			</div>
 
 			{isContext ? (
