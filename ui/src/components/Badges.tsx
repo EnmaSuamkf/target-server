@@ -127,22 +127,27 @@ export function StepClientBadge({
 	status,
 	workflowOnClient,
 	onClient = false,
+	showRunStatus = true,
 }: {
 	status: StepStatus | string | null;
 	workflowOnClient: boolean;
 	onClient?: boolean;
+	/** When false, only the sync icon is shown (plan editor — live run state lives elsewhere). */
+	showRunStatus?: boolean;
 }) {
 	const s = status ?? "pending";
 	const synced = isStepSyncedOnClient({ on_client: onClient, status: s }, workflowOnClient);
 	const title = !workflowOnClient
 		? "Syncing — workflow not on client yet"
 		: synced
-			? `Synced on client · step status: ${s}`
+			? showRunStatus
+				? `Synced on client · step status: ${s}`
+				: "Synced on client"
 			: "Syncing — waiting for step changes to be applied on the client";
 	return (
 		<span className="sync-step-client">
 			<SyncLinkIcon synced={synced} title={title} />
-			<StatusBadge status={s as StepStatus} />
+			{showRunStatus ? <StatusBadge status={s as StepStatus} /> : null}
 		</span>
 	);
 }

@@ -42,13 +42,13 @@ function cls(...names: Array<string | false | undefined>): string {
  * values. The defaults chosen here are the hub's own: a step delegates unless
  * it says otherwise, and an unknown order sorts last rather than first.
  */
-function toCanvasStep(step: WorkflowStep, fallbackOrder: number): CanvasStep {
+function toCanvasStep(step: WorkflowStep, fallbackOrder: number, planMode: boolean): CanvasStep {
 	return {
 		id: step.stepId,
 		kind: step.kind ?? "task",
 		orderIndex: step.orderIndex ?? fallbackOrder,
 		description: step.description ?? "(no description reported)",
-		status: step.status,
+		status: planMode ? "pending" : step.status,
 		// Spread rather than assigned: under `exactOptionalPropertyTypes` an
 		// optional field may be absent, but not explicitly `undefined`.
 		...(step.phase ? { phase: step.phase } : {}),
@@ -61,12 +61,19 @@ function toCanvasStep(step: WorkflowStep, fallbackOrder: number): CanvasStep {
 	};
 }
 
-export function WorkflowCanvas({ steps }: { steps: WorkflowStep[] | null }) {
+export function WorkflowCanvas({
+	steps,
+	planMode = false,
+}: {
+	steps: WorkflowStep[] | null;
+	/** Structural preview only — nodes stay neutral; live run state belongs in Client activity. */
+	planMode?: boolean;
+}) {
 	const [zoomIndex, setZoomIndex] = useState(DEFAULT_ZOOM_INDEX);
 	const zoom = ZOOM_STEPS[zoomIndex] ?? 1;
 	const graph = useMemo(
-		() => layoutWorkflow((steps ?? []).map((s, i) => toCanvasStep(s, i))),
-		[steps],
+		() => layoutWorkflow((steps ?? []).map((s, i) => toCanvasStep(s, i, planMode))),
+		[steps, planMode],
 	);
 
 	if (graph.nodes.length === 0) {
@@ -77,8 +84,9 @@ export function WorkflowCanvas({ steps }: { steps: WorkflowStep[] | null }) {
 		<div className="wf-canvas" data-workflow-canvas>
 			<div className="wf-canvas-toolbar">
 				<p className="wf-canvas-hint">
-					This workflow as its operator sees it — one card per step, a circle for every step that has to
-					satisfy a judge, and a box for the work handed to a subagent.
+					{planMode
+						? "Plan preview — structure only. Live run state appears in Client activity once the workflow is on the client."
+						: "This workflow as its operator sees it — one card per step, a circle for every step that has to satisfy a judge, and a box for the work handed to a subagent."}
 				</p>
 				<div className="wf-zoom">
 					<button
@@ -151,25 +159,27 @@ export function WorkflowCanvas({ steps }: { steps: WorkflowStep[] | null }) {
 
 						{graph.nodes.map((node) =>
 							node.kind === "judge" ? (
-								<JudgeCircle key={node.id} node={node} />
+								<JudgeCircle key={node.id} node={node} planMode={planMode} />
 							) : node.kind === "subagent" ? (
-								<SubagentBox key={node.id} node={node} />
+								<SubagentBox key={node.id} node={node} planMode={planMode} />
 							) : (
-								<StepCard key={node.id} node={node} />
+								<StepCard key={node.id} node={node} planMode={planMode} />
 							),
 						)}
 					</div>
 				</div>
 			</div>
 
-			<ul className="wf-legend">
-				<li><span className="wf-swatch wf-swatch--running" aria-hidden="true" /> in flight</li>
-				<li><span className="wf-swatch wf-swatch--done" aria-hidden="true" /> done</li>
-				<li><span className="wf-swatch wf-swatch--waiting" aria-hidden="true" /> waiting for a human</li>
-				<li><span className="wf-swatch wf-swatch--failed" aria-hidden="true" /> failed</li>
-				<li><span className="wf-swatch wf-swatch--judge" aria-hidden="true" /> judged step</li>
-				<li><span className="wf-swatch wf-swatch--subagent" aria-hidden="true" /> runs in a subagent</li>
-			</ul>
+			{planMode ? null : (
+				<ul className="wf-legend">
+					<li><span className="wf-swatch wf-swatch--running" aria-hidden="true" /> in flight</li>
+					<li><span className="wf-swatch wf-swatch--done" aria-hidden="true" /> done</li>
+					<li><span className="wf-swatch wf-swatch--waiting" aria-hidden="true" /> waiting for a human</li>
+					<li><span className="wf-swatch wf-swatch--failed" aria-hidden="true" /> failed</li>
+					<li><span className="wf-swatch wf-swatch--judge" aria-hidden="true" /> judged step</li>
+					<li><span className="wf-swatch wf-swatch--subagent" aria-hidden="true" /> runs in a subagent</li>
+				</ul>
+			)}
 		</div>
 	);
 }
@@ -185,21 +195,28 @@ function EdgeLine({ edge }: { edge: CanvasEdge }) {
 	);
 }
 
-function StepCard({ node }: { node: CanvasNode }) {
+function StepCard({ node, planMode }: { node: CanvasNode; planMode: boolean }) {
 	const isContext = node.kind === "context";
 	return (
 		<div
 			data-canvas-node={node.id}
-			className={cls("wf-card", `wf-state--${node.state}`, isContext && "wf-card--context", node.selected && "wf-card--selected")}
+			className={cls(
+				"wf-card",
+				planMode ? "wf-state--pending" : `wf-state--${node.state}`,
+				isContext && "wf-card--context",
+				node.selected && "wf-card--selected",
+			)}
 			style={{ left: node.x, top: node.y, width: node.width, height: node.height }}
 			title={node.description}
 		>
 			<span className="wf-card-head">
 				<span className="wf-card-index mono">{node.label}</span>
-				<span className="wf-card-state">
-					{isLiveState(node.state) && <span className="wf-dot" aria-hidden="true" />}
-					{node.state}
-				</span>
+				{planMode ? null : (
+					<span className="wf-card-state">
+						{isLiveState(node.state) && <span className="wf-dot" aria-hidden="true" />}
+						{node.state}
+					</span>
+				)}
 			</span>
 			<span className="wf-card-body">{node.description}</span>
 			{!isContext && (node.manualReview || node.inline || node.selected) && (
@@ -213,12 +230,12 @@ function StepCard({ node }: { node: CanvasNode }) {
 	);
 }
 
-function SubagentBox({ node }: { node: CanvasNode }) {
+function SubagentBox({ node, planMode }: { node: CanvasNode; planMode: boolean }) {
 	return (
 		<div
 			data-canvas-node={node.id}
 			data-canvas-subagent
-			className={cls("wf-subagent", `wf-state--${node.state}`)}
+			className={cls("wf-subagent", planMode ? "wf-state--pending" : `wf-state--${node.state}`)}
 			style={{ left: node.x, top: node.y, width: node.width, height: node.height }}
 			title="This step's work is delegated to a subagent (the Task tool), so the shared session only keeps its summary."
 		>
@@ -228,17 +245,17 @@ function SubagentBox({ node }: { node: CanvasNode }) {
 				<circle cx="6" cy="18" r="2" />
 			</svg>
 			<span className="wf-subagent-label">subagent</span>
-			{isLiveState(node.state) && <span className="wf-dot" aria-hidden="true" />}
+			{!planMode && isLiveState(node.state) ? <span className="wf-dot" aria-hidden="true" /> : null}
 		</div>
 	);
 }
 
-function JudgeCircle({ node }: { node: CanvasNode }) {
+function JudgeCircle({ node, planMode }: { node: CanvasNode; planMode: boolean }) {
 	return (
 		<div
 			data-canvas-node={node.id}
 			data-canvas-judge
-			className={cls("wf-judge", `wf-judge--${node.state}`)}
+			className={cls("wf-judge", planMode ? "wf-judge--pending" : `wf-judge--${node.state}`)}
 			style={{ left: node.x, top: node.y, width: node.width, height: node.height }}
 			title={`Accepts if: ${node.description}`}
 		>
