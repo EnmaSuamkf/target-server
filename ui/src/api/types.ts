@@ -239,12 +239,23 @@ export interface AuthUser {
 	id: string;
 	email: string;
 	role: string;
+	permissions: string[];
 	createdAt: string;
 	lastLoginAt: string | null;
 	status: "pending" | "active";
 	usesDefaultPassword?: boolean;
 	inviteAllowPassword?: boolean;
 	inviteAllowGoogle?: boolean;
+}
+
+export interface AuthRole {
+	id: string;
+	name: string;
+	isSystem: boolean;
+	permissions: string[];
+	userCount: number;
+	createdAt: string;
+	updatedAt: string;
 }
 
 export type InviteActivation = {
@@ -276,6 +287,12 @@ export interface SyncClientRow {
 		version: string | null;
 		instance_id: string | null;
 		runners?: { id: string; installed: boolean }[];
+		resources?: {
+			version: number;
+			templates: boolean;
+			tcp_tools: boolean;
+			resource_sets: boolean;
+		} | null;
 	} | null;
 	last_seen_at: string | null;
 	created_at: string;
@@ -351,4 +368,21 @@ export interface SyncEventRow {
 
 export interface SyncEventsResponse {
 	events: SyncEventRow[];
+}
+
+export type RemoteResourceDomain = "templates" | "tcp-tools" | "resource-sets";
+
+export interface RemoteResource {
+	clientId: string;
+	domain: "templates" | "tcp_tools" | "resource_sets";
+	id: string;
+	name: string;
+	data: Record<string, unknown>;
+	revision: number;
+	updatedAt: string;
+}
+
+export interface RemoteResourcesResponse {
+	contract_version: "sync/v2";
+	resources: RemoteResource[];
 }

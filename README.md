@@ -88,6 +88,12 @@ JWT sessions in an `httpOnly` cookie (Bearer header also accepted). Every
 Human accounts live under `/api/auth/users` — distinct from `GET /api/users`,
 which still lists reporting instance display names.
 
+Roles are dynamic and permissions are enforced by the backend. The protected
+`admin` role has every permission; editing/deleting it, removing the last
+administrator, and deleting/changing your own account are blocked. See
+[`docs/rbac.md`](docs/rbac.md) for the permission catalogue, 401/403 semantics,
+role API and invitation flow.
+
 First run on a fresh database seeds `admin@admin.com`. Invite additional
 operators from the **Users** panel. Local/CI defaults write `.mail-outbox/*.eml`
 instead of using SMTP (or use Resend/SMTP in production).
@@ -107,7 +113,7 @@ Each invite chooses how the account may activate. Full design:
   **password only** (Google checkbox disabled).
 - **Resend** and **Copy setup link** / **Copy login URL** use the methods stored on
   the user row (resend does not re-prompt).
-- API: `POST /api/auth/users` body `{ "email": "…", "activation": { "password": true, "google": false } }`
+- API: `POST /api/auth/users` body `{ "email": "…", "role_id": "…", "activation": { "password": true, "google": false } }`
   (`activation` optional — server applies the same defaults as the UI).
 - Response `invite` may include `setupUrl`, `loginUrl`, and `expiresAt` (setup token
   only when password is allowed). `invite.url` is an alias for `setupUrl` when present.
@@ -381,8 +387,9 @@ All `GET /api/*` routes below require a session unless noted.
 - `POST /api/auth/forgot-password` — email a reset link (always 202)
 - `POST /api/auth/setup` — complete an invitation (`/setup?token=…`)
 - `POST /api/auth/reset-password` — set password from recovery link
-- `GET/POST/DELETE /api/auth/users` — list, invite, delete human accounts (`POST` body optional `activation: { password?, google? }`; user rows include `inviteAllowPassword`, `inviteAllowGoogle`)
+- `GET/POST /api/auth/users`, `PATCH/DELETE /api/auth/users/:id` — list, invite with `role_id`, reassign role, or delete human accounts
 - `POST /api/auth/users/:id/invite` — resend invitation (uses stored activation methods; `invite.setupUrl` / `invite.loginUrl` in response)
+- `GET/POST /api/auth/roles`, `PATCH/DELETE /api/auth/roles/:id` — list and manage dynamic roles (requires `users.manage`)
 
 - `POST /ingest` — receive a batch (optional ingest token; not session auth). Returns `{ accepted: [id...], rejected: [{id,reason,detail}] }`.
   Idempotent: re-sending the same event ids inserts nothing new but still acks them.

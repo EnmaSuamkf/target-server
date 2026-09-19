@@ -992,6 +992,12 @@ tbody tr.wf-row--selected, tbody tr.wf-row--selected:hover { background: var(--a
 	background: var(--surface-sunken);
 }
 .users-confirm-actions { display: flex; gap: var(--space-2); margin-top: var(--space-3); }
+.users-roles { display: grid; gap: var(--space-2); }
+.users-role-row, .panel-heading { display: flex; justify-content: space-between; gap: var(--space-3); align-items: center; flex-wrap: wrap; }
+.users-role-row { padding: var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-md); }
+.users-permissions { display: grid; gap: var(--space-2); margin-top: var(--space-3); }
+.users-permissions .users-check { align-items: flex-start; }
+.users-permissions small { display: block; color: var(--text-muted); font-weight: normal; }
 
 .badge--warn { background: var(--warn-50); color: var(--warn-700); border: 1px solid var(--warn-200); }
 .badge--success { background: var(--success-50); color: var(--success-700); border: 1px solid var(--success-200); }
@@ -1003,6 +1009,9 @@ tbody tr.wf-row--selected, tbody tr.wf-row--selected:hover { background: var(--a
 .sync-create-row { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
 .sync-create-row .select, .sync-create-row .input { min-width: 10rem; flex: 1; }
 .sync-create-hint { margin: 0; }
+.remote-resources { display: grid; gap: var(--space-3); }
+.remote-resources-tabs { margin: 0; }
+.remote-resources-reason { padding: var(--space-3); border-radius: var(--radius-md); background: var(--warn-50); color: var(--warn-700); }
 .sync-context-field { display: flex; flex-direction: column; gap: var(--space-1); }
 .sync-context-input { width: 100%; resize: vertical; font-family: inherit; line-height: 1.45; }
 .sync-remote .sync-control {

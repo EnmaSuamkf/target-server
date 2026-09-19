@@ -3,7 +3,7 @@
  */
 import { createHash, createHmac, randomBytes, scrypt, timingSafeEqual } from "node:crypto";
 import { promisify } from "node:util";
-import { getAuthUserById, getJwtSecret } from "./db.mjs";
+import { getAuthUserById, getAuthUserPermissions, getJwtSecret } from "./db.mjs";
 
 const scryptAsync = promisify(scrypt);
 
@@ -131,6 +131,7 @@ export function publicUser(row) {
 		id: row.id,
 		email: row.email,
 		role: row.role,
+		permissions: Array.isArray(row.permissions) ? row.permissions : getAuthUserPermissions(row),
 		createdAt: row.createdAt,
 		lastLoginAt: row.lastLoginAt,
 		status: userIsActive(row) ? "active" : "pending",
@@ -148,6 +149,9 @@ export async function authenticate(req, res = null) {
 	if (!payload || typeof payload.sub !== "string") return null;
 	const user = getAuthUserById(payload.sub);
 	if (!user || user.tokenVersion !== payload.tv) return null;
+	// Roles are deliberately resolved for every request. JWTs carry only an
+	// identity/version, so a DB role or permission change takes effect at once.
+	user.permissions = getAuthUserPermissions(user);
 
 	if (res && typeof payload.iat === "number") {
 		const half = ttlSeconds() / 2;
@@ -164,6 +168,18 @@ export async function requireAuth(req, res) {
 	if (!user) {
 		res.writeHead(401, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
 		res.end(JSON.stringify({ error: "unauthorized" }));
+		return null;
+	}
+	return user;
+}
+
+/** Require an authenticated user with a current, DB-resolved capability. */
+export async function requirePermission(req, res, permission) {
+	const user = await requireAuth(req, res);
+	if (!user) return null;
+	if (!user.permissions.includes(permission)) {
+		res.writeHead(403, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
+		res.end(JSON.stringify({ error: "forbidden", permission }));
 		return null;
 	}
 	return user;

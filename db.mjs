@@ -19,6 +19,26 @@ let db = null;
 export const DEFAULT_ADMIN_EMAIL = "admin@admin.com";
 export const DEFAULT_ADMIN_PASSWORD = "password-target-server";
 
+/**
+ * The complete RBAC vocabulary. This is the single application catalogue:
+ * checks and role writes must use these IDs rather than client-supplied
+ * capability strings.
+ */
+export const PERMISSION_CATALOG = Object.freeze([
+	{ id: "activity.read", description: "View Activity and reporting data" },
+	{ id: "users.read", description: "View users, roles and invitations" },
+	{ id: "users.manage", description: "Manage users, roles and invitations" },
+	{ id: "remote.read", description: "View Remote Control clients and state" },
+	{ id: "remote.workflows.manage", description: "Create and modify remote workflows" },
+	{ id: "remote.workflows.execute", description: "Start, pause, resume and restart remote workflows" },
+	{ id: "remote.templates.manage", description: "Manage remote workflow templates" },
+	{ id: "remote.tcp-tools.manage", description: "Manage remote TCP tools" },
+	{ id: "remote.rci.manage", description: "Manage remote RCI resources" },
+]);
+export const PERMISSIONS = Object.freeze(PERMISSION_CATALOG.map(({ id }) => id));
+export const ADMIN_ROLE_ID = "admin";
+const PERMISSION_SET = new Set(PERMISSIONS);
+
 export function open(dbPath = process.env.TARGET_SERVER_DB ?? "./target-server.db") {
 	if (db) return db;
 	db = new DatabaseSync(dbPath);
@@ -127,13 +147,25 @@ export function open(dbPath = process.env.TARGET_SERVER_DB ?? "./target-server.d
 			payload_json  TEXT NOT NULL,
 			received_at   TEXT NOT NULL
 		);
+		CREATE TABLE IF NOT EXISTS remote_resources (
+			client_id     TEXT NOT NULL,
+			domain        TEXT NOT NULL CHECK (domain IN ('templates', 'tcp_tools', 'resource_sets')),
+			resource_id   TEXT NOT NULL,
+			name          TEXT NOT NULL,
+			resource_json TEXT NOT NULL,
+			revision      INTEGER NOT NULL DEFAULT 1,
+			updated_at    TEXT NOT NULL,
+			PRIMARY KEY (client_id, domain, resource_id)
+		);
 		CREATE INDEX IF NOT EXISTS idx_commands_client_status ON commands(client_id, status);
 		CREATE UNIQUE INDEX IF NOT EXISTS idx_commands_remote_sequence ON commands(remote_id, sequence);
 		CREATE INDEX IF NOT EXISTS idx_remote_workflows_client ON remote_workflows(client_id);
 		CREATE INDEX IF NOT EXISTS idx_sync_events_client ON sync_events(client_id, received_at);
+		CREATE INDEX IF NOT EXISTS idx_remote_resources_client_domain ON remote_resources(client_id, domain);
 	`);
 	migrateSyncSchema(db);
 	migrateAuthSchema(db);
+	migrateRbacSchema(db);
 	seedAuth();
 	return db;
 }
@@ -153,6 +185,17 @@ function migrateSyncSchema(database) {
 	addColumn("remote_workflow_steps", "on_client", "INTEGER NOT NULL DEFAULT 0");
 	addColumn("remote_workflow_steps", "run_selected", "INTEGER NOT NULL DEFAULT 1");
 	database.exec(`
+		CREATE TABLE IF NOT EXISTS remote_resources (
+			client_id     TEXT NOT NULL,
+			domain        TEXT NOT NULL CHECK (domain IN ('templates', 'tcp_tools', 'resource_sets')),
+			resource_id   TEXT NOT NULL,
+			name          TEXT NOT NULL,
+			resource_json TEXT NOT NULL,
+			revision      INTEGER NOT NULL DEFAULT 1,
+			updated_at    TEXT NOT NULL,
+			PRIMARY KEY (client_id, domain, resource_id)
+		);
+		CREATE INDEX IF NOT EXISTS idx_remote_resources_client_domain ON remote_resources(client_id, domain);
 		CREATE TABLE IF NOT EXISTS remote_workflow_steps (
 			id                     TEXT PRIMARY KEY,
 			remote_id              TEXT NOT NULL,
@@ -187,6 +230,291 @@ function migrateAuthSchema(database) {
 	`);
 	addColumn("auth_users", "invite_allow_password", "INTEGER NOT NULL DEFAULT 1");
 	addColumn("auth_users", "invite_allow_google", "INTEGER NOT NULL DEFAULT 0");
+}
+
+/** Additive RBAC migration. `auth_users.role` remains the assignment column. */
+function migrateRbacSchema(database) {
+	const now = new Date().toISOString();
+	database.exec("BEGIN IMMEDIATE");
+	try {
+		database.exec(`
+			CREATE TABLE IF NOT EXISTS auth_roles (
+				id          TEXT PRIMARY KEY,
+				name        TEXT NOT NULL UNIQUE,
+				is_system   INTEGER NOT NULL DEFAULT 0,
+				created_at  TEXT NOT NULL,
+				updated_at  TEXT NOT NULL
+			);
+			CREATE TABLE IF NOT EXISTS auth_role_permissions (
+				role_id     TEXT NOT NULL,
+				permission  TEXT NOT NULL CHECK (permission IN (
+					'activity.read',
+					'users.read',
+					'users.manage',
+					'remote.read',
+					'remote.workflows.manage',
+					'remote.workflows.execute',
+					'remote.templates.manage',
+					'remote.tcp-tools.manage',
+					'remote.rci.manage'
+				)),
+				PRIMARY KEY (role_id, permission)
+			);
+			CREATE INDEX IF NOT EXISTS idx_auth_role_permissions_role
+				ON auth_role_permissions(role_id);
+			CREATE INDEX IF NOT EXISTS idx_auth_users_role ON auth_users(role);
+			CREATE TABLE IF NOT EXISTS auth_role_audit (
+				id              TEXT PRIMARY KEY,
+				role_id         TEXT,
+				action          TEXT NOT NULL,
+				actor_user_id   TEXT,
+				subject_user_id TEXT,
+				before_json     TEXT,
+				after_json      TEXT,
+				created_at      TEXT NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_auth_role_audit_role
+				ON auth_role_audit(role_id, created_at DESC);
+		`);
+		database
+			.prepare(
+				`INSERT INTO auth_roles (id, name, is_system, created_at, updated_at)
+				 VALUES (?, 'Administrator', 1, ?, ?)
+				 ON CONFLICT(id) DO UPDATE SET is_system = 1`,
+			)
+			.run(ADMIN_ROLE_ID, now, now);
+		const insertPermission = database.prepare(
+			"INSERT OR IGNORE INTO auth_role_permissions (role_id, permission) VALUES (?, ?)",
+		);
+		for (const permission of PERMISSIONS) insertPermission.run(ADMIN_ROLE_ID, permission);
+		database
+			.prepare(
+				`DELETE FROM auth_role_permissions
+				 WHERE role_id = ? AND permission NOT IN (${PERMISSIONS.map(() => "?").join(",")})`,
+			)
+			.run(ADMIN_ROLE_ID, ...PERMISSIONS);
+		// Earlier databases have only the legacy `role` string. Preserve every
+		// user and safely map orphaned/empty assignments to the system admin role.
+		database
+			.prepare(
+				`UPDATE auth_users SET role = ?
+				 WHERE role IS NULL OR TRIM(role) = ''
+				    OR NOT EXISTS (SELECT 1 FROM auth_roles r WHERE r.id = auth_users.role)`,
+			)
+			.run(ADMIN_ROLE_ID);
+		database.exec("COMMIT");
+	} catch (err) {
+		database.exec("ROLLBACK");
+		throw err;
+	}
+}
+
+function rbacError(code, message) {
+	const err = new Error(message);
+	err.code = code;
+	return err;
+}
+
+export function isValidPermission(permission) {
+	return typeof permission === "string" && PERMISSION_SET.has(permission);
+}
+
+/** Validate and canonicalize a role permission list against the closed catalogue. */
+export function validateRolePermissions(permissions) {
+	if (!Array.isArray(permissions)) throw rbacError("invalid_permissions", "permissions must be an array");
+	const unique = [...new Set(permissions)];
+	if (unique.some((permission) => !isValidPermission(permission))) {
+		throw rbacError("invalid_permission", "role contains an unknown permission");
+	}
+	return unique.sort();
+}
+
+function roleRowToObject(row, permissions = [], userCount = 0) {
+	if (!row) return null;
+	return {
+		id: row.id,
+		name: row.name,
+		isSystem: Boolean(row.is_system),
+		permissions,
+		userCount,
+		createdAt: row.created_at,
+		updatedAt: row.updated_at,
+	};
+}
+
+function getRolePermissions(id) {
+	return open()
+		.prepare("SELECT permission FROM auth_role_permissions WHERE role_id = ? ORDER BY permission")
+		.all(id)
+		.map((row) => row.permission);
+}
+
+export function getRoleById(id) {
+	const row = open().prepare("SELECT * FROM auth_roles WHERE id = ?").get(id);
+	return roleRowToObject(row, row ? getRolePermissions(id) : []);
+}
+
+/** Resolve authorization from the current DB role, never from a JWT claim. */
+export function getAuthUserPermissions(userOrRoleId) {
+	const roleId = typeof userOrRoleId === "string" ? userOrRoleId : userOrRoleId?.role;
+	return roleId ? getRolePermissions(roleId) : [];
+}
+
+export function countAuthUsersByRole(roleId) {
+	return open().prepare("SELECT COUNT(*) AS n FROM auth_users WHERE role = ?").get(roleId).n;
+}
+
+export const countUsersByRole = countAuthUsersByRole;
+
+export function listRoles() {
+	const rows = open()
+		.prepare(
+			`SELECT r.*, COUNT(u.id) AS user_count
+			 FROM auth_roles r LEFT JOIN auth_users u ON u.role = r.id
+			 GROUP BY r.id ORDER BY r.is_system DESC, r.name COLLATE NOCASE ASC`,
+		)
+		.all();
+	return rows.map((row) => roleRowToObject(row, getRolePermissions(row.id), row.user_count));
+}
+
+function requireRole(id) {
+	const role = getRoleById(id);
+	if (!role) throw rbacError("role_not_found", "role does not exist");
+	return role;
+}
+
+function writeRoleAudit({ roleId = null, action, actorUserId = null, subjectUserId = null, before = null, after = null }) {
+	open()
+		.prepare(
+			`INSERT INTO auth_role_audit
+			 (id, role_id, action, actor_user_id, subject_user_id, before_json, after_json, created_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		)
+		.run(
+			randomUUID(),
+			roleId,
+			action,
+			actorUserId,
+			subjectUserId,
+			before == null ? null : JSON.stringify(before),
+			after == null ? null : JSON.stringify(after),
+			new Date().toISOString(),
+		);
+}
+
+export function listRoleAudit({ roleId = null, limit = 100 } = {}) {
+	const cappedLimit = Math.max(1, Math.min(500, limit));
+	const rows = roleId
+		? open()
+				.prepare("SELECT * FROM auth_role_audit WHERE role_id = ? ORDER BY created_at DESC LIMIT ?")
+				.all(roleId, cappedLimit)
+		: open().prepare("SELECT * FROM auth_role_audit ORDER BY created_at DESC LIMIT ?").all(cappedLimit);
+	return rows.map((row) => ({
+		id: row.id,
+		roleId: row.role_id,
+		action: row.action,
+		actorUserId: row.actor_user_id,
+		subjectUserId: row.subject_user_id,
+		before: row.before_json ? JSON.parse(row.before_json) : null,
+		after: row.after_json ? JSON.parse(row.after_json) : null,
+		createdAt: row.created_at,
+	}));
+}
+
+export function createRole({ name, permissions, actorUserId = null }) {
+	if (typeof name !== "string" || !name.trim()) throw rbacError("invalid_role_name", "role name is required");
+	const normalizedName = name.trim();
+	const validPermissions = validateRolePermissions(permissions);
+	const id = randomUUID();
+	const now = new Date().toISOString();
+	const database = open();
+	database.exec("BEGIN IMMEDIATE");
+	try {
+		database.prepare("INSERT INTO auth_roles (id, name, is_system, created_at, updated_at) VALUES (?, ?, 0, ?, ?)").run(id, normalizedName, now, now);
+		const statement = database.prepare("INSERT INTO auth_role_permissions (role_id, permission) VALUES (?, ?)");
+		for (const permission of validPermissions) statement.run(id, permission);
+		const role = getRoleById(id);
+		writeRoleAudit({ roleId: id, action: "role.created", actorUserId, after: role });
+		database.exec("COMMIT");
+		return role;
+	} catch (err) {
+		database.exec("ROLLBACK");
+		throw err;
+	}
+}
+
+export function updateRole(id, { name, permissions, actorUserId = null }) {
+	const previous = requireRole(id);
+	if (previous.isSystem) throw rbacError("system_role_protected", "system roles cannot be edited");
+	if (typeof name !== "string" || !name.trim()) throw rbacError("invalid_role_name", "role name is required");
+	const validPermissions = validateRolePermissions(permissions);
+	const database = open();
+	database.exec("BEGIN IMMEDIATE");
+	try {
+		database.prepare("UPDATE auth_roles SET name = ?, updated_at = ? WHERE id = ?").run(name.trim(), new Date().toISOString(), id);
+		database.prepare("DELETE FROM auth_role_permissions WHERE role_id = ?").run(id);
+		const statement = database.prepare("INSERT INTO auth_role_permissions (role_id, permission) VALUES (?, ?)");
+		for (const permission of validPermissions) statement.run(id, permission);
+		// A role's authorization is embedded in existing JWTs only indirectly:
+		// invalidate every assignee so their next request must establish a fresh
+		// session after a permissions change.
+		database.prepare("UPDATE auth_users SET token_version = token_version + 1 WHERE role = ?").run(id);
+		const role = getRoleById(id);
+		writeRoleAudit({ roleId: id, action: "role.updated", actorUserId, before: previous, after: role });
+		database.exec("COMMIT");
+		return role;
+	} catch (err) {
+		database.exec("ROLLBACK");
+		throw err;
+	}
+}
+
+export function deleteRole(id, { actorUserId = null } = {}) {
+	const role = requireRole(id);
+	if (role.isSystem) throw rbacError("system_role_protected", "system roles cannot be deleted");
+	if (countAuthUsersByRole(id) > 0) throw rbacError("role_assigned", "cannot delete a role assigned to users");
+	const database = open();
+	database.exec("BEGIN IMMEDIATE");
+	try {
+		database.prepare("DELETE FROM auth_role_permissions WHERE role_id = ?").run(id);
+		database.prepare("DELETE FROM auth_roles WHERE id = ?").run(id);
+		writeRoleAudit({ roleId: id, action: "role.deleted", actorUserId, before: role });
+		database.exec("COMMIT");
+		return true;
+	} catch (err) {
+		database.exec("ROLLBACK");
+		throw err;
+	}
+}
+
+/** Reassign a user and invalidate their active sessions. */
+export function reassignAuthUserRole({ userId, roleId, actorUserId = null }) {
+	const user = getAuthUserById(userId);
+	if (!user) throw rbacError("user_not_found", "user does not exist");
+	const role = requireRole(roleId);
+	if (user.role === ADMIN_ROLE_ID && roleId !== ADMIN_ROLE_ID && countAuthUsersByRole(ADMIN_ROLE_ID) <= 1) {
+		throw rbacError("last_administrator", "cannot remove the last administrator");
+	}
+	if (user.role === roleId) return user;
+	const database = open();
+	database.exec("BEGIN IMMEDIATE");
+	try {
+		database.prepare("UPDATE auth_users SET role = ?, token_version = token_version + 1 WHERE id = ?").run(roleId, userId);
+		const updated = getAuthUserById(userId);
+		writeRoleAudit({
+			roleId,
+			action: "user.role_reassigned",
+			actorUserId,
+			subjectUserId: userId,
+			before: { roleId: user.role },
+			after: { roleId: role.id },
+		});
+		database.exec("COMMIT");
+		return updated;
+	} catch (err) {
+		database.exec("ROLLBACK");
+		throw err;
+	}
 }
 
 /** Invite activation flags stored on `auth_users` (for resend / mail / copy link). */
@@ -345,12 +673,14 @@ export function countAuthUsers() {
 export function createAuthUser({
 	email,
 	createdBy = null,
+	roleId = ADMIN_ROLE_ID,
 	inviteAllowPassword = true,
 	inviteAllowGoogle = false,
 }) {
 	if (!inviteAllowPassword && !inviteAllowGoogle) {
 		throw new Error("createAuthUser: at least one invite activation method required");
 	}
+	requireRole(roleId);
 	const now = new Date().toISOString();
 	const id = randomUUID();
 	open()
@@ -358,11 +688,12 @@ export function createAuthUser({
 			`INSERT INTO auth_users (
 				id, email, password_hash, role, token_version, created_at, created_by, invited_at,
 				invite_allow_password, invite_allow_google
-			) VALUES (?, ?, NULL, 'admin', 1, ?, ?, ?, ?, ?)`,
+			) VALUES (?, ?, NULL, ?, 1, ?, ?, ?, ?, ?)`,
 		)
 		.run(
 			id,
 			email,
+			roleId,
 			now,
 			createdBy,
 			now,
@@ -373,8 +704,14 @@ export function createAuthUser({
 }
 
 export function deleteAuthUser(id) {
+	const user = getAuthUserById(id);
+	if (!user) return false;
+	if (user.role === ADMIN_ROLE_ID && countAuthUsersByRole(ADMIN_ROLE_ID) <= 1) {
+		throw rbacError("last_administrator", "cannot delete the last administrator");
+	}
 	open().prepare("DELETE FROM auth_resets WHERE user_id = ?").run(id);
 	open().prepare("DELETE FROM auth_users WHERE id = ?").run(id);
+	return true;
 }
 
 export function bumpTokenVersion(id) {
@@ -1572,6 +1909,75 @@ export function listOnlineClients(ttlMs = SYNC_CLIENT_ONLINE_TTL_MS) {
 	return listClients().filter((c) => isSyncClientOnline(c, now, ttlMs));
 }
 
+export const REMOTE_RESOURCE_DOMAINS = Object.freeze(["templates", "tcp_tools", "resource_sets"]);
+
+function assertRemoteResourceDomain(domain) {
+	if (!REMOTE_RESOURCE_DOMAINS.includes(domain)) throw rbacError("invalid_resource_domain", "unknown remote resource domain");
+}
+
+function rowToRemoteResource(row) {
+	if (!row) return null;
+	let data = {};
+	try {
+		data = JSON.parse(row.resource_json);
+	} catch {
+		data = {};
+	}
+	return {
+		clientId: row.client_id,
+		domain: row.domain,
+		id: row.resource_id,
+		name: row.name,
+		data,
+		revision: row.revision,
+		updatedAt: row.updated_at,
+	};
+}
+
+/** Stable command pipeline for a client's resource domain (separate from workflows). */
+export function remoteResourceChannelId(clientId, domain) {
+	assertRemoteResourceDomain(domain);
+	return `resources:${clientId}:${domain}`;
+}
+
+export function listRemoteResources(clientId, domain) {
+	assertRemoteResourceDomain(domain);
+	return open()
+		.prepare("SELECT * FROM remote_resources WHERE client_id = ? AND domain = ? ORDER BY name COLLATE NOCASE, resource_id")
+		.all(clientId, domain)
+		.map(rowToRemoteResource);
+}
+
+export function getRemoteResource(clientId, domain, resourceId) {
+	assertRemoteResourceDomain(domain);
+	return rowToRemoteResource(
+		open().prepare("SELECT * FROM remote_resources WHERE client_id = ? AND domain = ? AND resource_id = ?").get(clientId, domain, resourceId),
+	);
+}
+
+/** Upsert is safe for retrying a client event or acknowledged command. */
+export function upsertRemoteResource({ clientId, domain, resource, updatedAt = null }) {
+	assertRemoteResourceDomain(domain);
+	const now = updatedAt ?? new Date().toISOString();
+	open()
+		.prepare(
+			`INSERT INTO remote_resources (client_id, domain, resource_id, name, resource_json, revision, updated_at)
+			 VALUES (?, ?, ?, ?, ?, 1, ?)
+			 ON CONFLICT(client_id, domain, resource_id) DO UPDATE SET
+			   name = excluded.name, resource_json = excluded.resource_json,
+			   revision = remote_resources.revision + 1, updated_at = excluded.updated_at`,
+		)
+		.run(clientId, domain, resource.id, resource.name, JSON.stringify(resource.data ?? {}), now);
+	return getRemoteResource(clientId, domain, resource.id);
+}
+
+export function deleteRemoteResource(clientId, domain, resourceId) {
+	assertRemoteResourceDomain(domain);
+	return open()
+		.prepare("DELETE FROM remote_resources WHERE client_id = ? AND domain = ? AND resource_id = ?")
+		.run(clientId, domain, resourceId).changes > 0;
+}
+
 /** Enqueue a command for a client; sequence is per remote_id. */
 export function enqueueCommand({
 	id = null,
@@ -2069,6 +2475,22 @@ export function mirrorSyncEventToPlan({ remoteId, type, payload = {} }) {
 			ackError: typeof payload.error?.message === "string" ? payload.error.message : undefined,
 		});
 	}
+}
+
+/** Apply a client resource event after `sync_events` has accepted its event id. */
+export function mirrorResourceSyncEvent({ clientId, type, payload = {} }) {
+	const match = /^(template|tcp-tool|resource-set)\.(upserted|deleted)$/.exec(type);
+	if (!match) return false;
+	const domain = { template: "templates", "tcp-tool": "tcp_tools", "resource-set": "resource_sets" }[match[1]];
+	if (match[2] === "upserted" && payload.resource?.id && payload.resource?.name) {
+		upsertRemoteResource({ clientId, domain, resource: payload.resource });
+		return true;
+	}
+	if (match[2] === "deleted" && typeof payload.resource_id === "string") {
+		deleteRemoteResource(clientId, domain, payload.resource_id);
+		return true;
+	}
+	return false;
 }
 
 /** Update remote workflow status. Returns updated row or null if not found. */

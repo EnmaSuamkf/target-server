@@ -58,6 +58,12 @@ export const COMMAND_TYPES = [
 	"step.set_status",
 	"workflow.create_with_steps",
 	"workflow.apply_template",
+	"template.upsert",
+	"template.delete",
+	"tcp-tool.upsert",
+	"tcp-tool.delete",
+	"resource-set.upsert",
+	"resource-set.delete",
 ];
 
 export const EVENT_TYPES = [
@@ -69,13 +75,27 @@ export const EVENT_TYPES = [
 	"step.result",
 	"workflow.completed",
 	"workflow.failed",
+	"template.upserted",
+	"template.deleted",
+	"tcp-tool.upserted",
+	"tcp-tool.deleted",
+	"resource-set.upserted",
+	"resource-set.deleted",
 ];
+
+const RESOURCE_CAPABILITIES = Joi.object({
+	version: Joi.number().integer().valid(2).required(),
+	templates: Joi.boolean().default(false),
+	tcp_tools: Joi.boolean().default(false),
+	resource_sets: Joi.boolean().default(false),
+}).optional();
 
 const CAPABILITIES = Joi.object({
 	commands: Joi.array()
 		.items(Joi.string().valid(...COMMAND_TYPES))
 		.optional(),
 	max_batch_events: Joi.number().integer().min(1).max(1000).optional(),
+	resources: RESOURCE_CAPABILITIES,
 }).unknown(true);
 
 const COMMAND_PAYLOADS = {
@@ -164,6 +184,18 @@ const COMMAND_PAYLOADS = {
 		workdir: OPTIONAL_STRING.optional(),
 		variables: Joi.object().optional(),
 	}),
+	"command.template.upsert": Joi.object({
+		resource: Joi.object({ id: STRING.required(), name: STRING.required(), data: Joi.object().unknown(true).default({}) }).required(),
+	}),
+	"command.template.delete": Joi.object({ resource_id: STRING.required() }),
+	"command.tcp-tool.upsert": Joi.object({
+		resource: Joi.object({ id: STRING.required(), name: STRING.required(), data: Joi.object().unknown(true).default({}) }).required(),
+	}),
+	"command.tcp-tool.delete": Joi.object({ resource_id: STRING.required() }),
+	"command.resource-set.upsert": Joi.object({
+		resource: Joi.object({ id: STRING.required(), name: STRING.required(), data: Joi.object().unknown(true).default({}) }).required(),
+	}),
+	"command.resource-set.delete": Joi.object({ resource_id: STRING.required() }),
 };
 
 const EVENT_PAYLOADS = {
@@ -207,6 +239,12 @@ const EVENT_PAYLOADS = {
 		failed_step_key: OPTIONAL_STRING.optional(),
 		error: Joi.object().optional(),
 	}),
+	"event.template.upserted": Joi.object({ resource: Joi.object({ id: STRING.required(), name: STRING.required(), data: Joi.object().unknown(true).default({}) }).required() }),
+	"event.template.deleted": Joi.object({ resource_id: STRING.required() }),
+	"event.tcp-tool.upserted": Joi.object({ resource: Joi.object({ id: STRING.required(), name: STRING.required(), data: Joi.object().unknown(true).default({}) }).required() }),
+	"event.tcp-tool.deleted": Joi.object({ resource_id: STRING.required() }),
+	"event.resource-set.upserted": Joi.object({ resource: Joi.object({ id: STRING.required(), name: STRING.required(), data: Joi.object().unknown(true).default({}) }).required() }),
+	"event.resource-set.deleted": Joi.object({ resource_id: STRING.required() }),
 };
 
 const SYNC_EVENT_ITEM = Joi.object({
@@ -222,7 +260,19 @@ const SYNC_EVENT_ITEM = Joi.object({
 export const BLUEPRINTS = {
 	"user.create": Joi.object({
 		email: EMAIL,
+		role_id: Joi.string().trim().min(1).optional(),
 		activation: USER_CREATE_ACTIVATION.optional(),
+	}),
+	"user.role": Joi.object({
+		role_id: Joi.string().trim().min(1).required(),
+	}),
+	"role.create": Joi.object({
+		name: Joi.string().trim().min(1).max(100).required(),
+		permissions: Joi.array().items(Joi.string().trim().min(1)).required(),
+	}),
+	"role.update": Joi.object({
+		name: Joi.string().trim().min(1).max(100).required(),
+		permissions: Joi.array().items(Joi.string().trim().min(1)).required(),
 	}),
 	"auth.login": Joi.object({ email: EMAIL, password: Joi.string().required() }),
 	"auth.forgot": Joi.object({ email: EMAIL }),
@@ -273,6 +323,13 @@ export const BLUEPRINTS = {
 	}),
 	"sync.remote_workflow.run_selection": Joi.object({
 		step_keys: Joi.array().items(STEP_KEY).min(1).required(),
+	}),
+	"sync.resource.upsert": Joi.object({
+		resource: Joi.object({
+			id: STRING.required(),
+			name: STRING.required(),
+			data: Joi.object().unknown(true).default({}),
+		}).required(),
 	}),
 
 	...COMMAND_PAYLOADS,

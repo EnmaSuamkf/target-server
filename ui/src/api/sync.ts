@@ -6,6 +6,9 @@ import type {
 	SyncEventsResponse,
 	SyncRemoteWorkflowDetailResponse,
 	SyncRemoteWorkflowsResponse,
+	RemoteResource,
+	RemoteResourceDomain,
+	RemoteResourcesResponse,
 } from "./types.ts";
 
 export async function createRemoteWorkflow(body: {
@@ -96,4 +99,27 @@ export async function updateRemoteWorkflowContext(
 	return { ok: true, data: (await res.json()) as SyncRemoteWorkflowDetailResponse };
 }
 
-export type { SyncClientsResponse, SyncRemoteWorkflowsResponse, SyncEventsResponse, SyncRemoteWorkflowDetailResponse };
+export async function mutateRemoteResource(
+	clientId: string,
+	domain: RemoteResourceDomain,
+	method: "POST" | "PATCH" | "DELETE",
+	resource?: { id: string; name: string; data: Record<string, unknown> },
+) {
+	const id = resource?.id;
+	const endpoint = `/api/sync/clients/${encodeURIComponent(clientId)}/${domain}${method === "POST" ? "" : `/${encodeURIComponent(id ?? "")}`}`;
+	const res = await fetch(endpoint, {
+		method,
+		headers: {
+			...(method === "DELETE" ? {} : { "content-type": "application/json" }),
+			"idempotency-key": `${domain}:${method}:${id ?? ""}:${JSON.stringify(resource ?? {})}`,
+		},
+		...(method === "DELETE" ? {} : { body: JSON.stringify({ resource }) }),
+	});
+	const data = (await res.json().catch(() => ({}))) as { command?: SyncCommand; error?: string; errors?: FieldError[]; detail?: string; idempotent?: boolean };
+	if (!res.ok) {
+		return { ok: false as const, error: data.detail ?? data.error ?? data.errors?.[0]?.message ?? `HTTP ${res.status}` };
+	}
+	return { ok: true as const, command: data.command as SyncCommand, idempotent: data.idempotent === true };
+}
+
+export type { SyncClientsResponse, SyncRemoteWorkflowsResponse, SyncEventsResponse, SyncRemoteWorkflowDetailResponse, RemoteResourcesResponse, RemoteResource };
