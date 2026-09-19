@@ -1,15 +1,41 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
-import { createAuthUser, deleteAuthUser, listAuthUsers, resendInvite } from "../api/auth.ts";
-import type { AuthUser, FieldError } from "../api/types.ts";
+import {
+	createAuthUser,
+	deleteAuthUser,
+	fetchAuthProviders,
+	listAuthUsers,
+	resendInvite,
+} from "../api/auth.ts";
+import type { AuthUser, FieldError, InviteLinks } from "../api/types.ts";
 import { timeAgo } from "../lib/format.ts";
 
 function fieldErrors(errors: FieldError[], field: string) {
-	return errors.filter((e) => e.field === field);
+	return errors.filter((e) => e.field === field || e.field.startsWith(`${field}.`));
 }
 
-interface PendingLink {
+function activationLabel(u: AuthUser): string | null {
+	if (u.status !== "pending") return null;
+	const pw = u.inviteAllowPassword !== false;
+	const g = u.inviteAllowGoogle === true;
+	if (pw && g) return "Password · Google";
+	if (g) return "Google only";
+	if (pw) return "Password only";
+	return null;
+}
+
+interface PendingInvite {
 	userId: string;
-	url: string;
+	setupUrl?: string;
+	loginUrl?: string;
+}
+
+function mergePendingInvite(userId: string, invite: InviteLinks): PendingInvite {
+	const setupUrl = invite.setupUrl ?? invite.url;
+	return {
+		userId,
+		...(setupUrl ? { setupUrl } : {}),
+		...(invite.loginUrl ? { loginUrl: invite.loginUrl } : {}),
+	};
 }
 
 export function UsersPanel({ currentUser }: { currentUser: AuthUser }) {
@@ -18,9 +44,12 @@ export function UsersPanel({ currentUser }: { currentUser: AuthUser }) {
 	const [email, setEmail] = useState("");
 	const [errors, setErrors] = useState<FieldError[]>([]);
 	const [notice, setNotice] = useState<string | null>(null);
-	const [pendingLinks, setPendingLinks] = useState<PendingLink[]>([]);
+	const [pendingInvites, setPendingInvites] = useState<PendingInvite[]>([]);
 	const [confirmDelete, setConfirmDelete] = useState<{ id: string; email: string; typed: string } | null>(null);
 	const [busy, setBusy] = useState(false);
+	const [googleAvailable, setGoogleAvailable] = useState(false);
+	const [allowPassword, setAllowPassword] = useState(true);
+	const [allowGoogle, setAllowGoogle] = useState(false);
 
 	const load = useCallback(async () => {
 		try {
@@ -36,19 +65,47 @@ export function UsersPanel({ currentUser }: { currentUser: AuthUser }) {
 		void load();
 	}, [load]);
 
+	useEffect(() => {
+		void (async () => {
+			try {
+				const providers = await fetchAuthProviders();
+				setGoogleAvailable(providers.google);
+				if (providers.google) {
+					setAllowPassword(true);
+					setAllowGoogle(true);
+				} else {
+					setAllowGoogle(false);
+					setAllowPassword(true);
+				}
+			} catch {
+				setGoogleAvailable(false);
+				setAllowGoogle(false);
+			}
+		})();
+	}, []);
+
+	function storePendingInvite(userId: string, invite: InviteLinks) {
+		const entry = mergePendingInvite(userId, invite);
+		setPendingInvites((prev) => [...prev.filter((p) => p.userId !== userId), entry]);
+	}
+
 	async function onInvite(e: FormEvent) {
 		e.preventDefault();
+		if (!allowPassword && !allowGoogle) {
+			setErrors([{ field: "activation", code: "required", message: "Choose at least one activation method." }]);
+			return;
+		}
 		setBusy(true);
 		setErrors([]);
 		setNotice(null);
 		try {
-			const res = await createAuthUser(email);
+			const res = await createAuthUser(email, { password: allowPassword, google: allowGoogle });
 			if (!res.ok) {
 				setErrors(res.errors);
 				return;
 			}
 			setEmail("");
-			setPendingLinks((prev) => [...prev.filter((p) => p.userId !== res.user.id), { userId: res.user.id, url: res.invite.url }]);
+			storePendingInvite(res.user.id, res.invite);
 			setNotice(
 				res.mail.sent
 					? `Invited ${res.user.email} — invitation email sent (${res.mail.transport}).`
@@ -69,7 +126,7 @@ export function UsersPanel({ currentUser }: { currentUser: AuthUser }) {
 				setNotice("Account is already active.");
 				return;
 			}
-			setPendingLinks((prev) => [...prev.filter((p) => p.userId !== user.id), { userId: user.id, url: res.invite.url }]);
+			storePendingInvite(user.id, res.invite);
 			setNotice(
 				res.mail.sent ? `Invitation resent to ${user.email}.` : `Resend failed — copy the link below for ${user.email}.`,
 			);
@@ -88,21 +145,24 @@ export function UsersPanel({ currentUser }: { currentUser: AuthUser }) {
 				return;
 			}
 			setConfirmDelete(null);
-			setPendingLinks((prev) => prev.filter((p) => p.userId !== confirmDelete.id));
+			setPendingInvites((prev) => prev.filter((p) => p.userId !== confirmDelete.id));
 			await load();
 		} finally {
 			setBusy(false);
 		}
 	}
 
-	const linkFor = (id: string) => pendingLinks.find((p) => p.userId === id)?.url;
+	const inviteFor = (id: string) => pendingInvites.find((p) => p.userId === id);
+	const loginPageUrl = `${window.location.origin}/login`;
 	const lastUser = (users?.length ?? 0) <= 1;
 
 	return (
 		<div className="users-panel">
 			<p className="panel-note">
-				Invited users can activate with <strong>Sign in with Google</strong> (when Google OAuth is configured) or the
-				setup link from their invitation email.
+				Choose how each invitee may activate: a one-time <strong>password setup link</strong>,{" "}
+				<strong>Sign in with Google</strong> (same email, invite-only), or both. Google requires{" "}
+				<code>TARGET_GOOGLE_CLIENT_ID</code> and <code>TARGET_GOOGLE_CLIENT_SECRET</code> on the server — see the README
+				Google OAuth section.
 			</p>
 			<form onSubmit={onInvite} className="users-invite">
 				<input
@@ -113,12 +173,40 @@ export function UsersPanel({ currentUser }: { currentUser: AuthUser }) {
 					value={email}
 					onChange={(e) => setEmail(e.target.value)}
 				/>
-				<button type="submit" className="btn btn--on" disabled={busy}>
+				<div className="users-invite-methods">
+					<label className="users-check">
+						<input
+							type="checkbox"
+							checked={allowPassword}
+							onChange={(e) => setAllowPassword(e.target.checked)}
+							disabled={busy || (!allowGoogle && allowPassword)}
+						/>
+						Password setup link
+					</label>
+					<label className={`users-check${googleAvailable ? "" : " users-check--disabled"}`}>
+						<input
+							type="checkbox"
+							checked={allowGoogle}
+							onChange={(e) => setAllowGoogle(e.target.checked)}
+							disabled={busy || !googleAvailable || (!allowPassword && allowGoogle)}
+						/>
+						Sign in with Google
+					</label>
+				</div>
+				<button type="submit" className="btn btn--on" disabled={busy || (!allowPassword && !allowGoogle)}>
 					Invite
 				</button>
 			</form>
+			{!googleAvailable ? (
+				<p className="panel-note users-invite-hint">Google sign-in is not configured on this server — password setup only.</p>
+			) : null}
 			{fieldErrors(errors, "email").map((e) => (
-				<div key={e.code} className="field-err">
+				<div key={`${e.field}-${e.code}`} className="field-err">
+					{e.message}
+				</div>
+			))}
+			{fieldErrors(errors, "activation").map((e) => (
+				<div key={`${e.field}-${e.code}`} className="field-err">
 					{e.message}
 				</div>
 			))}
@@ -144,7 +232,11 @@ export function UsersPanel({ currentUser }: { currentUser: AuthUser }) {
 					<tbody>
 						{users.map((u) => {
 							const pending = u.status === "pending";
-							const link = linkFor(u.id);
+							const cached = inviteFor(u.id);
+							const setupUrl = cached?.setupUrl;
+							const showGoogleHint = pending && (cached?.loginUrl || u.inviteAllowGoogle);
+							const loginUrl = cached?.loginUrl ?? (u.inviteAllowGoogle ? loginPageUrl : undefined);
+							const methods = activationLabel(u);
 							const disableDelete = u.id === currentUser.id || lastUser;
 							return (
 								<tr key={u.id}>
@@ -153,6 +245,7 @@ export function UsersPanel({ currentUser }: { currentUser: AuthUser }) {
 										{pending ? (
 											<span className="badge badge--warn" title="Invitation not completed">
 												Pending invitation
+												{methods ? ` · ${methods}` : ""}
 											</span>
 										) : (
 											<span className="badge badge--success">Active</span>
@@ -161,14 +254,28 @@ export function UsersPanel({ currentUser }: { currentUser: AuthUser }) {
 									<td className="mono">{timeAgo(u.createdAt)}</td>
 									<td className="mono">{u.lastLoginAt ? timeAgo(u.lastLoginAt) : "—"}</td>
 									<td className="users-actions">
-										{pending && link ? (
-											<button type="button" className="btn btn--sm" onClick={() => void navigator.clipboard.writeText(link)}>
-												Copy link
+										{pending && setupUrl ? (
+											<button
+												type="button"
+												className="btn btn--sm"
+												onClick={() => void navigator.clipboard.writeText(setupUrl)}
+											>
+												Copy setup link
+											</button>
+										) : null}
+										{pending && showGoogleHint && loginUrl ? (
+											<button
+												type="button"
+												className="btn btn--sm"
+												title="Login page for Sign in with Google"
+												onClick={() => void navigator.clipboard.writeText(loginUrl)}
+											>
+												Copy login URL
 											</button>
 										) : null}
 										{pending ? (
 											<button type="button" className="btn btn--sm" disabled={busy} onClick={() => void onResend(u)}>
-												{link ? "Resend" : "Resend / copy link"}
+												{setupUrl || showGoogleHint ? "Resend" : "Resend / copy link"}
 											</button>
 										) : null}
 										<button

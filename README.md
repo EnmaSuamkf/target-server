@@ -89,9 +89,41 @@ Human accounts live under `/api/auth/users` — distinct from `GET /api/users`,
 which still lists reporting instance display names.
 
 First run on a fresh database seeds `admin@admin.com`. Invite additional
-operators from the **Users** panel: the server emails a single-use setup link
-(no password in mail). Local/CI defaults write `.mail-outbox/*.eml` instead of
-using SMTP.
+operators from the **Users** panel. Local/CI defaults write `.mail-outbox/*.eml`
+instead of using SMTP (or use Resend/SMTP in production).
+
+### Inviting operators (activation methods)
+
+Each invite chooses how the account may activate. Full design:
+[`docs/invite-activation-methods.md`](docs/invite-activation-methods.md).
+
+| Method | Users panel | Invitation email |
+| --- | --- | --- |
+| **Password setup link** | Checkbox *Password setup link* | One-time `/setup?token=…` (7 days, single use) |
+| **Sign in with Google** | Checkbox *Sign in with Google* (only when OAuth is configured) | Login URL + *Continue with Google* (same invited email) |
+| **Both** | Both checked (default when Google is on) | Both sections with distinct URLs |
+
+- Defaults: **both** when `GET /api/auth/providers` → `{ "google": true }`; otherwise
+  **password only** (Google checkbox disabled).
+- **Resend** and **Copy setup link** / **Copy login URL** use the methods stored on
+  the user row (resend does not re-prompt).
+- API: `POST /api/auth/users` body `{ "email": "…", "activation": { "password": true, "google": false } }`
+  (`activation` optional — server applies the same defaults as the UI).
+- Response `invite` may include `setupUrl`, `loginUrl`, and `expiresAt` (setup token
+  only when password is allowed). `invite.url` is an alias for `setupUrl` when present.
+
+**Manual check (local file outbox or Resend)** — use one test address three times
+(delete the pending user between runs, or use three addresses):
+
+1. Start with Google env + `TARGET_MAIL_TRANSPORT=file` (see below).
+2. **Users** → invite with **password only** → open the newest `.mail-outbox/*.eml`:
+   setup link present, no Google sign-in section.
+3. Invite **Google only** → email has login URL / Google instructions, **no**
+   `/setup?token=`.
+4. Invite **both** → email contains **both** sections.
+
+Automated coverage: `test/mail-templates.test.mjs` and `test/users.test.mjs`.
+Quick local smoke (file outbox, same email three times): `node scripts/verify-invite-mails.mjs`.
 
 ### Google sign-in (optional, invite-only)
 
@@ -104,8 +136,9 @@ the login page shows **Sign in with Google** (`GET /api/auth/providers` reports
 2. The Google account **email must already exist** in `auth_users` (invited from
    **Users**). There is **no** auto-registration on callback — unknown emails
    redirect to `/login?auth_error=not_invited`.
-3. Pending invites can activate with Google (no setup password) or the emailed
-   setup link. Password login remains available for accounts with a password.
+3. Pending invites activate according to the methods chosen at invite time
+   (password setup link, Google, or both). Password login remains available after
+   a password is set.
 
 Cloud Console setup (OAuth client, redirect URIs, test users while the app is in
 **Testing**) is documented in
@@ -152,9 +185,10 @@ Startup log: `mail: file` (outbox) or `mail: resend` when SMTP/Resend is configu
 **Try the flows**
 
 1. Admin at **http://127.0.0.1:8900/** (`admin@admin.com` / `password-target-server` on a fresh DB).
-2. **Users** → invite the Gmail you will test → invitation email (or copy setup link from the panel).
+2. **Users** → pick activation checkboxes → invite the Gmail you will test →
+   invitation email (or **Copy setup link** / **Copy login URL** from the panel).
 3. **http://127.0.0.1:8900/login** → **Continue with Google** (only if step above returned `"google": true`).
-4. Pending invite: activate with the emailed **`/setup?token=…`** link **or** Google sign-in (same email).
+4. Pending invite: use only the paths allowed for that invite (setup link and/or Google).
 5. Uninvited Google account → `/login?auth_error=not_invited`.
 
 While the OAuth consent screen is in **Testing**, each Google account must be
@@ -347,8 +381,8 @@ All `GET /api/*` routes below require a session unless noted.
 - `POST /api/auth/forgot-password` — email a reset link (always 202)
 - `POST /api/auth/setup` — complete an invitation (`/setup?token=…`)
 - `POST /api/auth/reset-password` — set password from recovery link
-- `GET/POST/DELETE /api/auth/users` — list, invite, delete human accounts
-- `POST /api/auth/users/:id/invite` — resend invitation
+- `GET/POST/DELETE /api/auth/users` — list, invite, delete human accounts (`POST` body optional `activation: { password?, google? }`; user rows include `inviteAllowPassword`, `inviteAllowGoogle`)
+- `POST /api/auth/users/:id/invite` — resend invitation (uses stored activation methods; `invite.setupUrl` / `invite.loginUrl` in response)
 
 - `POST /ingest` — receive a batch (optional ingest token; not session auth). Returns `{ accepted: [id...], rejected: [{id,reason,detail}] }`.
   Idempotent: re-sending the same event ids inserts nothing new but still acks them.

@@ -28,6 +28,25 @@ test("blueprint stripUnknown drops injected role", () => {
 	assert.equal(r.value.role, undefined);
 });
 
+test("user.create activation requires at least one method", () => {
+	const r = validate("user.create", {
+		email: "someone@example.com",
+		activation: { password: false, google: false },
+	});
+	assert.equal(r.ok, false);
+	assert.ok(r.errors.some((e) => e.field === "activation"));
+});
+
+test("user.create activation accepts password only", () => {
+	const r = validate("user.create", {
+		email: "someone@example.com",
+		activation: { password: true },
+	});
+	assert.equal(r.ok, true);
+	assert.equal(r.value.activation.password, true);
+	assert.equal(r.value.activation.google, false);
+});
+
 test("blueprint error shape", () => {
 	const r = validate("user.create", { email: "bad" });
 	assert.equal(r.ok, false);

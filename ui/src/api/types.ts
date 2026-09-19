@@ -243,7 +243,21 @@ export interface AuthUser {
 	lastLoginAt: string | null;
 	status: "pending" | "active";
 	usesDefaultPassword?: boolean;
+	inviteAllowPassword?: boolean;
+	inviteAllowGoogle?: boolean;
 }
+
+export type InviteActivation = {
+	password: boolean;
+	google: boolean;
+};
+
+export type InviteLinks = {
+	url?: string;
+	setupUrl?: string;
+	loginUrl?: string;
+	expiresAt?: string;
+};
 
 export interface FieldError {
 	field: string;

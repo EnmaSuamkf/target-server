@@ -13,6 +13,14 @@ const EMAIL = Joi.string()
 const PASSWORD = Joi.string().min(12).max(200).required();
 const TOKEN = Joi.string().hex().length(64).required();
 
+const USER_CREATE_ACTIVATION = Joi.object({
+	password: Joi.boolean().default(false),
+	google: Joi.boolean().default(false),
+}).custom((value, helpers) => {
+	if (value.password || value.google) return value;
+	return helpers.error("any.custom", { message: "At least one activation method must be enabled" });
+});
+
 const STRING = Joi.string().trim().min(1);
 const OPTIONAL_STRING = Joi.string().trim().allow("");
 const STEP_KEY = Joi.string().trim().min(1);
@@ -212,7 +220,10 @@ const SYNC_EVENT_ITEM = Joi.object({
 });
 
 export const BLUEPRINTS = {
-	"user.create": Joi.object({ email: EMAIL }),
+	"user.create": Joi.object({
+		email: EMAIL,
+		activation: USER_CREATE_ACTIVATION.optional(),
+	}),
 	"auth.login": Joi.object({ email: EMAIL, password: Joi.string().required() }),
 	"auth.forgot": Joi.object({ email: EMAIL }),
 	"auth.setup": Joi.object({ token: TOKEN, password: PASSWORD }),

@@ -977,8 +977,12 @@ tbody tr.wf-row--selected, tbody tr.wf-row--selected:hover { background: var(--a
 .default-pw-banner .btn { vertical-align: baseline; margin: 0 var(--space-1); }
 
 .users-panel { display: grid; gap: var(--space-4); }
-.users-invite { display: flex; gap: var(--space-2); flex-wrap: wrap; }
+.users-invite { display: flex; gap: var(--space-2); flex-wrap: wrap; align-items: center; }
 .users-invite .input { flex: 1; min-width: 12rem; }
+.users-invite-methods { display: flex; flex-wrap: wrap; gap: var(--space-3); align-items: center; }
+.users-check { display: inline-flex; gap: var(--space-2); align-items: center; font-size: var(--text-sm); cursor: pointer; }
+.users-check--disabled { opacity: 0.65; cursor: not-allowed; }
+.users-invite-hint { margin: calc(-1 * var(--space-2)) 0 0; }
 .users-actions { display: flex; gap: var(--space-2); flex-wrap: wrap; justify-content: flex-end; }
 .users-confirm {
 	margin-top: var(--space-4);

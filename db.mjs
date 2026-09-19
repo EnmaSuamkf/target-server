@@ -185,6 +185,19 @@ function migrateAuthSchema(database) {
 		CREATE UNIQUE INDEX IF NOT EXISTS idx_auth_users_google_sub
 		ON auth_users(google_sub) WHERE google_sub IS NOT NULL;
 	`);
+	addColumn("auth_users", "invite_allow_password", "INTEGER NOT NULL DEFAULT 1");
+	addColumn("auth_users", "invite_allow_google", "INTEGER NOT NULL DEFAULT 0");
+}
+
+/** Invite activation flags stored on `auth_users` (for resend / mail / copy link). */
+export function getAuthUserInviteMethods(user) {
+	if (!user) {
+		return { allowPassword: false, allowGoogle: false };
+	}
+	return {
+		allowPassword: Boolean(user.inviteAllowPassword),
+		allowGoogle: Boolean(user.inviteAllowGoogle),
+	};
 }
 
 function rowToAuthUser(r) {
@@ -201,6 +214,8 @@ function rowToAuthUser(r) {
 		invitedAt: r.invited_at,
 		activatedAt: r.activated_at,
 		lastLoginAt: r.last_login_at,
+		inviteAllowPassword: r.invite_allow_password !== 0,
+		inviteAllowGoogle: r.invite_allow_google !== 0,
 	};
 }
 
@@ -327,15 +342,33 @@ export function countAuthUsers() {
 	return open().prepare("SELECT COUNT(*) AS n FROM auth_users").get().n;
 }
 
-export function createAuthUser({ email, createdBy = null }) {
+export function createAuthUser({
+	email,
+	createdBy = null,
+	inviteAllowPassword = true,
+	inviteAllowGoogle = false,
+}) {
+	if (!inviteAllowPassword && !inviteAllowGoogle) {
+		throw new Error("createAuthUser: at least one invite activation method required");
+	}
 	const now = new Date().toISOString();
 	const id = randomUUID();
 	open()
 		.prepare(
-			`INSERT INTO auth_users (id, email, password_hash, role, token_version, created_at, created_by, invited_at)
-			 VALUES (?, ?, NULL, 'admin', 1, ?, ?, ?)`,
+			`INSERT INTO auth_users (
+				id, email, password_hash, role, token_version, created_at, created_by, invited_at,
+				invite_allow_password, invite_allow_google
+			) VALUES (?, ?, NULL, 'admin', 1, ?, ?, ?, ?, ?)`,
 		)
-		.run(id, email, now, createdBy, now);
+		.run(
+			id,
+			email,
+			now,
+			createdBy,
+			now,
+			inviteAllowPassword ? 1 : 0,
+			inviteAllowGoogle ? 1 : 0,
+		);
 	return getAuthUserById(id);
 }
 

@@ -1,4 +1,4 @@
-import type { AuthUser, FieldError } from "./types.ts";
+import type { AuthUser, FieldError, InviteActivation, InviteLinks } from "./types.ts";
 
 async function parseJson<T>(res: Response): Promise<T> {
 	const body = (await res.json()) as T;
@@ -81,11 +81,13 @@ export async function listAuthUsers() {
 	return (await res.json()) as { users: AuthUser[] };
 }
 
-export async function createAuthUser(email: string) {
+export async function createAuthUser(email: string, activation?: InviteActivation) {
+	const payload: { email: string; activation?: InviteActivation } = { email };
+	if (activation) payload.activation = activation;
 	const res = await fetch("/api/auth/users", {
 		method: "POST",
 		headers: { "content-type": "application/json" },
-		body: JSON.stringify({ email }),
+		body: JSON.stringify(payload),
 	});
 	const body = await res.json();
 	if (res.status === 422) return { ok: false as const, errors: body.errors as FieldError[] };
@@ -94,7 +96,7 @@ export async function createAuthUser(email: string) {
 	return {
 		ok: true as const,
 		user: body.user as AuthUser,
-		invite: body.invite as { url: string; expiresAt: string },
+		invite: body.invite as InviteLinks,
 		mail: body.mail as { sent: boolean; transport?: string; error?: string },
 	};
 }
@@ -106,7 +108,7 @@ export async function resendInvite(userId: string) {
 	if (!res.ok) throw new Error(`/api/auth/users/${userId}/invite → ${res.status}`);
 	return {
 		ok: true as const,
-		invite: body.invite as { url: string; expiresAt: string },
+		invite: body.invite as InviteLinks,
 		mail: body.mail as { sent: boolean; transport?: string; error?: string },
 	};
 }
