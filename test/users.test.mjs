@@ -19,10 +19,38 @@ const { server } = await import("../server.mjs");
 if (!server.listening) await once(server, "listening");
 const base = `http://127.0.0.1:${server.address().port}`;
 
+let adminCookie = null;
+async function adminSession() {
+	if (!adminCookie) adminCookie = await login(base);
+	return adminCookie;
+}
+
 after(() => server.close());
 
+function mailForEmail(email) {
+	return readdirSync(outboxDir())
+		.filter((f) => f.endsWith(".eml"))
+		.map((f) => readFileSync(path.join(outboxDir(), f), "utf8"))
+		.find((t) => t.includes(email));
+}
+
+function withGoogleOAuth(fn) {
+	const prevId = process.env.TARGET_GOOGLE_CLIENT_ID;
+	const prevSec = process.env.TARGET_GOOGLE_CLIENT_SECRET;
+	process.env.TARGET_GOOGLE_CLIENT_ID = "test-client-id";
+	process.env.TARGET_GOOGLE_CLIENT_SECRET = "test-client-secret";
+	return Promise.resolve()
+		.then(fn)
+		.finally(() => {
+			if (prevId === undefined) delete process.env.TARGET_GOOGLE_CLIENT_ID;
+			else process.env.TARGET_GOOGLE_CLIENT_ID = prevId;
+			if (prevSec === undefined) delete process.env.TARGET_GOOGLE_CLIENT_SECRET;
+			else process.env.TARGET_GOOGLE_CLIENT_SECRET = prevSec;
+		});
+}
+
 test("create user returns invite url and writes mail without password", async () => {
-	const cookie = await login(base);
+	const cookie = await adminSession();
 	const res = await fetch(`${base}/api/auth/users`, {
 		method: "POST",
 		headers: { "content-type": "application/json", cookie },
@@ -32,20 +60,19 @@ test("create user returns invite url and writes mail without password", async ()
 	const body = await res.json();
 	assert.equal(body.user.email, "invited@example.com");
 	assert.equal(body.user.status, "pending");
+	assert.equal(body.user.inviteAllowPassword, true);
+	assert.equal(body.user.inviteAllowGoogle, false);
 	assert.ok(body.invite.url.includes("/setup?token="));
 	assert.ok(body.mail.sent);
 
-	const eml = readdirSync(outboxDir())
-		.filter((f) => f.endsWith(".eml"))
-		.map((f) => readFileSync(path.join(outboxDir(), f), "utf8"))
-		.find((t) => t.includes("invited@example.com"));
+	const eml = mailForEmail("invited@example.com");
 	assert.ok(eml);
 	assert.ok(eml.includes("/setup?token="));
 	assert.ok(!/password:/i.test(eml));
 });
 
 test("duplicate email 409", async () => {
-	const cookie = await login(base);
+	const cookie = await adminSession();
 	const res = await fetch(`${base}/api/auth/users`, {
 		method: "POST",
 		headers: { "content-type": "application/json", cookie },
@@ -54,8 +81,169 @@ test("duplicate email 409", async () => {
 	assert.equal(res.status, 409);
 });
 
+test("google-only invite rejected when OAuth not configured", async () => {
+	const cookie = await adminSession();
+	const res = await fetch(`${base}/api/auth/users`, {
+		method: "POST",
+		headers: { "content-type": "application/json", cookie },
+		body: JSON.stringify({
+			email: "google-only@example.com",
+			activation: { google: true },
+		}),
+	});
+	assert.equal(res.status, 422);
+	const body = await res.json();
+	assert.ok(body.errors.some((e) => e.field === "activation.google" && e.code === "google_oauth_disabled"));
+});
+
+test("google-only invite: API and mail without setup token", async () => {
+	await withGoogleOAuth(async () => {
+		const cookie = await adminSession();
+		const res = await fetch(`${base}/api/auth/users`, {
+			method: "POST",
+			headers: { "content-type": "application/json", cookie },
+			body: JSON.stringify({
+				email: "google-mail@example.com",
+				activation: { google: true },
+			}),
+		});
+		assert.equal(res.status, 201);
+		const body = await res.json();
+		assert.equal(body.user.inviteAllowPassword, false);
+		assert.equal(body.user.inviteAllowGoogle, true);
+		assert.equal(body.invite.setupUrl, undefined);
+		assert.ok(body.invite.loginUrl?.includes("/login"));
+		assert.equal(body.invite.url, undefined);
+
+		const eml = mailForEmail("google-mail@example.com");
+		assert.ok(eml);
+		assert.match(eml, /Continue with Google/i);
+		assert.match(eml, /\/login/);
+		assert.doesNotMatch(eml, /\/setup\?token=/);
+		assert.doesNotMatch(eml, /Choose your password/i);
+	});
+});
+
+test("password-only invite: API and mail with setup token, no Google", async () => {
+	const cookie = await adminSession();
+	const res = await fetch(`${base}/api/auth/users`, {
+		method: "POST",
+		headers: { "content-type": "application/json", cookie },
+		body: JSON.stringify({
+			email: "password-only@example.com",
+			activation: { password: true, google: false },
+		}),
+	});
+	assert.equal(res.status, 201);
+	const body = await res.json();
+	assert.equal(body.user.inviteAllowPassword, true);
+	assert.equal(body.user.inviteAllowGoogle, false);
+	assert.ok(body.invite.setupUrl?.includes("/setup?token="));
+	assert.equal(body.invite.loginUrl, undefined);
+
+	const eml = mailForEmail("password-only@example.com");
+	assert.ok(eml);
+	assert.match(eml, /Choose your password/i);
+	assert.match(eml, /\/setup\?token=/);
+	assert.doesNotMatch(eml, /Continue with Google/i);
+});
+
+test("both activation: API and mail include setup and Google", async () => {
+	await withGoogleOAuth(async () => {
+		const cookie = await adminSession();
+		const res = await fetch(`${base}/api/auth/users`, {
+			method: "POST",
+			headers: { "content-type": "application/json", cookie },
+			body: JSON.stringify({
+				email: "both-methods@example.com",
+				activation: { password: true, google: true },
+			}),
+		});
+		assert.equal(res.status, 201);
+		const body = await res.json();
+		assert.equal(body.user.inviteAllowPassword, true);
+		assert.equal(body.user.inviteAllowGoogle, true);
+		assert.ok(body.invite.setupUrl?.includes("/setup?token="));
+		assert.ok(body.invite.loginUrl?.includes("/login"));
+
+		const eml = mailForEmail("both-methods@example.com");
+		assert.ok(eml);
+		assert.match(eml, /Choose your password/i);
+		assert.match(eml, /\/setup\?token=/);
+		assert.match(eml, /Continue with Google/i);
+		assert.match(eml, /\/login/);
+	});
+});
+
+test("resend preserves google-only methods without setup token", async () => {
+	await withGoogleOAuth(async () => {
+		const cookie = await adminSession();
+		const created = await (
+			await fetch(`${base}/api/auth/users`, {
+				method: "POST",
+				headers: { "content-type": "application/json", cookie },
+				body: JSON.stringify({
+					email: "resend-google@example.com",
+					activation: { google: true },
+				}),
+			})
+		).json();
+		const userId = created.user.id;
+
+		const resend = await fetch(`${base}/api/auth/users/${userId}/invite`, {
+			method: "POST",
+			headers: { cookie },
+		});
+		assert.equal(resend.status, 200);
+		const body = await resend.json();
+		assert.equal(body.invite.setupUrl, undefined);
+		assert.ok(body.invite.loginUrl?.includes("/login"));
+
+		const list = await (await fetch(`${base}/api/auth/users`, { headers: { cookie } })).json();
+		const row = list.users.find((u) => u.id === userId);
+		assert.equal(row.inviteAllowPassword, false);
+		assert.equal(row.inviteAllowGoogle, true);
+
+		const eml = mailForEmail("resend-google@example.com");
+		assert.ok(eml);
+		assert.doesNotMatch(eml, /\/setup\?token=/);
+	});
+});
+
+test("resend preserves password-only methods with new setup token", async () => {
+	const cookie = await adminSession();
+	const created = await (
+		await fetch(`${base}/api/auth/users`, {
+			method: "POST",
+			headers: { "content-type": "application/json", cookie },
+			body: JSON.stringify({
+				email: "resend-password@example.com",
+				activation: { password: true, google: false },
+			}),
+		})
+	).json();
+	const userId = created.user.id;
+	const firstToken = new URL(created.invite.setupUrl).searchParams.get("token");
+
+	const resend = await fetch(`${base}/api/auth/users/${userId}/invite`, {
+		method: "POST",
+		headers: { cookie },
+	});
+	assert.equal(resend.status, 200);
+	const body = await resend.json();
+	assert.ok(body.invite.setupUrl?.includes("/setup?token="));
+	assert.equal(body.invite.loginUrl, undefined);
+	const secondToken = new URL(body.invite.setupUrl).searchParams.get("token");
+	assert.notEqual(firstToken, secondToken);
+
+	const list = await (await fetch(`${base}/api/auth/users`, { headers: { cookie } })).json();
+	const row = list.users.find((u) => u.id === userId);
+	assert.equal(row.inviteAllowPassword, true);
+	assert.equal(row.inviteAllowGoogle, false);
+});
+
 test("invalid email 422", async () => {
-	const cookie = await login(base);
+	const cookie = await adminSession();
 	const res = await fetch(`${base}/api/auth/users`, {
 		method: "POST",
 		headers: { "content-type": "application/json", cookie },
@@ -66,7 +254,7 @@ test("invalid email 422", async () => {
 });
 
 test("setup completes invitation and signs in", async () => {
-	const cookie = await login(base);
+	const cookie = await adminSession();
 	const created = await (
 		await fetch(`${base}/api/auth/users`, {
 			method: "POST",
@@ -95,7 +283,7 @@ test("setup completes invitation and signs in", async () => {
 });
 
 test("cannot delete last user", async () => {
-	const cookie = await login(base);
+	const cookie = await adminSession();
 	const list = await (await fetch(`${base}/api/auth/users`, { headers: { cookie } })).json();
 	for (const u of list.users.filter((x) => x.email !== "admin@admin.com")) {
 		await fetch(`${base}/api/auth/users/${u.id}`, { method: "DELETE", headers: { cookie } });

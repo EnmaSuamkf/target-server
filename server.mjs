@@ -49,6 +49,7 @@ import {
 	getAuthUserByEmail,
 	getAuthUserByGoogleSub,
 	getAuthUserById,
+	getAuthUserInviteMethods,
 	invalidateResetTokens,
 	isPublishedRenderDeploy,
 	insertResetToken,
@@ -404,23 +405,61 @@ async function userResponse(user) {
 	return { ...publicUser(user), usesDefaultPassword };
 }
 
+/** Defaults match dashboard invite form (see docs/invite-activation-methods.md). */
+function resolveInviteActivationForCreate(activation) {
+	if (activation === undefined) {
+		const googleConfigured = isGoogleOAuthConfigured();
+		return { inviteAllowPassword: true, inviteAllowGoogle: googleConfigured };
+	}
+	return {
+		inviteAllowPassword: activation.password === true,
+		inviteAllowGoogle: activation.google === true,
+	};
+}
+
 async function issueInvite(user) {
 	sweepExpiredResets();
 	invalidateResetTokens(user.id, "invite");
-	const raw = randomTokenBytes().toString("hex");
-	const tokenHash = hashToken(raw);
-	const expiresAt = new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString();
-	insertResetToken({ tokenHash, userId: user.id, kind: "invite", expiresAt });
+	const { allowPassword, allowGoogle } = getAuthUserInviteMethods(user);
+	const origin = publicUrl({ host: HOST, port: PORT }).replace(/\/$/, "");
+	const loginUrl = `${origin}/login`;
+
+	let raw = null;
+	let expiresAt = null;
+	if (allowPassword) {
+		raw = randomTokenBytes().toString("hex");
+		const tokenHash = hashToken(raw);
+		expiresAt = new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString();
+		insertResetToken({ tokenHash, userId: user.id, kind: "invite", expiresAt });
+	}
 	touchInvitedAt(user.id);
-	const body = withToken(inviteMail({ publicUrl: publicUrl({ host: HOST, port: PORT }), email: user.email }), raw);
+
+	const setupUrl = raw ? `${origin}/setup?token=${raw}` : undefined;
+	let mailBody = inviteMail({
+		publicUrl: origin,
+		email: user.email,
+		allowPassword,
+		allowGoogle,
+		setupUrl: allowPassword ? setupUrl : undefined,
+		loginUrl: allowGoogle ? loginUrl : undefined,
+	});
+	if (raw) mailBody = withToken(mailBody, raw);
+
 	let mail;
 	try {
-		mail = await sendMail({ to: user.email, ...body });
+		mail = await sendMail({ to: user.email, ...mailBody });
 	} catch (err) {
 		mail = { sent: false, transport: mailTransportName(), error: String(err?.message ?? err) };
 	}
-	const origin = publicUrl({ host: HOST, port: PORT });
-	return { invite: { url: `${origin}/setup?token=${raw}`, expiresAt }, mail };
+
+	const invite = {};
+	if (setupUrl) {
+		invite.setupUrl = setupUrl;
+		invite.url = setupUrl;
+		invite.expiresAt = expiresAt;
+	}
+	if (allowGoogle) invite.loginUrl = loginUrl;
+	return { invite, mail };
 }
 
 async function issueReset(user) {
@@ -603,7 +642,24 @@ async function handleAuthRoute(req, res, pathname, url) {
 		if (getAuthUserByEmail(v.value.email)) {
 			return sendJson(res, 409, { errors: [{ field: "email", code: "email_taken", message: "Email is already in use" }] });
 		}
-		const created = createAuthUser({ email: v.value.email, createdBy: actor.id });
+		const inviteMethods = resolveInviteActivationForCreate(v.value.activation);
+		if (inviteMethods.inviteAllowGoogle && !isGoogleOAuthConfigured()) {
+			return sendJson(res, 422, {
+				errors: [
+					{
+						field: "activation.google",
+						code: "google_oauth_disabled",
+						message: "Google sign-in is not configured on this server",
+					},
+				],
+			});
+		}
+		const created = createAuthUser({
+			email: v.value.email,
+			createdBy: actor.id,
+			inviteAllowPassword: inviteMethods.inviteAllowPassword,
+			inviteAllowGoogle: inviteMethods.inviteAllowGoogle,
+		});
 		const { invite, mail } = await issueInvite(created);
 		return sendJson(res, 201, { user: publicUser(created), invite, mail });
 	}

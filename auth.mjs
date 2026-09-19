@@ -134,6 +134,8 @@ export function publicUser(row) {
 		createdAt: row.createdAt,
 		lastLoginAt: row.lastLoginAt,
 		status: userIsActive(row) ? "active" : "pending",
+		inviteAllowPassword: Boolean(row.inviteAllowPassword),
+		inviteAllowGoogle: Boolean(row.inviteAllowGoogle),
 	};
 }
 
