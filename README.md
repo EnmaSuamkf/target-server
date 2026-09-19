@@ -153,7 +153,7 @@ Startup log: `mail: file` (outbox) or `mail: resend` when SMTP/Resend is configu
 
 1. Admin at **http://127.0.0.1:8900/** (`admin@admin.com` / `password-target-server` on a fresh DB).
 2. **Users** → invite the Gmail you will test → invitation email (or copy setup link from the panel).
-3. **http://127.0.0.1:8900/login** → **Sign in with Google** (only if step above returned `"google": true`).
+3. **http://127.0.0.1:8900/login** → **Continue with Google** (only if step above returned `"google": true`).
 4. Pending invite: activate with the emailed **`/setup?token=…`** link **or** Google sign-in (same email).
 5. Uninvited Google account → `/login?auth_error=not_invited`.
 
