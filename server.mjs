@@ -6,7 +6,7 @@
  * JWT auth guards /api/* (except /api/auth/*); ingest keeps its own token.
  */
 import { createServer } from "node:http";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
@@ -19,6 +19,7 @@ import {
 	publicUser,
 	randomTokenBytes,
 	requireAuth,
+	requirePermission,
 	signInUser,
 	userIsActive,
 	verifyPassword,
@@ -43,7 +44,9 @@ import {
 	consumeResetToken,
 	countAuthUsers,
 	createAuthUser,
+	createRole,
 	deleteAuthUser,
+	deleteRole,
 	findResetToken,
 	activateAuthUserWithGoogle,
 	getAuthUserByEmail,
@@ -54,12 +57,15 @@ import {
 	isPublishedRenderDeploy,
 	insertResetToken,
 	listAuthUsers,
+	listRoles,
 	open,
 	publicUrl,
 	recordLogin,
 	setUserPassword,
+	reassignAuthUserRole,
 	sweepExpiredResets,
 	touchInvitedAt,
+	updateRole,
 	bumpInstanceCount,
 	insertEvent,
 	listInstances,
@@ -93,6 +99,11 @@ import {
 	applyCommandAckToPlan,
 	enqueueCommand,
 	getCommandById,
+	listRemoteResources,
+	upsertRemoteResource,
+	deleteRemoteResource,
+	remoteResourceChannelId,
+	mirrorResourceSyncEvent,
 } from "./db.mjs";
 import { initMailer, isDeliveringTransport, mailTransportName, sendMail } from "./mailer.mjs";
 import { inviteMail, resetMail, withToken } from "./mail-templates.mjs";
@@ -170,6 +181,13 @@ function sendJson(res, status, body, extraHeaders = {}) {
 	const payload = JSON.stringify(body);
 	res.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", ...extraHeaders });
 	res.end(payload);
+}
+
+async function requireCapability(req, res, permission) {
+	// The explicit loopback-only development escape hatch preserves its existing
+	// behaviour; deployed servers always evaluate the DB-backed guard.
+	if (AUTH_DISABLED) return { id: "auth-disabled", permissions: ["*"] };
+	return requirePermission(req, res, permission);
 }
 
 function readBody(req) {
@@ -626,14 +644,14 @@ async function handleAuthRoute(req, res, pathname, url) {
 	}
 
 	if (req.method === "GET" && pathname === "/api/auth/users") {
-		const user = await requireAuth(req, res);
+		const user = await requirePermission(req, res, "users.read");
 		if (!user) return;
 		const users = listAuthUsers().map((u) => publicUser(u));
 		return sendJson(res, 200, { users });
 	}
 
 	if (req.method === "POST" && pathname === "/api/auth/users") {
-		const actor = await requireAuth(req, res);
+		const actor = await requirePermission(req, res, "users.manage");
 		if (!actor) return;
 		const body = await readJson(req, res);
 		if (!body) return;
@@ -654,19 +672,84 @@ async function handleAuthRoute(req, res, pathname, url) {
 				],
 			});
 		}
-		const created = createAuthUser({
-			email: v.value.email,
-			createdBy: actor.id,
-			inviteAllowPassword: inviteMethods.inviteAllowPassword,
-			inviteAllowGoogle: inviteMethods.inviteAllowGoogle,
-		});
+		let created;
+		try {
+			created = createAuthUser({
+				email: v.value.email,
+				createdBy: actor.id,
+				roleId: v.value.role_id ?? "admin",
+				inviteAllowPassword: inviteMethods.inviteAllowPassword,
+				inviteAllowGoogle: inviteMethods.inviteAllowGoogle,
+			});
+		} catch (err) {
+			if (err.code === "role_not_found") {
+				return sendJson(res, 422, { errors: [{ field: "role_id", code: "role_not_found", message: "Role does not exist" }] });
+			}
+			throw err;
+		}
 		const { invite, mail } = await issueInvite(created);
 		return sendJson(res, 201, { user: publicUser(created), invite, mail });
 	}
 
+	if (req.method === "GET" && pathname === "/api/auth/roles") {
+		const actor = await requirePermission(req, res, "users.manage");
+		if (!actor) return;
+		return sendJson(res, 200, { roles: listRoles() });
+	}
+
+	if (req.method === "POST" && pathname === "/api/auth/roles") {
+		const actor = await requirePermission(req, res, "users.manage");
+		if (!actor) return;
+		const body = await readJson(req, res);
+		if (!body) return;
+		const v = validate("role.create", body);
+		if (!v.ok) return sendJson(res, 422, { errors: v.errors });
+		try {
+			return sendJson(res, 201, { role: createRole({ ...v.value, actorUserId: actor.id }) });
+		} catch (err) {
+			if (err.code === "invalid_permission") return sendJson(res, 422, { error: err.code });
+			if (err.code === "invalid_role_name") return sendJson(res, 422, { error: err.code });
+			if (String(err.message).includes("UNIQUE")) return sendJson(res, 409, { error: "role_name_taken" });
+			throw err;
+		}
+	}
+
+	const roleMatch = pathname.match(/^\/api\/auth\/roles\/([A-Za-z0-9-]+)$/);
+	if (req.method === "PATCH" && roleMatch) {
+		const actor = await requirePermission(req, res, "users.manage");
+		if (!actor) return;
+		const body = await readJson(req, res);
+		if (!body) return;
+		const v = validate("role.update", body);
+		if (!v.ok) return sendJson(res, 422, { errors: v.errors });
+		try {
+			return sendJson(res, 200, { role: updateRole(roleMatch[1], { ...v.value, actorUserId: actor.id }) });
+		} catch (err) {
+			if (["role_not_found", "system_role_protected"].includes(err.code)) return sendJson(res, 409, { error: err.code });
+			if (["invalid_permission", "invalid_role_name"].includes(err.code)) return sendJson(res, 422, { error: err.code });
+			if (String(err.message).includes("UNIQUE")) return sendJson(res, 409, { error: "role_name_taken" });
+			throw err;
+		}
+	}
+
+	if (req.method === "DELETE" && roleMatch) {
+		const actor = await requirePermission(req, res, "users.manage");
+		if (!actor) return;
+		try {
+			deleteRole(roleMatch[1], { actorUserId: actor.id });
+			res.writeHead(204);
+			return res.end();
+		} catch (err) {
+			if (["role_not_found", "system_role_protected", "role_assigned"].includes(err.code)) {
+				return sendJson(res, err.code === "role_not_found" ? 404 : 409, { error: err.code });
+			}
+			throw err;
+		}
+	}
+
 	const inviteMatch = pathname.match(/^\/api\/auth\/users\/([A-Za-z0-9-]+)\/invite$/);
 	if (req.method === "POST" && inviteMatch) {
-		const actor = await requireAuth(req, res);
+		const actor = await requirePermission(req, res, "users.manage");
 		if (!actor) return;
 		const target = getAuthUserById(inviteMatch[1]);
 		if (!target) return sendJson(res, 404, { error: "not_found" });
@@ -675,17 +758,42 @@ async function handleAuthRoute(req, res, pathname, url) {
 		return sendJson(res, 200, { invite, mail });
 	}
 
+	const userMatch = pathname.match(/^\/api\/auth\/users\/([A-Za-z0-9-]+)$/);
+	if (req.method === "PATCH" && userMatch) {
+		const actor = await requirePermission(req, res, "users.manage");
+		if (!actor) return;
+		const targetId = userMatch[1];
+		if (targetId === actor.id) return sendJson(res, 409, { error: "self_role_change" });
+		const body = await readJson(req, res);
+		if (!body) return;
+		const v = validate("user.role", body);
+		if (!v.ok) return sendJson(res, 422, { errors: v.errors });
+		try {
+			const user = reassignAuthUserRole({ userId: targetId, roleId: v.value.role_id, actorUserId: actor.id });
+			return sendJson(res, 200, { user: publicUser(user) });
+		} catch (err) {
+			if (err.code === "user_not_found" || err.code === "role_not_found") return sendJson(res, 404, { error: err.code });
+			if (err.code === "last_administrator") return sendJson(res, 409, { error: err.code });
+			throw err;
+		}
+	}
+
 	const deleteMatch = pathname.match(/^\/api\/auth\/users\/([A-Za-z0-9-]+)$/);
 	if (req.method === "DELETE" && deleteMatch) {
-		const actor = await requireAuth(req, res);
+		const actor = await requirePermission(req, res, "users.manage");
 		if (!actor) return;
 		const targetId = deleteMatch[1];
 		const target = getAuthUserById(targetId);
 		if (!target) return sendJson(res, 404, { error: "not_found" });
 		if (countAuthUsers() <= 1) return sendJson(res, 409, { error: "last_user" });
 		if (targetId === actor.id) return sendJson(res, 409, { error: "self_delete" });
-		bumpTokenVersion(targetId);
-		deleteAuthUser(targetId);
+		try {
+			bumpTokenVersion(targetId);
+			deleteAuthUser(targetId);
+		} catch (err) {
+			if (err.code === "last_administrator") return sendJson(res, 409, { error: err.code });
+			throw err;
+		}
 		res.writeHead(204);
 		return res.end();
 	}
@@ -728,6 +836,7 @@ function syncClientToApi(client) {
 					version: typeof caps.version === "string" ? caps.version : null,
 					instance_id: typeof caps.instance_id === "string" ? caps.instance_id : null,
 					runners: normalizeClientRunners(caps.runners),
+					resources: caps.resources ?? null,
 				}
 			: null,
 		last_seen_at: client.lastSeenAt,
@@ -755,6 +864,26 @@ function validateClientAgent(client, agent) {
 		};
 	}
 	return null;
+}
+
+const RESOURCE_DOMAINS = {
+	templates: { capability: "templates", permission: "remote.templates.manage", command: "template" },
+	"tcp-tools": { capability: "tcp_tools", permission: "remote.tcp-tools.manage", command: "tcp-tool" },
+	"resource-sets": { capability: "resource_sets", permission: "remote.rci.manage", command: "resource-set" },
+};
+
+function resourceDomainInfo(pathDomain) {
+	return RESOURCE_DOMAINS[pathDomain] ?? null;
+}
+
+function clientSupportsResourceCommand(client, info, type) {
+	const resources = client.capabilities?.resources;
+	const commands = client.capabilities?.commands;
+	return resources?.version === 2 && resources?.[info.capability] === true && Array.isArray(commands) && commands.includes(type);
+}
+
+function stableResourceCommandId(clientId, domain, idempotencyKey) {
+	return `resource_${createHash("sha256").update(`${clientId}\0${domain}\0${idempotencyKey}`).digest("hex").slice(0, 32)}`;
 }
 
 function syncEventToApi(event) {
@@ -823,6 +952,7 @@ function isOperatorSyncPath(pathname, method) {
 	if (method === "PATCH" && /^\/api\/sync\/remote-workflows\/[^/]+\/run-selection$/.test(pathname)) return true;
 	if (method === "POST" && /^\/api\/sync\/remote-workflows\/[^/]+\/commands$/.test(pathname)) return true;
 	if (method === "DELETE" && /^\/api\/sync\/remote-workflows\/[^/]+$/.test(pathname)) return true;
+	if (/^\/api\/sync\/clients\/[^/]+\/(templates|tcp-tools|resource-sets)(\/[^/]+)?$/.test(pathname)) return true;
 	return false;
 }
 
@@ -966,6 +1096,11 @@ async function handleSyncRoute(req, res, pathname, url) {
 					type: event.type,
 					payload: event.payload ?? {},
 				});
+				mirrorResourceSyncEvent({
+					clientId: client.id,
+					type: event.type,
+					payload: event.payload ?? {},
+				});
 			} else duplicates.push(event.id);
 		}
 		return sendJson(res, 200, { accepted, rejected: [], duplicates });
@@ -977,11 +1112,80 @@ async function handleSyncRoute(req, res, pathname, url) {
 async function handleOperatorSyncRoute(req, res, pathname, url) {
 	if (!isOperatorSyncPath(pathname, req.method)) return false;
 
+	const resourceMatch = pathname.match(/^\/api\/sync\/clients\/([^/]+)\/(templates|tcp-tools|resource-sets)(?:\/([^/]+))?$/);
+	if (resourceMatch) {
+		const [, clientId, pathDomain, resourceId] = resourceMatch;
+		const info = resourceDomainInfo(pathDomain);
+		const client = getClientById(clientId);
+		if (!client) return sendJson(res, 404, { error: "client_not_found" });
+		if (req.method === "GET" && !resourceId) {
+			if (!(await requireCapability(req, res, "remote.read"))) return true;
+			return sendJson(res, 200, {
+				contract_version: "sync/v2",
+				resources: listRemoteResources(clientId, info.capability),
+			});
+		}
+		if (!["POST", "PATCH", "DELETE"].includes(req.method) || (req.method === "POST" && resourceId)) return false;
+		if (!(await requireCapability(req, res, info.permission))) return true;
+		const operation = req.method === "DELETE" ? "delete" : "upsert";
+		const commandType = `${info.command}.${operation}`;
+		if (!clientSupportsResourceCommand(client, info, commandType)) {
+			return sendJson(res, 409, {
+				error: "capability_unsupported",
+				detail: `Client does not support sync/v2 ${commandType}`,
+				required: { resources_version: 2, domain: info.capability, command: commandType },
+			});
+		}
+		let resource = null;
+		if (operation === "upsert") {
+			const body = await readJson(req, res);
+			if (!body) return true;
+			const v = validate("sync.resource.upsert", body);
+			if (!v.ok) return sendJson(res, 422, { errors: v.errors });
+			resource = v.value.resource;
+			if (resourceId && resource.id !== resourceId) {
+				return sendJson(res, 422, { errors: [{ field: "resource.id", code: "mismatch", message: "Resource id must match URL" }] });
+			}
+		}
+		const effectiveResourceId = resourceId ?? resource?.id;
+		if (!effectiveResourceId) return sendJson(res, 422, { error: "resource_id_required" });
+		const headerKey = req.headers["idempotency-key"];
+		const idempotencyKey = typeof headerKey === "string" && headerKey.trim() ? headerKey.trim() : null;
+		const commandId = idempotencyKey ? stableResourceCommandId(clientId, pathDomain, idempotencyKey) : null;
+		let command = commandId ? getCommandById(commandId) : null;
+		if (command) {
+			if (command.clientId !== clientId || command.type !== commandType) {
+				return sendJson(res, 409, { error: "idempotency_key_conflict" });
+			}
+			return sendJson(res, 200, { command: syncCommandToApi(command), idempotent: true });
+		}
+		try {
+			command = enqueueCommand({
+				id: commandId,
+				clientId,
+				remoteId: remoteResourceChannelId(clientId, info.capability),
+				type: commandType,
+				payload: operation === "upsert" ? { resource } : { resource_id: effectiveResourceId },
+			});
+		} catch (err) {
+			if (err.statusCode === 400) return sendJson(res, 422, { errors: err.errors });
+			// Concurrent requests using the same idempotency key resolve to the
+			// command already written by the winner, without applying a second change.
+			if (commandId && getCommandById(commandId)) return sendJson(res, 200, { command: syncCommandToApi(getCommandById(commandId)), idempotent: true });
+			throw err;
+		}
+		if (operation === "upsert") upsertRemoteResource({ clientId, domain: info.capability, resource });
+		else deleteRemoteResource(clientId, info.capability, effectiveResourceId);
+		return sendJson(res, operation === "upsert" ? 201 : 200, { command: syncCommandToApi(command), idempotent: false });
+	}
+
 	if (req.method === "GET" && pathname === "/api/sync/clients") {
+		if (!(await requireCapability(req, res, "remote.read"))) return true;
 		return sendJson(res, 200, { clients: listOnlineClients().map(syncClientToApi) });
 	}
 
 	if (req.method === "GET" && pathname === "/api/sync/events") {
+		if (!(await requireCapability(req, res, "remote.read"))) return true;
 		const clientId = url.searchParams.get("client_id") || null;
 		const remoteId = url.searchParams.get("remote_id") || null;
 		let limit = Number.parseInt(url.searchParams.get("limit") ?? "50", 10);
@@ -991,6 +1195,7 @@ async function handleOperatorSyncRoute(req, res, pathname, url) {
 	}
 
 	if (req.method === "GET" && pathname === "/api/sync/remote-workflows") {
+		if (!(await requireCapability(req, res, "remote.read"))) return true;
 		const clientId = url.searchParams.get("client_id") || null;
 		const workflows = listRemoteWorkflows({ clientId }).map(remoteWorkflowToApi);
 		return sendJson(res, 200, { remote_workflows: workflows });
@@ -998,6 +1203,7 @@ async function handleOperatorSyncRoute(req, res, pathname, url) {
 
 	const remoteDetailMatch = pathname.match(/^\/api\/sync\/remote-workflows\/([^/]+)$/);
 	if (req.method === "GET" && remoteDetailMatch) {
+		if (!(await requireCapability(req, res, "remote.read"))) return true;
 		const detail = getRemoteWorkflowDetail(remoteDetailMatch[1]);
 		if (!detail) return sendJson(res, 404, { error: "remote_workflow_not_found" });
 		return sendJson(res, 200, {
@@ -1008,6 +1214,7 @@ async function handleOperatorSyncRoute(req, res, pathname, url) {
 	}
 
 	if (req.method === "PATCH" && remoteDetailMatch) {
+		if (!(await requireCapability(req, res, "remote.workflows.manage"))) return true;
 		const body = await readJson(req, res);
 		if (!body) return true;
 		const remoteWorkflow = getRemoteWorkflowById(remoteDetailMatch[1]);
@@ -1040,6 +1247,7 @@ async function handleOperatorSyncRoute(req, res, pathname, url) {
 	}
 
 	if (req.method === "POST" && pathname === "/api/sync/remote-workflows") {
+		if (!(await requireCapability(req, res, "remote.workflows.manage"))) return true;
 		const body = await readJson(req, res);
 		if (!body) return true;
 		const v = validate("sync.remote_workflow.create", body);
@@ -1093,6 +1301,7 @@ async function handleOperatorSyncRoute(req, res, pathname, url) {
 
 	const runSelectionMatch = pathname.match(/^\/api\/sync\/remote-workflows\/([^/]+)\/run-selection$/);
 	if (req.method === "PATCH" && runSelectionMatch) {
+		if (!(await requireCapability(req, res, "remote.workflows.manage"))) return true;
 		const body = await readJson(req, res);
 		if (!body) return true;
 		const v = validate("sync.remote_workflow.run_selection", body);
@@ -1113,6 +1322,10 @@ async function handleOperatorSyncRoute(req, res, pathname, url) {
 		if (!body) return true;
 		const v = validate("sync.remote_workflow.enqueue_command", body);
 		if (!v.ok) return sendJson(res, 400, { errors: v.errors });
+		const permission = RUN_WORKFLOW_COMMANDS.has(v.value.type) || ["step.run", "step.abort", "step.continue"].includes(v.value.type)
+			? "remote.workflows.execute"
+			: "remote.workflows.manage";
+		if (!(await requireCapability(req, res, permission))) return true;
 		const remoteWorkflow = getRemoteWorkflowById(commandMatch[1]);
 		if (!remoteWorkflow) return sendJson(res, 404, { error: "remote_workflow_not_found" });
 		const payload = resolveRunCommandPayload(remoteWorkflow.id, v.value.type, v.value.payload ?? {});
@@ -1143,6 +1356,7 @@ async function handleOperatorSyncRoute(req, res, pathname, url) {
 
 	const deleteMatch = pathname.match(/^\/api\/sync\/remote-workflows\/([^/]+)$/);
 	if (req.method === "DELETE" && deleteMatch) {
+		if (!(await requireCapability(req, res, "remote.workflows.manage"))) return true;
 		const remoteWorkflow = getRemoteWorkflowById(deleteMatch[1]);
 		if (!remoteWorkflow) return sendJson(res, 404, { error: "remote_workflow_not_found" });
 		let body = {};
@@ -1210,10 +1424,20 @@ const server = createServer(async (req, res) => {
 			to: url.searchParams.get("to"),
 		};
 
-		if (req.method === "GET" && pathname === "/api/stats") return sendJson(res, 200, stats(filters));
-		if (req.method === "GET" && pathname === "/api/instances") return sendJson(res, 200, { instances: listInstances() });
-		if (req.method === "GET" && pathname === "/api/users") return sendJson(res, 200, { users: listUsers() });
+		if (req.method === "GET" && pathname === "/api/stats") {
+			if (!(await requireCapability(req, res, "activity.read"))) return;
+			return sendJson(res, 200, stats(filters));
+		}
+		if (req.method === "GET" && pathname === "/api/instances") {
+			if (!(await requireCapability(req, res, "activity.read"))) return;
+			return sendJson(res, 200, { instances: listInstances() });
+		}
+		if (req.method === "GET" && pathname === "/api/users") {
+			if (!(await requireCapability(req, res, "activity.read"))) return;
+			return sendJson(res, 200, { users: listUsers() });
+		}
 		if (req.method === "GET" && pathname === "/api/events") {
+			if (!(await requireCapability(req, res, "activity.read"))) return;
 			return sendJson(res, 200, {
 				events: recentEvents({
 					limit: Number.parseInt(url.searchParams.get("limit") ?? "100", 10),
@@ -1224,13 +1448,16 @@ const server = createServer(async (req, res) => {
 		const listFilters = (({ instanceId, user, agent, sandbox, from, to }) => ({ instanceId, user, agent, sandbox, from, to }))(filters);
 
 		if (req.method === "GET" && pathname === "/api/workflows") {
+			if (!(await requireCapability(req, res, "activity.read"))) return;
 			return sendJson(res, 200, listWorkflows({ ...listFilters, ...pageParams(url) }));
 		}
 		if (req.method === "GET" && pathname === "/api/workflows/names") {
+			if (!(await requireCapability(req, res, "activity.read"))) return;
 			return sendJson(res, 200, { workflows: listWorkflowNames(listFilters) });
 		}
 		const workflowMatch = pathname.match(/^\/api\/workflows\/([A-Za-z0-9-]+)$/);
 		if (req.method === "GET" && workflowMatch) {
+			if (!(await requireCapability(req, res, "activity.read"))) return;
 			const detail = workflowDetail(workflowMatch[1]);
 			if (!detail) return sendJson(res, 404, { error: "unknown_workflow" });
 			return sendJson(res, 200, detail);

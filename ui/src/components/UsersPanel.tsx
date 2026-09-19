@@ -1,12 +1,18 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import {
+	createAuthRole,
 	createAuthUser,
+	deleteAuthRole,
 	deleteAuthUser,
 	fetchAuthProviders,
+	listAuthRoles,
 	listAuthUsers,
+	reassignAuthUserRole,
 	resendInvite,
+	updateAuthRole,
 } from "../api/auth.ts";
-import type { AuthUser, FieldError, InviteLinks } from "../api/types.ts";
+import { PERMISSION_CATALOG } from "../api/permissions.ts";
+import type { AuthRole, AuthUser, FieldError, InviteLinks } from "../api/types.ts";
 import { timeAgo } from "../lib/format.ts";
 
 function fieldErrors(errors: FieldError[], field: string) {
@@ -40,8 +46,10 @@ function mergePendingInvite(userId: string, invite: InviteLinks): PendingInvite 
 
 export function UsersPanel({ currentUser }: { currentUser: AuthUser }) {
 	const [users, setUsers] = useState<AuthUser[] | null>(null);
+	const [roles, setRoles] = useState<AuthRole[] | null>(null);
 	const [loadError, setLoadError] = useState<string | null>(null);
 	const [email, setEmail] = useState("");
+	const [roleId, setRoleId] = useState("");
 	const [errors, setErrors] = useState<FieldError[]>([]);
 	const [notice, setNotice] = useState<string | null>(null);
 	const [pendingInvites, setPendingInvites] = useState<PendingInvite[]>([]);
@@ -50,11 +58,14 @@ export function UsersPanel({ currentUser }: { currentUser: AuthUser }) {
 	const [googleAvailable, setGoogleAvailable] = useState(false);
 	const [allowPassword, setAllowPassword] = useState(true);
 	const [allowGoogle, setAllowGoogle] = useState(false);
+	const [roleDraft, setRoleDraft] = useState<{ id?: string; name: string; permissions: string[] } | null>(null);
 
 	const load = useCallback(async () => {
 		try {
-			const res = await listAuthUsers();
-			setUsers(res.users);
+			const [userRes, roleRes] = await Promise.all([listAuthUsers(), listAuthRoles()]);
+			setUsers(userRes.users);
+			setRoles(roleRes.roles);
+			setRoleId((current) => current || roleRes.roles[0]?.id || "");
 			setLoadError(null);
 		} catch (e) {
 			setLoadError(e instanceof Error ? e.message : String(e));
@@ -99,7 +110,8 @@ export function UsersPanel({ currentUser }: { currentUser: AuthUser }) {
 		setErrors([]);
 		setNotice(null);
 		try {
-			const res = await createAuthUser(email, { password: allowPassword, google: allowGoogle });
+			if (!roleId) return;
+			const res = await createAuthUser(email, roleId, { password: allowPassword, google: allowGoogle });
 			if (!res.ok) {
 				setErrors(res.errors);
 				return;
@@ -112,6 +124,47 @@ export function UsersPanel({ currentUser }: { currentUser: AuthUser }) {
 					: `Invited ${res.user.email} — email failed (${res.mail.error ?? "unknown"}). Copy the link below.`,
 			);
 			await load();
+		} finally {
+			setBusy(false);
+		}
+	}
+
+	async function saveRole() {
+		if (!roleDraft) return;
+		setBusy(true);
+		try {
+			const res = roleDraft.id
+				? await updateAuthRole(roleDraft.id, roleDraft.name, roleDraft.permissions)
+				: await createAuthRole(roleDraft.name, roleDraft.permissions);
+			if (!res.ok) {
+				setNotice("Role needs a name and valid permissions.");
+				return;
+			}
+			setRoleDraft(null);
+			await load();
+		} finally {
+			setBusy(false);
+		}
+	}
+
+	async function removeRole(role: AuthRole) {
+		if (!window.confirm(`Delete role “${role.name}”?`)) return;
+		setBusy(true);
+		try {
+			const res = await deleteAuthRole(role.id);
+			setNotice(res.ok ? `Deleted ${role.name}.` : "A system role or assigned role cannot be deleted.");
+			if (res.ok) await load();
+		} finally {
+			setBusy(false);
+		}
+	}
+
+	async function changeUserRole(user: AuthUser, nextRoleId: string) {
+		setBusy(true);
+		try {
+			const res = await reassignAuthUserRole(user.id, nextRoleId);
+			setNotice(res.ok ? `Updated ${user.email}.` : "Role change was not allowed.");
+			if (res.ok) await load();
 		} finally {
 			setBusy(false);
 		}
@@ -173,6 +226,9 @@ export function UsersPanel({ currentUser }: { currentUser: AuthUser }) {
 					value={email}
 					onChange={(e) => setEmail(e.target.value)}
 				/>
+				<select className="input" aria-label="Role for invitee" value={roleId} onChange={(e) => setRoleId(e.target.value)} disabled={busy}>
+					{roles?.map((role) => <option key={role.id} value={role.id}>{role.name}</option>)}
+				</select>
 				<div className="users-invite-methods">
 					<label className="users-check">
 						<input
@@ -193,7 +249,7 @@ export function UsersPanel({ currentUser }: { currentUser: AuthUser }) {
 						Sign in with Google
 					</label>
 				</div>
-				<button type="submit" className="btn btn--on" disabled={busy || (!allowPassword && !allowGoogle)}>
+				<button type="submit" className="btn btn--on" disabled={busy || !roleId || (!allowPassword && !allowGoogle)}>
 					Invite
 				</button>
 			</form>
@@ -224,6 +280,7 @@ export function UsersPanel({ currentUser }: { currentUser: AuthUser }) {
 						<tr>
 							<th>Email</th>
 							<th>Status</th>
+							<th>Role</th>
 							<th>Created</th>
 							<th>Last login</th>
 							<th />
@@ -250,6 +307,17 @@ export function UsersPanel({ currentUser }: { currentUser: AuthUser }) {
 										) : (
 											<span className="badge badge--success">Active</span>
 										)}
+									</td>
+									<td>
+										<select
+											className="input"
+											aria-label={`Role for ${u.email}`}
+											value={u.role}
+											disabled={busy || u.id === currentUser.id}
+											onChange={(e) => void changeUserRole(u, e.target.value)}
+										>
+											{roles?.map((role) => <option key={role.id} value={role.id}>{role.name}</option>)}
+										</select>
 									</td>
 									<td className="mono">{timeAgo(u.createdAt)}</td>
 									<td className="mono">{u.lastLoginAt ? timeAgo(u.lastLoginAt) : "—"}</td>
@@ -299,6 +367,47 @@ export function UsersPanel({ currentUser }: { currentUser: AuthUser }) {
 						})}
 					</tbody>
 				</table>
+			) : null}
+
+			<div className="panel users-roles">
+				<div className="panel-heading">
+					<div>
+						<h2>Roles and permissions</h2>
+						<p className="panel-note">System Administrator has every permission and cannot be edited or deleted.</p>
+					</div>
+					<button type="button" className="btn btn--on" disabled={busy} onClick={() => setRoleDraft({ name: "", permissions: [] })}>Create role</button>
+				</div>
+				{roles?.map((role) => (
+					<div className="users-role-row" key={role.id}>
+						<div><strong>{role.name}</strong>{role.isSystem ? " · System" : ""}<span className="panel-note"> · {role.userCount} users</span></div>
+						<div className="users-actions">
+							<button type="button" className="btn btn--sm" disabled={role.isSystem || busy} onClick={() => setRoleDraft({ id: role.id, name: role.name, permissions: role.permissions })}>Edit</button>
+							<button type="button" className="btn btn--sm btn--ghost" disabled={role.isSystem || role.userCount > 0 || busy} onClick={() => void removeRole(role)}>Delete</button>
+						</div>
+					</div>
+				))}
+			</div>
+
+			{roleDraft ? (
+				<div className="users-confirm" role="dialog" aria-modal="true" aria-label="Role editor">
+					<h2>{roleDraft.id ? "Edit role" : "Create role"}</h2>
+					<input className="input" value={roleDraft.name} placeholder="Role name" onChange={(e) => setRoleDraft({ ...roleDraft, name: e.target.value })} />
+					<div className="users-permissions">
+						{PERMISSION_CATALOG.map((permission) => (
+							<label className="users-check" key={permission.id}>
+								<input type="checkbox" checked={roleDraft.permissions.includes(permission.id)} onChange={(e) => setRoleDraft({
+									...roleDraft,
+									permissions: e.target.checked ? [...roleDraft.permissions, permission.id] : roleDraft.permissions.filter((id) => id !== permission.id),
+								})} />
+								<span><strong>{permission.label}</strong><small>{permission.description}</small></span>
+							</label>
+						))}
+					</div>
+					<div className="users-confirm-actions">
+						<button type="button" className="btn" onClick={() => setRoleDraft(null)}>Cancel</button>
+						<button type="button" className="btn btn--on" disabled={busy || !roleDraft.name.trim()} onClick={() => void saveRole()}>Save role</button>
+					</div>
+				</div>
 			) : null}
 
 			{confirmDelete ? (

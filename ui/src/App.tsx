@@ -26,6 +26,7 @@ import { Kpi } from "./components/Kpi.tsx";
 import { Pagination } from "./components/Pagination.tsx";
 import { TargetMark } from "./components/TargetMark.tsx";
 import { RemoteWorkflowsPanel } from "./components/RemoteWorkflowsPanel.tsx";
+import { RemoteResourcesPanel } from "./components/RemoteResourcesPanel.tsx";
 import { SyncClientsPanel } from "./components/SyncClientsPanel.tsx";
 import { UsersPanel } from "./components/UsersPanel.tsx";
 import { WorkflowDetail } from "./components/WorkflowDetail.tsx";
@@ -36,7 +37,7 @@ import { compactNumber, localToIso } from "./lib/format.ts";
 const POLL_MS = 4000;
 const DEFAULT_PAGE_SIZE = 25;
 
-type DashboardTab = "activity" | "remote";
+type DashboardTab = "activity" | "users" | "remote";
 
 function ChangePasswordButton({ email }: { email: string }) {
 	const [sent, setSent] = useState(false);
@@ -76,7 +77,26 @@ function ChangePasswordButton({ email }: { email: string }) {
  * always answer the same question.
  */
 export function App({ user, onSignOut }: { user: AuthUser; onSignOut: () => void }) {
-	const [tab, setTab] = useState<DashboardTab>("activity");
+	const can = (permission: string) => user.permissions.includes(permission);
+	const canActivity = can("activity.read");
+	const canUsers = can("users.manage");
+	const canRemote = can("remote.read");
+	const canManageRemote = can("remote.workflows.manage");
+	const canManageTemplates = can("remote.templates.manage");
+	const canManageTcpTools = can("remote.tcp-tools.manage");
+	const canManageRci = can("remote.rci.manage");
+	const availableTabs = useMemo<DashboardTab[]>(
+		() => [
+			...(canActivity ? ["activity" as const] : []),
+			...(canUsers ? ["users" as const] : []),
+			...(canRemote ? ["remote" as const] : []),
+		],
+		[canActivity, canUsers, canRemote],
+	);
+	const [tab, setTab] = useState<DashboardTab>(() => availableTabs[0] ?? "activity");
+	useEffect(() => {
+		if (!availableTabs.includes(tab)) setTab(availableTabs[0] ?? "activity");
+	}, [availableTabs, tab]);
 	const [filters, setFilters] = useState<Filters>({ ...EMPTY_FILTERS });
 	// Workflow list paging. The list is unbounded — a busy fleet reports
 	// thousands — so the dashboard asks for one page and the server never returns
@@ -124,28 +144,29 @@ export function App({ user, onSignOut }: { user: AuthUser; onSignOut: () => void
 		setPage(0);
 	}, [listQuery]);
 
-	const { data: stats, error: statsErr } = useApi<Stats>(`/api/stats${query}`, POLL_MS);
-	const { data: inst } = useApi<InstancesResponse>("/api/instances", POLL_MS);
-	const { data: users } = useApi<UsersResponse>("/api/users", POLL_MS);
+	const activityActive = tab === "activity" && canActivity;
+	const { data: stats, error: statsErr } = useApi<Stats>(activityActive ? `/api/stats${query}` : null, POLL_MS);
+	const { data: inst } = useApi<InstancesResponse>(activityActive ? "/api/instances" : null, POLL_MS);
+	const { data: users } = useApi<UsersResponse>(activityActive ? "/api/users" : null, POLL_MS);
 	// The unfiltered kind list keeps the dropdown stable while a kind filter is applied.
-	const { data: allStats } = useApi<Stats>("/api/stats", POLL_MS * 4);
-	const { data: evs } = useApi<EventsResponse>(`/api/events?limit=80${query ? query.replace("?", "&") : ""}`, POLL_MS);
+	const { data: allStats } = useApi<Stats>(activityActive ? "/api/stats" : null, POLL_MS * 4);
+	const { data: evs } = useApi<EventsResponse>(activityActive ? `/api/events?limit=80${query ? query.replace("?", "&") : ""}` : null, POLL_MS);
 	// The workflow-centric views. /api/workflows ignores the workflow/kind
 	// filters server-side, so the list stays stable while a workflow is
 	// selected; the detail below is what narrows.
 	const wfQuery = `${listQuery ? `${listQuery}&` : "?"}limit=${pageSize}&offset=${page * pageSize}`;
-	const { data: wfs } = useApi<WorkflowsResponse>(`/api/workflows${wfQuery}`, POLL_MS);
+	const { data: wfs } = useApi<WorkflowsResponse>(activityActive ? `/api/workflows${wfQuery}` : null, POLL_MS);
 	// The dropdown needs every match, not just the page on screen — that list is
 	// id+name only, so it stays cheap.
-	const { data: wfNames } = useApi<WorkflowNamesResponse>(`/api/workflows/names${listQuery}`, POLL_MS * 4);
+	const { data: wfNames } = useApi<WorkflowNamesResponse>(activityActive ? `/api/workflows/names${listQuery}` : null, POLL_MS * 4);
 	const { data: wfDetail, error: wfDetailErr } = useApi<WorkflowDetailResponse>(
-		filters.workflow ? `/api/workflows/${filters.workflow}` : null,
+		activityActive && filters.workflow ? `/api/workflows/${filters.workflow}` : null,
 		POLL_MS,
 	);
 
 	const [syncRefreshKey, setSyncRefreshKey] = useState(0);
 	const syncRefresh = useCallback(() => setSyncRefreshKey((k) => k + 1), []);
-	const remoteActive = tab === "remote";
+	const remoteActive = tab === "remote" && canRemote;
 	const syncQuery = remoteActive && syncRefreshKey ? `?_=${syncRefreshKey}` : "";
 	const { data: syncClients } = useApi<SyncClientsResponse>(
 		remoteActive ? `/api/sync/clients${syncQuery}` : null,
@@ -223,20 +244,27 @@ export function App({ user, onSignOut }: { user: AuthUser; onSignOut: () => void
 
 			<main className="shell">
 				<nav className="dash-tabs" aria-label="Dashboard sections">
-					<button
+					{canActivity ? <button
 						type="button"
 						className={`dash-tab${tab === "activity" ? " dash-tab--active" : ""}`}
 						onClick={() => setTab("activity")}
 					>
 						Activity
-					</button>
-					<button
+					</button> : null}
+					{canUsers ? <button
+						type="button"
+						className={`dash-tab${tab === "users" ? " dash-tab--active" : ""}`}
+						onClick={() => setTab("users")}
+					>
+						Users
+					</button> : null}
+					{canRemote ? <button
 						type="button"
 						className={`dash-tab${tab === "remote" ? " dash-tab--active" : ""}`}
 						onClick={() => setTab("remote")}
 					>
 						Remote control
-					</button>
+					</button> : null}
 				</nav>
 
 				{tab === "activity" ? (
@@ -330,11 +358,12 @@ export function App({ user, onSignOut }: { user: AuthUser; onSignOut: () => void
 							<EventFeed events={evs?.events ?? null} />
 						</div>
 
-						<div className="panel" id="dashboard-accounts">
-							<h2>Dashboard accounts</h2>
-							<div className="panel-note">Invite colleagues who can sign in to this dashboard. Distinct from the User filter above, which filters reported activity.</div>
-							<UsersPanel currentUser={user} />
-						</div>
+					</>
+				) : tab === "users" ? (
+					<>
+						<h1 className="page-title">Users</h1>
+						<p className="page-sub">Manage dashboard accounts, invitations, roles and permissions.</p>
+						<UsersPanel currentUser={user} />
 					</>
 				) : (
 					<>
@@ -349,7 +378,7 @@ export function App({ user, onSignOut }: { user: AuthUser; onSignOut: () => void
 							<SyncClientsPanel clients={syncClients?.clients ?? null} />
 						</div>
 
-						<div className="panel" id="sync-remote-workflows">
+						{canManageRemote ? <div className="panel" id="sync-remote-workflows">
 							<h2>Remote workflows</h2>
 							<div className="panel-note">Create and control workflows on connected clients.</div>
 							<RemoteWorkflowsPanel
@@ -364,6 +393,18 @@ export function App({ user, onSignOut }: { user: AuthUser; onSignOut: () => void
 									setTab("activity");
 									setFilters((f) => ({ ...f, workflow: localId }));
 								}}
+							/>
+						</div> : <div className="panel"><h2>Remote workflows</h2><p className="panel-note">You can view connected clients, but managing remote workflows requires additional permission.</p></div>}
+
+						<div className="panel" id="sync-remote-resources">
+							<h2>Remote resources</h2>
+							<div className="panel-note">Templates, TCP tools and RCI resource sets are mirrored per Target client and applied through the sync queue.</div>
+							<RemoteResourcesPanel
+								clients={syncClients?.clients ?? null}
+								canManageTemplates={canManageTemplates}
+								canManageTcpTools={canManageTcpTools}
+								canManageRci={canManageRci}
+								onRefresh={syncRefresh}
 							/>
 						</div>
 					</>
