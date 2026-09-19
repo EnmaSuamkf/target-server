@@ -121,6 +121,11 @@ export function clearAuthCookie(res) {
 	res.setHeader("Set-Cookie", `${COOKIE_NAME}=; ${flags.join("; ")}`);
 }
 
+export function userIsActive(row) {
+	if (!row) return false;
+	return Boolean(row.passwordHash || row.googleSub);
+}
+
 export function publicUser(row) {
 	return {
 		id: row.id,
@@ -128,7 +133,7 @@ export function publicUser(row) {
 		role: row.role,
 		createdAt: row.createdAt,
 		lastLoginAt: row.lastLoginAt,
-		status: row.passwordHash ? "active" : "pending",
+		status: userIsActive(row) ? "active" : "pending",
 	};
 }
 

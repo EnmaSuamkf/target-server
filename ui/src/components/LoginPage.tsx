@@ -1,10 +1,23 @@
-import { useState, type FormEvent } from "react";
-import { forgotPassword, login } from "../api/auth.ts";
+import { useEffect, useState, type FormEvent } from "react";
+import { fetchAuthProviders, forgotPassword, login } from "../api/auth.ts";
 import type { AuthUser, FieldError } from "../api/types.ts";
 import { TargetMark } from "./TargetMark.tsx";
 
 function fieldErrors(errors: FieldError[], field: string) {
 	return errors.filter((e) => e.field === field);
+}
+
+function oauthErrorMessage(code: string | null): string | null {
+	switch (code) {
+		case "not_invited":
+			return "That Google account is not invited. Ask an admin to invite your email, then try again.";
+		case "oauth_denied":
+			return "Google sign-in was cancelled.";
+		case "oauth_failed":
+			return "Google sign-in failed. Try again or sign in with email and password.";
+		default:
+			return code ? "Sign-in failed. Try again." : null;
+	}
 }
 
 export function LoginPage({ onSuccess }: { onSuccess: (user: AuthUser) => void }) {
@@ -14,6 +27,26 @@ export function LoginPage({ onSuccess }: { onSuccess: (user: AuthUser) => void }
 	const [errors, setErrors] = useState<FieldError[]>([]);
 	const [badCreds, setBadCreds] = useState(false);
 	const [busy, setBusy] = useState(false);
+	const [googleEnabled, setGoogleEnabled] = useState(false);
+	const [oauthError, setOauthError] = useState<string | null>(null);
+
+	useEffect(() => {
+		const params = new URLSearchParams(location.search);
+		const authError = params.get("auth_error");
+		setOauthError(oauthErrorMessage(authError));
+		if (authError) {
+			const url = new URL(location.href);
+			url.searchParams.delete("auth_error");
+			const next = `${url.pathname}${url.search}${url.hash}`;
+			history.replaceState(null, "", next);
+		}
+	}, []);
+
+	useEffect(() => {
+		void fetchAuthProviders()
+			.then((providers) => setGoogleEnabled(providers.google))
+			.catch(() => setGoogleEnabled(false));
+	}, []);
 
 	async function onSubmit(e: FormEvent) {
 		e.preventDefault();
@@ -94,11 +127,21 @@ export function LoginPage({ onSuccess }: { onSuccess: (user: AuthUser) => void }
 							</label>
 						) : null}
 
+						{oauthError ? <div className="err">{oauthError}</div> : null}
 						{badCreds ? <div className="err">Invalid email or password.</div> : null}
 
 						<button type="submit" className="btn btn--on auth-submit" disabled={busy}>
 							{mode === "forgot" ? "Send reset link" : "Sign in"}
 						</button>
+
+						{mode === "login" && googleEnabled ? (
+							<>
+								<p className="auth-muted auth-or">or</p>
+								<a className="btn btn--ghost auth-google" href="/api/auth/google">
+									Sign in with Google
+								</a>
+							</>
+						) : null}
 
 						{mode === "login" ? (
 							<button type="button" className="btn btn--ghost auth-link" onClick={() => setMode("forgot")}>

@@ -44,3 +44,7 @@ services:
         sync: false
       - key: TARGET_INGEST_TOKEN
         sync: false
+      - key: TARGET_GOOGLE_CLIENT_ID
+        sync: false
+      - key: TARGET_GOOGLE_CLIENT_SECRET
+        sync: false

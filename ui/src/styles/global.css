@@ -917,6 +917,8 @@ tbody tr.wf-row--selected, tbody tr.wf-row--selected:hover { background: var(--a
 .auth-field > span { font-weight: 500; color: var(--text-muted); }
 .auth-submit { width: 100%; margin-top: var(--space-2); }
 .auth-link { width: 100%; }
+.auth-or { text-align: center; margin: 0; }
+.auth-google { width: 100%; text-align: center; text-decoration: none; display: inline-block; box-sizing: border-box; }
 .auth-message { text-align: center; font-size: var(--text-sm); color: var(--text-muted); }
 
 .field-err { color: var(--danger-700); font-size: var(--text-xs); }
