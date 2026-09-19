@@ -5,6 +5,16 @@ async function parseJson<T>(res: Response): Promise<T> {
 	return body;
 }
 
+export type AuthProviders = {
+	google: boolean;
+};
+
+export async function fetchAuthProviders(): Promise<AuthProviders> {
+	const res = await fetch("/api/auth/providers");
+	if (!res.ok) throw new Error(`/api/auth/providers → ${res.status}`);
+	return parseJson<AuthProviders>(res);
+}
+
 export async function fetchMe(): Promise<{ user: AuthUser } | null> {
 	const res = await fetch("/api/auth/me");
 	if (res.status === 401) return null;

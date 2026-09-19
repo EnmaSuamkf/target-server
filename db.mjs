@@ -133,6 +133,7 @@ export function open(dbPath = process.env.TARGET_SERVER_DB ?? "./target-server.d
 		CREATE INDEX IF NOT EXISTS idx_sync_events_client ON sync_events(client_id, received_at);
 	`);
 	migrateSyncSchema(db);
+	migrateAuthSchema(db);
 	seedAuth();
 	return db;
 }
@@ -171,12 +172,28 @@ function migrateSyncSchema(database) {
 	`);
 }
 
+function migrateAuthSchema(database) {
+	const addColumn = (table, name, ddl) => {
+		try {
+			database.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${ddl}`);
+		} catch {
+			// Column already exists.
+		}
+	};
+	addColumn("auth_users", "google_sub", "TEXT");
+	database.exec(`
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_auth_users_google_sub
+		ON auth_users(google_sub) WHERE google_sub IS NOT NULL;
+	`);
+}
+
 function rowToAuthUser(r) {
 	if (!r) return null;
 	return {
 		id: r.id,
 		email: r.email,
 		passwordHash: r.password_hash,
+		googleSub: r.google_sub ?? null,
 		role: r.role,
 		tokenVersion: r.token_version,
 		createdAt: r.created_at,
@@ -281,6 +298,22 @@ export function getAuthUserById(id) {
 
 export function getAuthUserByEmail(email) {
 	return rowToAuthUser(open().prepare("SELECT * FROM auth_users WHERE email = ?").get(email));
+}
+
+export function getAuthUserByGoogleSub(googleSub) {
+	return rowToAuthUser(open().prepare("SELECT * FROM auth_users WHERE google_sub = ?").get(googleSub));
+}
+
+export function activateAuthUserWithGoogle(id, googleSub) {
+	const now = new Date().toISOString();
+	open()
+		.prepare(
+			`UPDATE auth_users
+			 SET google_sub = ?, activated_at = COALESCE(activated_at, ?)
+			 WHERE id = ?`,
+		)
+		.run(googleSub, now, id);
+	return getAuthUserById(id);
 }
 
 export function listAuthUsers() {

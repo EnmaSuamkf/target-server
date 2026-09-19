@@ -76,6 +76,8 @@ Configuration (env vars):
 | `TARGET_SEED_ADMIN_PASSWORD` | published default | Password for the seeded `admin@admin.com` — set before first boot when deployed |
 | `TARGET_TRUST_PROXY` | `0` | Use the last hop of `X-Forwarded-For` for rate limiting (only behind a trusted proxy) |
 | `TARGET_AUTH_DISABLED` | `0` | Skip the API auth guard (local dev/tests only; refused on a public bind) |
+| `TARGET_GOOGLE_CLIENT_ID` | _(empty)_ | Google OAuth Web client ID — when set with `TARGET_GOOGLE_CLIENT_SECRET`, enables **Sign in with Google** |
+| `TARGET_GOOGLE_CLIENT_SECRET` | _(empty)_ | Google OAuth client secret (**never commit**; set in Render or local env only) |
 
 ## Authentication
 
@@ -90,6 +92,73 @@ First run on a fresh database seeds `admin@admin.com`. Invite additional
 operators from the **Users** panel: the server emails a single-use setup link
 (no password in mail). Local/CI defaults write `.mail-outbox/*.eml` instead of
 using SMTP.
+
+### Google sign-in (optional, invite-only)
+
+When `TARGET_GOOGLE_CLIENT_ID` and `TARGET_GOOGLE_CLIENT_SECRET` are both set,
+the login page shows **Sign in with Google** (`GET /api/auth/providers` reports
+`{ "google": true }`). Flow:
+
+1. Operator clicks through to Google (`GET /api/auth/google` → callback at
+   `/api/auth/google/callback`).
+2. The Google account **email must already exist** in `auth_users` (invited from
+   **Users**). There is **no** auto-registration on callback — unknown emails
+   redirect to `/login?auth_error=not_invited`.
+3. Pending invites can activate with Google (no setup password) or the emailed
+   setup link. Password login remains available for accounts with a password.
+
+Cloud Console setup (OAuth client, redirect URIs, test users while the app is in
+**Testing**) is documented in
+[`docs/google-oauth-console-checklist.md`](docs/google-oauth-console-checklist.md).
+
+**Local development (Google + invitation email)** — after
+[Console setup](docs/google-oauth-console-checklist.md), in **one terminal** (all
+exports must exist in the same shell as `npm start`):
+
+Download the OAuth Web client JSON from Google Cloud (once) — e.g.
+`~/Descargas/client_secret_<client-id>.apps.googleusercontent.com.json`. Use the
+**full path** when calling `jq`; do **not** assign `JSON=...*.json` (bash does
+not expand `*` in variable assignments, so Google vars stay empty and
+`/api/auth/providers` returns `"google": false`).
+
+```bash
+cd ~/Documentos/target-server
+
+JSON="$HOME/Descargas/client_secret_YOUR_CLIENT_ID.apps.googleusercontent.com.json"
+export TARGET_GOOGLE_CLIENT_ID="$(jq -r .web.client_id "$JSON")"
+export TARGET_GOOGLE_CLIENT_SECRET="$(jq -r .web.client_secret "$JSON")"
+export TARGET_PUBLIC_URL='http://127.0.0.1:8900'
+export TARGET_SKIP_UI_STALE_CHECK=1   # optional if ui/ is newer than public/dist
+
+# Optional — deliver invitation/reset mail (same vars as Render Environment).
+# Without these, mail goes to ./.mail-outbox/*.eml; use Users → Copy link instead.
+# export TARGET_SMTP_URL='smtps://resend:re_KEY@smtp.resend.com:465'
+# export TARGET_MAIL_FROM='Target <onboarding@resend.dev>'
+# export TARGET_MAIL_TRANSPORT='resend'
+
+npm run build   # first time or after ui/ changes
+npm start       # blocks until Ctrl+C; expect listening on http://127.0.0.1:8900
+```
+
+Verify before opening the browser (second terminal is fine):
+
+```bash
+curl -s http://127.0.0.1:8900/api/auth/providers   # → {"google":true}
+curl -s http://127.0.0.1:8900/health               # → {"ok":true}
+```
+
+Startup log: `mail: file` (outbox) or `mail: resend` when SMTP/Resend is configured.
+
+**Try the flows**
+
+1. Admin at **http://127.0.0.1:8900/** (`admin@admin.com` / `password-target-server` on a fresh DB).
+2. **Users** → invite the Gmail you will test → invitation email (or copy setup link from the panel).
+3. **http://127.0.0.1:8900/login** → **Sign in with Google** (only if step above returned `"google": true`).
+4. Pending invite: activate with the emailed **`/setup?token=…`** link **or** Google sign-in (same email).
+5. Uninvited Google account → `/login?auth_error=not_invited`.
+
+While the OAuth consent screen is in **Testing**, each Google account must be
+listed as a **test user** in Google Cloud Console.
 
 ### Deployment
 
@@ -113,6 +182,7 @@ The repo includes [`render.yaml`](render.yaml) (Blueprint). To deploy:
    - `TARGET_SEED_ADMIN_PASSWORD` — non-default password for `admin@admin.com` (before first boot)
    - `TARGET_AUTH_SECRET` — optional; generated on first boot if omitted
    - `TARGET_INGEST_TOKEN` — optional; protects `POST /ingest`
+   - `TARGET_GOOGLE_CLIENT_ID` / `TARGET_GOOGLE_CLIENT_SECRET` — optional; enable Google sign-in (set in Environment; see checklist doc)
 4. Deploy. The service URL is **https://target-server-okjn.onrender.com** (matches `TARGET_PUBLIC_URL` in the Blueprint; on Render, `RENDER_EXTERNAL_URL` overrides a stale onrender hostname).
 
 Build: `npm ci && npm --prefix ui ci && npm run build`. Start: `node server.mjs`.
@@ -268,6 +338,9 @@ required. The Target hub repo also ships `hub/sync.test.ts` (mock server) and
 
 All `GET /api/*` routes below require a session unless noted.
 
+- `GET /api/auth/providers` — `{ google: boolean }` (whether Google OAuth is configured)
+- `GET /api/auth/google` — start Google OAuth (redirect)
+- `GET /api/auth/google/callback` — OAuth callback (invite-only; sets session cookie)
 - `POST /api/auth/login` — sign in (`admin@admin.com` on a fresh DB)
 - `POST /api/auth/logout` — sign out
 - `GET /api/auth/me` — current operator

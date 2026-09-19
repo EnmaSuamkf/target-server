@@ -100,6 +100,10 @@ export function UsersPanel({ currentUser }: { currentUser: AuthUser }) {
 
 	return (
 		<div className="users-panel">
+			<p className="panel-note">
+				Invited users can activate with <strong>Sign in with Google</strong> (when Google OAuth is configured) or the
+				setup link from their invitation email.
+			</p>
 			<form onSubmit={onInvite} className="users-invite">
 				<input
 					className="input"

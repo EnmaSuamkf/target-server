@@ -20,9 +20,20 @@ import {
 	randomTokenBytes,
 	requireAuth,
 	signInUser,
+	userIsActive,
 	verifyPassword,
 	hashPassword,
 } from "./auth.mjs";
+import {
+	buildGoogleAuthUrl,
+	clearOAuthStateCookie,
+	createOAuthState,
+	exchangeGoogleCode,
+	fetchGoogleUserInfo,
+	isGoogleOAuthConfigured,
+	setOAuthStateCookie,
+	verifyOAuthState,
+} from "./google-oauth.mjs";
 import { validate, validateSyncEventBatch } from "./blueprint.mjs";
 import {
 	DEFAULT_ADMIN_EMAIL,
@@ -34,7 +45,9 @@ import {
 	createAuthUser,
 	deleteAuthUser,
 	findResetToken,
+	activateAuthUserWithGoogle,
 	getAuthUserByEmail,
+	getAuthUserByGoogleSub,
 	getAuthUserById,
 	invalidateResetTokens,
 	isPublishedRenderDeploy,
@@ -135,6 +148,21 @@ async function assertBootGuards() {
 	if (!INGEST_TOKEN) {
 		log("WARNING: TARGET_INGEST_TOKEN is not set — anyone who can reach the port can POST /ingest");
 	}
+}
+
+function sendRedirect(res, location) {
+	res.writeHead(302, { location, "cache-control": "no-store" });
+	res.end();
+}
+
+function authOrigin() {
+	return publicUrl({ host: HOST, port: PORT }).replace(/\/$/, "");
+}
+
+function loginRedirect(query) {
+	const params = new URLSearchParams(query);
+	const q = params.toString();
+	return q ? `${authOrigin()}/login?${q}` : `${authOrigin()}/login`;
 }
 
 function sendJson(res, status, body, extraHeaders = {}) {
@@ -410,7 +438,61 @@ async function issueReset(user) {
 	}
 }
 
-async function handleAuthRoute(req, res, pathname) {
+async function handleAuthRoute(req, res, pathname, url) {
+	const pubOpts = { host: HOST, port: PORT };
+
+	if (req.method === "GET" && pathname === "/api/auth/providers") {
+		return sendJson(res, 200, { google: isGoogleOAuthConfigured() });
+	}
+
+	if (req.method === "GET" && pathname === "/api/auth/google") {
+		if (!isGoogleOAuthConfigured()) return sendJson(res, 404, { error: "google_oauth_disabled" });
+		const state = createOAuthState();
+		setOAuthStateCookie(res, state);
+		return sendRedirect(res, buildGoogleAuthUrl(state, pubOpts));
+	}
+
+	if (req.method === "GET" && pathname === "/api/auth/google/callback") {
+		if (!isGoogleOAuthConfigured()) return sendRedirect(res, loginRedirect({ auth_error: "oauth_failed" }));
+		const oauthError = url.searchParams.get("error");
+		if (oauthError) {
+			clearOAuthStateCookie(res);
+			const code = oauthError === "access_denied" ? "oauth_denied" : "oauth_failed";
+			return sendRedirect(res, loginRedirect({ auth_error: code }));
+		}
+		const code = url.searchParams.get("code");
+		const state = url.searchParams.get("state") ?? "";
+		if (!code || !verifyOAuthState(req, state)) {
+			clearOAuthStateCookie(res);
+			return sendRedirect(res, loginRedirect({ auth_error: "oauth_failed" }));
+		}
+		clearOAuthStateCookie(res);
+		let profile;
+		try {
+			const tokens = await exchangeGoogleCode(code, pubOpts);
+			profile = await fetchGoogleUserInfo(tokens.access_token);
+		} catch (err) {
+			log(`google oauth callback failed: ${String(err?.message ?? err)}`);
+			return sendRedirect(res, loginRedirect({ auth_error: "oauth_failed" }));
+		}
+
+		const byEmail = getAuthUserByEmail(profile.email);
+		if (!byEmail) return sendRedirect(res, loginRedirect({ auth_error: "not_invited" }));
+
+		const bySub = getAuthUserByGoogleSub(profile.sub);
+		if (bySub && bySub.id !== byEmail.id) {
+			return sendRedirect(res, loginRedirect({ auth_error: "oauth_failed" }));
+		}
+		if (byEmail.googleSub && byEmail.googleSub !== profile.sub) {
+			return sendRedirect(res, loginRedirect({ auth_error: "oauth_failed" }));
+		}
+
+		const active = byEmail.googleSub ? byEmail : activateAuthUserWithGoogle(byEmail.id, profile.sub);
+		recordLogin(active.id);
+		signInUser(active, res);
+		return sendRedirect(res, `${authOrigin()}/`);
+	}
+
 	if (req.method === "POST" && pathname === "/api/auth/login") {
 		const lim = checkRateLimit(req, "login");
 		if (lim.limited) return rateLimited(res, lim.retryAfter);
@@ -469,7 +551,7 @@ async function handleAuthRoute(req, res, pathname) {
 		}
 		const user = getAuthUserById(row.userId);
 		if (!user) return sendJson(res, 400, { error: "invalid_or_expired" });
-		if (user.passwordHash) return sendJson(res, 409, { error: "already_activated" });
+		if (userIsActive(user)) return sendJson(res, 409, { error: "already_activated" });
 		if (!consumeResetToken(row.tokenHash)) return sendJson(res, 400, { error: "invalid_or_expired" });
 		const pw = await hashPassword(v.value.password);
 		setUserPassword(user.id, pw);
@@ -532,7 +614,7 @@ async function handleAuthRoute(req, res, pathname) {
 		if (!actor) return;
 		const target = getAuthUserById(inviteMatch[1]);
 		if (!target) return sendJson(res, 404, { error: "not_found" });
-		if (target.passwordHash) return sendJson(res, 409, { error: "already_activated" });
+		if (userIsActive(target)) return sendJson(res, 409, { error: "already_activated" });
 		const { invite, mail } = await issueInvite(target);
 		return sendJson(res, 200, { invite, mail });
 	}
@@ -1042,7 +1124,7 @@ const server = createServer(async (req, res) => {
 		if (req.method === "GET" && pathname === "/health") return sendJson(res, 200, { ok: true });
 
 		if (pathname.startsWith("/api/auth/")) {
-			const handled = await handleAuthRoute(req, res, pathname);
+			const handled = await handleAuthRoute(req, res, pathname, url);
 			if (handled !== false) return;
 		}
 
