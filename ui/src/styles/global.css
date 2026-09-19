@@ -957,6 +957,54 @@ tbody tr.wf-row--selected, tbody tr.wf-row--selected:hover { background: var(--a
 
 .field-err { color: var(--danger-700); font-size: var(--text-xs); }
 
+/* --- device-link approval --- */
+
+.device-approval-shell {
+	min-height: 100vh;
+	display: grid;
+	place-items: center;
+	padding: var(--space-8) var(--space-4);
+	background: radial-gradient(circle at 50% -15%, var(--accent-100), transparent 45%), var(--bg);
+}
+.device-approval-card {
+	width: min(100%, 31rem);
+	padding: clamp(var(--space-6), 6vw, var(--space-10));
+	background: var(--surface);
+	border: 1px solid var(--border);
+	border-radius: var(--radius-lg);
+	box-shadow: var(--shadow-md);
+	text-align: center;
+}
+.device-approval-brand { display: inline-flex; align-items: center; gap: var(--space-2); font-size: var(--text-sm); font-weight: 600; color: var(--gray-700); }
+.device-approval-mark { width: 1.45rem; height: 1.45rem; display: inline-grid; place-items: center; color: var(--accent-600); }
+.device-approval-mark svg { width: 100%; height: 100%; }
+.device-approval-status { position: relative; width: 5.5rem; height: 5.5rem; margin: var(--space-6) auto var(--space-4); display: grid; place-items: center; border-radius: 50%; background: var(--accent-50); color: var(--accent-700); }
+.device-approval-status__ring { position: absolute; inset: .42rem; border: 1px solid var(--accent-200); border-radius: inherit; }
+.device-approval-status__hub { position: relative; font-size: 1.7rem; line-height: 1; }
+.device-approval-status--working .device-approval-status__ring { animation: device-link-pulse 1.2s ease-in-out infinite; }
+.device-approval-status--approved { background: var(--success-50); color: var(--success-700); }
+.device-approval-status--approved .device-approval-status__ring { border-color: var(--success-200); }
+.device-approval-status--denied, .device-approval-status--error { background: var(--danger-50); color: var(--danger-700); }
+.device-approval-status--denied .device-approval-status__ring, .device-approval-status--error .device-approval-status__ring { border-color: var(--danger-200); }
+.device-approval-eyebrow { margin: 0 0 var(--space-2); color: var(--accent-700); font-size: var(--text-xs); font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.device-approval-card h1 { font-size: var(--text-2xl); }
+.device-approval-lede { margin: var(--space-3) auto 0; max-width: 38ch; color: var(--text-muted); }
+.device-approval-security { display: flex; gap: var(--space-2); align-items: flex-start; margin: var(--space-6) 0; padding: var(--space-3); border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-sunken); color: var(--gray-600); font-size: var(--text-sm); text-align: left; }
+.device-approval-security > span:first-child { color: var(--accent-600); font-weight: 700; }
+.device-approval-message { min-height: 1.7rem; color: var(--text-muted); font-size: var(--text-sm); }
+.device-approval-message p { margin: 0; }
+.device-approval-actions { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); margin-top: var(--space-5); }
+.device-approval-approve { background: var(--success-700); border-color: var(--success-700); color: #fff; }
+.device-approval-approve:hover:not(:disabled) { background: #065f46; border-color: #065f46; }
+.device-approval-deny { color: var(--danger-700); }
+.device-approval-footnote { margin: var(--space-6) 0 0; color: var(--text-subtle); font-size: var(--text-xs); }
+@keyframes device-link-pulse { 50% { transform: scale(1.07); opacity: .7; } }
+@media (max-width: 420px) {
+	.device-approval-shell { padding: var(--space-4); }
+	.device-approval-card { padding: var(--space-6); }
+	.device-approval-actions { grid-template-columns: 1fr; }
+}
+
 .default-pw-banner {
 	background: var(--warn-50);
 	border-bottom: 1px solid var(--warn-200);

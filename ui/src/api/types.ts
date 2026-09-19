@@ -302,6 +302,28 @@ export interface SyncClientsResponse {
 	clients: SyncClientRow[];
 }
 
+/** Safe dashboard projection of a linked hub; credentials and keys never appear here. */
+export interface LinkedDevice {
+	id: string;
+	ownerUserId: string;
+	name: string;
+	hubVersion: string | null;
+	scopes: string[];
+	status: "active" | "rotating" | "revoked";
+	/** Reachability derived server-side from last use and the configured TTL. */
+	operationalStatus: "online" | "offline" | "revoked";
+	credentialVersion: number;
+	createdAt: string;
+	updatedAt: string;
+	lastUsedAt: string | null;
+	revokedAt: string | null;
+	revocationReason: string | null;
+}
+
+export interface LinkedDevicesResponse {
+	devices: LinkedDevice[];
+}
+
 /** Server-managed workflow on a client machine. */
 export interface SyncRemoteWorkflowRow {
 	id: string;

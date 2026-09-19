@@ -16,6 +16,7 @@ import type {
 	SyncEventsResponse,
 	SyncRemoteWorkflowDetailResponse,
 	SyncRemoteWorkflowsResponse,
+	LinkedDevicesResponse,
 } from "./api/types.ts";
 import { EMPTY_FILTERS } from "./api/types.ts";
 import { Bars } from "./components/Bars.tsx";
@@ -28,6 +29,7 @@ import { TargetMark } from "./components/TargetMark.tsx";
 import { RemoteWorkflowsPanel } from "./components/RemoteWorkflowsPanel.tsx";
 import { RemoteResourcesPanel } from "./components/RemoteResourcesPanel.tsx";
 import { SyncClientsPanel } from "./components/SyncClientsPanel.tsx";
+import { DevicesPanel } from "./components/DevicesPanel.tsx";
 import { UsersPanel } from "./components/UsersPanel.tsx";
 import { WorkflowDetail } from "./components/WorkflowDetail.tsx";
 import { WorkflowsTable } from "./components/WorkflowsTable.tsx";
@@ -85,13 +87,15 @@ export function App({ user, onSignOut }: { user: AuthUser; onSignOut: () => void
 	const canManageTemplates = can("remote.templates.manage");
 	const canManageTcpTools = can("remote.tcp-tools.manage");
 	const canManageRci = can("remote.rci.manage");
+	const canManageDevices = can("devices.manage");
+	const canSeeRemoteArea = canRemote || canManageDevices;
 	const availableTabs = useMemo<DashboardTab[]>(
 		() => [
 			...(canActivity ? ["activity" as const] : []),
 			...(canUsers ? ["users" as const] : []),
-			...(canRemote ? ["remote" as const] : []),
+			...(canSeeRemoteArea ? ["remote" as const] : []),
 		],
-		[canActivity, canUsers, canRemote],
+		[canActivity, canUsers, canSeeRemoteArea],
 	);
 	const [tab, setTab] = useState<DashboardTab>(() => availableTabs[0] ?? "activity");
 	useEffect(() => {
@@ -166,24 +170,28 @@ export function App({ user, onSignOut }: { user: AuthUser; onSignOut: () => void
 
 	const [syncRefreshKey, setSyncRefreshKey] = useState(0);
 	const syncRefresh = useCallback(() => setSyncRefreshKey((k) => k + 1), []);
-	const remoteActive = tab === "remote" && canRemote;
+	const remoteActive = tab === "remote" && canSeeRemoteArea;
 	const syncQuery = remoteActive && syncRefreshKey ? `?_=${syncRefreshKey}` : "";
 	const { data: syncClients } = useApi<SyncClientsResponse>(
-		remoteActive ? `/api/sync/clients${syncQuery}` : null,
+		remoteActive && canRemote ? `/api/sync/clients${syncQuery}` : null,
+		POLL_MS,
+	);
+	const { data: linkedDevices } = useApi<LinkedDevicesResponse>(
+		remoteActive && canManageDevices ? `/api/device-links/devices${syncQuery}` : null,
 		POLL_MS,
 	);
 	const { data: syncWorkflows } = useApi<SyncRemoteWorkflowsResponse>(
-		remoteActive ? `/api/sync/remote-workflows${syncQuery}` : null,
+		remoteActive && canRemote ? `/api/sync/remote-workflows${syncQuery}` : null,
 		POLL_MS,
 	);
 	const [selectedRemoteId, setSelectedRemoteId] = useState("");
 	const syncDetailPath =
-		remoteActive && selectedRemoteId
+		remoteActive && canRemote && selectedRemoteId
 			? `/api/sync/remote-workflows/${encodeURIComponent(selectedRemoteId)}${syncQuery}`
 			: null;
 	const { data: syncWorkflowDetail } = useApi<SyncRemoteWorkflowDetailResponse>(syncDetailPath, POLL_MS);
 	const syncEventsPath =
-		remoteActive && selectedRemoteId
+		remoteActive && canRemote && selectedRemoteId
 			? `/api/sync/events?remote_id=${encodeURIComponent(selectedRemoteId)}&limit=30`
 			: null;
 	const { data: syncEvents } = useApi<SyncEventsResponse>(syncEventsPath, POLL_MS);
@@ -258,7 +266,7 @@ export function App({ user, onSignOut }: { user: AuthUser; onSignOut: () => void
 					>
 						Users
 					</button> : null}
-					{canRemote ? <button
+					{canSeeRemoteArea ? <button
 						type="button"
 						className={`dash-tab${tab === "remote" ? " dash-tab--active" : ""}`}
 						onClick={() => setTab("remote")}
@@ -372,13 +380,18 @@ export function App({ user, onSignOut }: { user: AuthUser; onSignOut: () => void
 							Sync clients and create or manage workflows on connected Target machines. Commands are queued for the sync agent to poll.
 						</p>
 
-						<div className="panel" id="sync-clients">
+						{canRemote ? <div className="panel" id="sync-clients">
 							<h2>Sync clients</h2>
 							<div className="panel-note">Target machines registered for remote control. Availability comes from client heartbeats.</div>
 							<SyncClientsPanel clients={syncClients?.clients ?? null} />
-						</div>
+						</div> : null}
 
-						{canManageRemote ? <div className="panel" id="sync-remote-workflows">
+						{canManageDevices ? <div className="panel" id="linked-devices">
+							<h2>Linked devices</h2>
+							<DevicesPanel devices={linkedDevices?.devices ?? null} onChanged={syncRefresh} />
+						</div> : null}
+
+						{canRemote && canManageRemote ? <div className="panel" id="sync-remote-workflows">
 							<h2>Remote workflows</h2>
 							<div className="panel-note">Create and control workflows on connected clients.</div>
 							<RemoteWorkflowsPanel
@@ -394,9 +407,9 @@ export function App({ user, onSignOut }: { user: AuthUser; onSignOut: () => void
 									setFilters((f) => ({ ...f, workflow: localId }));
 								}}
 							/>
-						</div> : <div className="panel"><h2>Remote workflows</h2><p className="panel-note">You can view connected clients, but managing remote workflows requires additional permission.</p></div>}
+						</div> : canRemote ? <div className="panel"><h2>Remote workflows</h2><p className="panel-note">You can view connected clients, but managing remote workflows requires additional permission.</p></div> : null}
 
-						<div className="panel" id="sync-remote-resources">
+						{canRemote ? <div className="panel" id="sync-remote-resources">
 							<h2>Remote resources</h2>
 							<div className="panel-note">Templates, TCP tools and RCI resource sets are mirrored per Target client and applied through the sync queue.</div>
 							<RemoteResourcesPanel
@@ -406,7 +419,7 @@ export function App({ user, onSignOut }: { user: AuthUser; onSignOut: () => void
 								canManageRci={canManageRci}
 								onRefresh={syncRefresh}
 							/>
-						</div>
+						</div> : null}
 					</>
 				)}
 			</main>

@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useState } from "rea
 import { fetchMe } from "../api/auth.ts";
 import type { AuthUser } from "../api/types.ts";
 import { App } from "../App.tsx";
+import { DeviceApprovalPage } from "./DeviceApprovalPage.tsx";
 import { LoginPage } from "./LoginPage.tsx";
 import { TokenPasswordForm } from "./TokenPasswordForm.tsx";
 
@@ -69,6 +70,11 @@ export function AuthGate() {
 
 	if (state === "anonymous") {
 		return <LoginPage onSuccess={onSignedIn} />;
+	}
+
+	const linkMatch = /^\/link\/device\/([^/]+)$/.exec(path);
+	if (linkMatch) {
+		return <DeviceApprovalPage user={user!} requestId={decodeURIComponent(linkMatch[1]!)} />;
 	}
 
 	return (

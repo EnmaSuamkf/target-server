@@ -34,10 +34,14 @@ export const PERMISSION_CATALOG = Object.freeze([
 	{ id: "remote.templates.manage", description: "Manage remote workflow templates" },
 	{ id: "remote.tcp-tools.manage", description: "Manage remote TCP tools" },
 	{ id: "remote.rci.manage", description: "Manage remote RCI resources" },
+	{ id: "devices.link", description: "Approve or deny device-link requests" },
+	{ id: "devices.manage", description: "List, rotate and revoke linked devices" },
 ]);
 export const PERMISSIONS = Object.freeze(PERMISSION_CATALOG.map(({ id }) => id));
 export const ADMIN_ROLE_ID = "admin";
 const PERMISSION_SET = new Set(PERMISSIONS);
+export const DEVICE_SCOPES = Object.freeze(["ingest:write", "sync:write"]);
+const DEVICE_SCOPE_SET = new Set(DEVICE_SCOPES);
 
 export function open(dbPath = process.env.TARGET_SERVER_DB ?? "./target-server.db") {
 	if (db) return db;
@@ -166,6 +170,7 @@ export function open(dbPath = process.env.TARGET_SERVER_DB ?? "./target-server.d
 	migrateSyncSchema(db);
 	migrateAuthSchema(db);
 	migrateRbacSchema(db);
+	migrateDeviceLinkSchema(db);
 	seedAuth();
 	return db;
 }
@@ -256,7 +261,9 @@ function migrateRbacSchema(database) {
 					'remote.workflows.execute',
 					'remote.templates.manage',
 					'remote.tcp-tools.manage',
-					'remote.rci.manage'
+					'remote.rci.manage',
+					'devices.link',
+					'devices.manage'
 				)),
 				PRIMARY KEY (role_id, permission)
 			);
@@ -276,6 +283,7 @@ function migrateRbacSchema(database) {
 			CREATE INDEX IF NOT EXISTS idx_auth_role_audit_role
 				ON auth_role_audit(role_id, created_at DESC);
 		`);
+		ensureRbacPermissionConstraint(database);
 		database
 			.prepare(
 				`INSERT INTO auth_roles (id, name, is_system, created_at, updated_at)
@@ -307,6 +315,120 @@ function migrateRbacSchema(database) {
 		database.exec("ROLLBACK");
 		throw err;
 	}
+}
+
+/**
+ * SQLite cannot widen a CHECK constraint in place. Older installations have
+ * auth_role_permissions restricted to the pre-device catalogue, so rebuild
+ * that small relation transactionally before seeding the protected admin role.
+ */
+function ensureRbacPermissionConstraint(database) {
+	const row = database.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'auth_role_permissions'").get();
+	if (row?.sql?.includes("'devices.link'") && row.sql.includes("'devices.manage'")) return;
+	const values = PERMISSIONS.map((permission) => `'${permission}'`).join(", ");
+	database.exec(`
+		CREATE TABLE auth_role_permissions_next (
+			role_id     TEXT NOT NULL,
+			permission  TEXT NOT NULL CHECK (permission IN (${values})),
+			PRIMARY KEY (role_id, permission)
+		);
+		INSERT INTO auth_role_permissions_next (role_id, permission)
+			SELECT role_id, permission FROM auth_role_permissions;
+		DROP TABLE auth_role_permissions;
+		ALTER TABLE auth_role_permissions_next RENAME TO auth_role_permissions;
+		CREATE INDEX idx_auth_role_permissions_role
+			ON auth_role_permissions(role_id);
+	`);
+}
+
+/** Additive schema for the device-link/v1 identity and pairing lifecycle. */
+function migrateDeviceLinkSchema(database) {
+	const addColumn = (table, name, ddl) => {
+		try {
+			database.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${ddl}`);
+		} catch {
+			// Existing installations already have the column.
+		}
+	};
+	// Attribution is additive: legacy report/sync rows retain NULL device fields.
+	addColumn("instances", "device_id", "TEXT");
+	addColumn("instances", "owner_user_id", "TEXT");
+	addColumn("events", "device_id", "TEXT");
+	addColumn("events", "owner_user_id", "TEXT");
+	addColumn("clients", "device_id", "TEXT");
+	addColumn("clients", "owner_user_id", "TEXT");
+	addColumn("sync_events", "device_id", "TEXT");
+	addColumn("sync_events", "owner_user_id", "TEXT");
+	database.exec(`
+		CREATE TABLE IF NOT EXISTS linked_devices (
+			id                 TEXT PRIMARY KEY,
+			owner_user_id      TEXT NOT NULL REFERENCES auth_users(id),
+			name               TEXT NOT NULL,
+			hub_version        TEXT,
+			public_key         TEXT NOT NULL,
+			scopes_json        TEXT NOT NULL,
+			status             TEXT NOT NULL CHECK (status IN ('active', 'rotating', 'revoked')),
+			credential_version INTEGER NOT NULL DEFAULT 1,
+			created_at         TEXT NOT NULL,
+			updated_at         TEXT NOT NULL,
+			last_used_at       TEXT,
+			revoked_at         TEXT,
+			revoked_by_user_id TEXT REFERENCES auth_users(id),
+			revocation_reason  TEXT
+		);
+		CREATE TABLE IF NOT EXISTS device_credentials (
+			device_id    TEXT NOT NULL REFERENCES linked_devices(id),
+			version      INTEGER NOT NULL,
+			secret_hash  TEXT NOT NULL UNIQUE,
+			issued_at    TEXT NOT NULL,
+			expires_at   TEXT,
+			revoked_at   TEXT,
+			PRIMARY KEY (device_id, version)
+		);
+		CREATE TABLE IF NOT EXISTS device_link_requests (
+			id                       TEXT PRIMARY KEY,
+			idempotency_key          TEXT UNIQUE,
+			idempotency_fingerprint  TEXT,
+			device_name              TEXT NOT NULL,
+			hub_version              TEXT,
+			public_key               TEXT NOT NULL,
+			scopes_json              TEXT NOT NULL,
+			polling_credential_hash  TEXT NOT NULL UNIQUE,
+			owner_user_id            TEXT REFERENCES auth_users(id),
+			status                   TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'denied', 'expired', 'consumed')),
+			created_at               TEXT NOT NULL,
+			expires_at               TEXT NOT NULL,
+			decided_at               TEXT,
+			consumed_at              TEXT,
+			device_id                TEXT UNIQUE REFERENCES linked_devices(id)
+		);
+		CREATE TABLE IF NOT EXISTS device_audit (
+			id            TEXT PRIMARY KEY,
+			device_id     TEXT REFERENCES linked_devices(id),
+			request_id    TEXT REFERENCES device_link_requests(id),
+			actor_user_id TEXT REFERENCES auth_users(id),
+			action        TEXT NOT NULL,
+			detail_json   TEXT,
+			created_at    TEXT NOT NULL
+		);
+		CREATE TABLE IF NOT EXISTS device_request_nonces (
+			device_id  TEXT NOT NULL REFERENCES linked_devices(id),
+			nonce      TEXT NOT NULL,
+			expires_at TEXT NOT NULL,
+			PRIMARY KEY (device_id, nonce)
+		);
+		CREATE INDEX IF NOT EXISTS idx_linked_devices_owner ON linked_devices(owner_user_id, created_at DESC);
+		CREATE INDEX IF NOT EXISTS idx_linked_devices_status ON linked_devices(status, last_used_at DESC);
+		CREATE INDEX IF NOT EXISTS idx_device_credentials_active ON device_credentials(device_id, revoked_at, expires_at);
+		CREATE INDEX IF NOT EXISTS idx_device_link_requests_state_expiry ON device_link_requests(status, expires_at);
+		CREATE INDEX IF NOT EXISTS idx_device_audit_device_created ON device_audit(device_id, created_at DESC);
+		CREATE INDEX IF NOT EXISTS idx_device_audit_request_created ON device_audit(request_id, created_at DESC);
+		CREATE INDEX IF NOT EXISTS idx_device_request_nonces_expiry ON device_request_nonces(expires_at);
+		CREATE INDEX IF NOT EXISTS idx_instances_device ON instances(device_id);
+		CREATE INDEX IF NOT EXISTS idx_events_device ON events(device_id, received_at);
+		CREATE INDEX IF NOT EXISTS idx_clients_device ON clients(device_id);
+		CREATE INDEX IF NOT EXISTS idx_sync_events_device ON sync_events(device_id, received_at);
+	`);
 }
 
 function rbacError(code, message) {
@@ -776,6 +898,439 @@ export function sweepExpiredResets() {
 	open().prepare("DELETE FROM auth_resets WHERE expires_at < ? OR used_at IS NOT NULL").run(now);
 }
 
+// --- Linked device identity (docs/device-linking-v1.md) --------------------
+
+function deviceError(code, message) {
+	const err = new Error(message);
+	err.code = code;
+	return err;
+}
+
+function normalizeDeviceScopes(scopes) {
+	if (!Array.isArray(scopes) || scopes.length === 0) throw deviceError("invalid_device_scopes", "at least one device scope is required");
+	const normalized = [...new Set(scopes)].sort();
+	if (normalized.some((scope) => !DEVICE_SCOPE_SET.has(scope))) {
+		throw deviceError("invalid_device_scopes", "unknown device scope");
+	}
+	return normalized;
+}
+
+function parseDeviceScopes(json) {
+	try {
+		const scopes = JSON.parse(json);
+		return Array.isArray(scopes) ? scopes : [];
+	} catch {
+		return [];
+	}
+}
+
+/** A linked identity is not automatically a currently reachable hub. */
+export const DEVICE_ONLINE_TTL_MS = Number.parseInt(
+	process.env.TARGET_DEVICE_ONLINE_TTL_MS ?? process.env.TARGET_SYNC_CLIENT_ONLINE_TTL_MS ?? "90000",
+	10,
+);
+
+export function deviceOperationalStatus(row, nowMs = Date.now(), ttlMs = DEVICE_ONLINE_TTL_MS) {
+	if (row.status === "revoked") return "revoked";
+	const seen = Date.parse(row.last_used_at ?? "");
+	return Number.isFinite(seen) && nowMs - seen <= ttlMs ? "online" : "offline";
+}
+
+/** Safe public representation: deliberately excludes public-key material and every credential hash. */
+function rowToLinkedDevice(row, nowMs = Date.now()) {
+	if (!row) return null;
+	return {
+		id: row.id,
+		ownerUserId: row.owner_user_id,
+		name: row.name,
+		hubVersion: row.hub_version,
+		scopes: parseDeviceScopes(row.scopes_json),
+		status: row.status,
+		operationalStatus: deviceOperationalStatus(row, nowMs),
+		credentialVersion: row.credential_version,
+		createdAt: row.created_at,
+		updatedAt: row.updated_at,
+		lastUsedAt: row.last_used_at,
+		revokedAt: row.revoked_at,
+		revokedByUserId: row.revoked_by_user_id,
+		revocationReason: row.revocation_reason,
+	};
+}
+
+function rowToLinkRequest(row) {
+	if (!row) return null;
+	return {
+		id: row.id,
+		deviceName: row.device_name,
+		hubVersion: row.hub_version,
+		scopes: parseDeviceScopes(row.scopes_json),
+		ownerUserId: row.owner_user_id,
+		status: row.status,
+		createdAt: row.created_at,
+		expiresAt: row.expires_at,
+		decidedAt: row.decided_at,
+		consumedAt: row.consumed_at,
+		deviceId: row.device_id,
+	};
+}
+
+function writeDeviceAudit({ deviceId = null, requestId = null, actorUserId = null, action, detail = null, createdAt = null }) {
+	open()
+		.prepare(
+			`INSERT INTO device_audit
+			 (id, device_id, request_id, actor_user_id, action, detail_json, created_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		)
+		.run(
+			randomUUID(),
+			deviceId,
+			requestId,
+			actorUserId,
+			action,
+			detail == null ? null : JSON.stringify(detail),
+			createdAt ?? new Date().toISOString(),
+		);
+}
+
+function getLinkedDeviceRow(id) {
+	return open().prepare("SELECT * FROM linked_devices WHERE id = ?").get(id);
+}
+
+function getLinkRequestRow(id) {
+	return open().prepare("SELECT * FROM device_link_requests WHERE id = ?").get(id);
+}
+
+/** Create a pending request; callers pass hashes, never raw pairing credentials. */
+export function createDeviceLinkRequest({
+	id = randomUUID(),
+	idempotencyKey = null,
+	idempotencyFingerprint = null,
+	deviceName,
+	hubVersion = null,
+	publicKey,
+	scopes,
+	pollingCredentialHash,
+	expiresAt,
+	createdAt = null,
+}) {
+	if (!deviceName?.trim() || !publicKey?.trim() || !pollingCredentialHash?.trim() || !expiresAt) {
+		throw deviceError("invalid_link_request", "missing device-link request fields");
+	}
+	const normalizedScopes = normalizeDeviceScopes(scopes);
+	const now = createdAt ?? new Date().toISOString();
+	const database = open();
+	try {
+		database
+			.prepare(
+				`INSERT INTO device_link_requests
+				 (id, idempotency_key, idempotency_fingerprint, device_name, hub_version, public_key, scopes_json,
+				  polling_credential_hash, status, created_at, expires_at)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+			)
+			.run(id, idempotencyKey, idempotencyFingerprint, deviceName.trim(), hubVersion, publicKey.trim(), JSON.stringify(normalizedScopes), pollingCredentialHash, now, expiresAt);
+		writeDeviceAudit({ requestId: id, action: "link.initiated", detail: { scopes: normalizedScopes }, createdAt: now });
+		return rowToLinkRequest(getLinkRequestRow(id));
+	} catch (err) {
+		if (idempotencyKey && /UNIQUE constraint failed: device_link_requests.idempotency_key/.test(err.message)) {
+			const existing = open().prepare("SELECT * FROM device_link_requests WHERE idempotency_key = ?").get(idempotencyKey);
+			if (existing?.idempotency_fingerprint === idempotencyFingerprint) {
+				return { ...rowToLinkRequest(existing), idempotent: true };
+			}
+			throw deviceError("idempotency_conflict", "idempotency key belongs to a different request");
+		}
+		throw err;
+	}
+}
+
+export function getDeviceLinkRequest(id) {
+	return rowToLinkRequest(getLinkRequestRow(id));
+}
+
+/** Internal lookup for Target-Link authentication; the hash is never returned. */
+export function getDeviceLinkRequestByPollingCredentialHash(pollingCredentialHash) {
+	const row = open().prepare("SELECT * FROM device_link_requests WHERE polling_credential_hash = ?").get(pollingCredentialHash);
+	return rowToLinkRequest(row);
+}
+
+/** Authenticate a pending pairing credential without exposing its stored hash. */
+export function authenticateDeviceLinkRequest({ requestId, pollingCredentialHash, now = new Date().toISOString() }) {
+	const row = open()
+		.prepare("SELECT * FROM device_link_requests WHERE id = ? AND polling_credential_hash = ?")
+		.get(requestId, pollingCredentialHash);
+	if (!row) return null;
+	if ((row.status === "pending" || row.status === "approved") && row.expires_at <= now) {
+		open().prepare("UPDATE device_link_requests SET status = 'expired' WHERE id = ? AND status IN ('pending', 'approved')").run(requestId);
+		writeDeviceAudit({ requestId, action: "link.expired", createdAt: now });
+		return null;
+	}
+	return rowToLinkRequest(row);
+}
+
+/** Approve or deny only a live pending request and only for an existing human owner. */
+export function decideDeviceLinkRequest({ requestId, ownerUserId, decision, decidedAt = null }) {
+	if (decision !== "approved" && decision !== "denied") throw deviceError("invalid_link_decision", "invalid link decision");
+	if (!getAuthUserById(ownerUserId)) throw deviceError("owner_not_found", "link owner does not exist");
+	const now = decidedAt ?? new Date().toISOString();
+	const database = open();
+	database.exec("BEGIN IMMEDIATE");
+	try {
+		const request = getLinkRequestRow(requestId);
+		if (!request) throw deviceError("link_request_not_found", "link request does not exist");
+		if (request.status === decision && request.owner_user_id === ownerUserId) {
+			database.exec("COMMIT");
+			return { ...rowToLinkRequest(request), idempotent: true };
+		}
+		if (request.status !== "pending" || request.expires_at <= now) {
+			if (request.status === "pending" && request.expires_at <= now) {
+				database.prepare("UPDATE device_link_requests SET status = 'expired' WHERE id = ? AND status = 'pending'").run(requestId);
+			}
+			throw deviceError("invalid_link_state", "link request is no longer pending");
+		}
+		const info = database
+			.prepare(
+				`UPDATE device_link_requests SET status = ?, owner_user_id = ?, decided_at = ?
+				 WHERE id = ? AND status = 'pending'`,
+			)
+			.run(decision, ownerUserId, now, requestId);
+		if (info.changes !== 1) throw deviceError("invalid_link_state", "link request state changed");
+		writeDeviceAudit({ requestId, actorUserId: ownerUserId, action: `link.${decision}`, createdAt: now });
+		const decided = rowToLinkRequest(getLinkRequestRow(requestId));
+		database.exec("COMMIT");
+		return decided;
+	} catch (err) {
+		database.exec("ROLLBACK");
+		throw err;
+	}
+}
+
+/**
+ * Atomically materialize an approved request. Both hashes are supplied by the
+ * route layer; neither the raw polling credential nor device secret reaches DB.
+ */
+export function consumeDeviceLinkRequest({
+	requestId,
+	pollingCredentialHash,
+	deviceId = randomUUID(),
+	deviceSecretHash,
+	consumedAt = null,
+	credentialExpiresAt = null,
+}) {
+	if (!pollingCredentialHash?.trim() || !deviceSecretHash?.trim()) throw deviceError("invalid_link_credential", "credential hash is required");
+	const now = consumedAt ?? new Date().toISOString();
+	const database = open();
+	database.exec("BEGIN IMMEDIATE");
+	try {
+		const request = getLinkRequestRow(requestId);
+		if (!request || request.polling_credential_hash !== pollingCredentialHash) throw deviceError("invalid_link_credential", "invalid link credential");
+		if (request.status === "consumed") throw deviceError("already_consumed", "link request was already consumed");
+		if (request.status !== "approved" || !request.owner_user_id || request.expires_at <= now) {
+			if (request.status === "approved" && request.expires_at <= now) {
+				database.prepare("UPDATE device_link_requests SET status = 'expired' WHERE id = ? AND status = 'approved'").run(requestId);
+			}
+			throw deviceError("invalid_link_state", "link request is not consumable");
+		}
+		if (!getAuthUserById(request.owner_user_id)) throw deviceError("owner_not_found", "link owner does not exist");
+		database
+			.prepare(
+				`INSERT INTO linked_devices
+				 (id, owner_user_id, name, hub_version, public_key, scopes_json, status, credential_version, created_at, updated_at)
+				 VALUES (?, ?, ?, ?, ?, ?, 'active', 1, ?, ?)`,
+			)
+			.run(deviceId, request.owner_user_id, request.device_name, request.hub_version, request.public_key, request.scopes_json, now, now);
+		database
+			.prepare(
+				`INSERT INTO device_credentials (device_id, version, secret_hash, issued_at, expires_at)
+				 VALUES (?, 1, ?, ?, ?)`,
+			)
+			.run(deviceId, deviceSecretHash, now, credentialExpiresAt);
+		const consumed = database
+			.prepare(
+				`UPDATE device_link_requests SET status = 'consumed', consumed_at = ?, device_id = ?
+				 WHERE id = ? AND status = 'approved' AND polling_credential_hash = ?`,
+			)
+			.run(now, deviceId, requestId, pollingCredentialHash);
+		if (consumed.changes !== 1) throw deviceError("already_consumed", "link request was already consumed");
+		writeDeviceAudit({ deviceId, requestId, actorUserId: request.owner_user_id, action: "link.consumed", createdAt: now });
+		const device = rowToLinkedDevice(getLinkedDeviceRow(deviceId));
+		database.exec("COMMIT");
+		return device;
+	} catch (err) {
+		database.exec("ROLLBACK");
+		throw err;
+	}
+}
+
+export function expireDeviceLinkRequests(now = new Date().toISOString()) {
+	const database = open();
+	const rows = database
+		.prepare("SELECT id FROM device_link_requests WHERE status IN ('pending', 'approved') AND expires_at <= ?")
+		.all(now);
+	if (rows.length === 0) return 0;
+	database.prepare("UPDATE device_link_requests SET status = 'expired' WHERE status IN ('pending', 'approved') AND expires_at <= ?").run(now);
+	for (const row of rows) writeDeviceAudit({ requestId: row.id, action: "link.expired", createdAt: now });
+	return rows.length;
+}
+
+export function getLinkedDevice(id) {
+	return rowToLinkedDevice(getLinkedDeviceRow(id));
+}
+
+export function listLinkedDevices({ ownerUserId = null, includeArchived = false, nowMs = Date.now() } = {}) {
+	const activeClause = includeArchived ? "" : "status != 'revoked'";
+	const rows = ownerUserId
+		? open().prepare(`SELECT * FROM linked_devices WHERE owner_user_id = ? ${activeClause ? `AND ${activeClause}` : ""} ORDER BY created_at DESC`).all(ownerUserId)
+		: open().prepare(`SELECT * FROM linked_devices ${activeClause ? `WHERE ${activeClause}` : ""} ORDER BY created_at DESC`).all();
+	return rows.map((row) => rowToLinkedDevice(row, nowMs));
+}
+
+/** Authenticate the active, non-revoked credential and update last-use metadata. */
+export function authenticateDevice({ deviceId, secretHash, now = new Date().toISOString() }) {
+	const row = open()
+		.prepare(
+			`SELECT d.* FROM linked_devices d
+			 JOIN device_credentials c ON c.device_id = d.id AND c.version = d.credential_version
+			 WHERE d.id = ? AND c.secret_hash = ? AND d.status = 'active'
+			   AND d.revoked_at IS NULL AND c.revoked_at IS NULL
+			   AND (c.expires_at IS NULL OR c.expires_at > ?)`,
+		)
+		.get(deviceId, secretHash, now);
+	if (!row) return null;
+	open().prepare("UPDATE linked_devices SET last_used_at = ?, updated_at = ? WHERE id = ?").run(now, now, deviceId);
+	return rowToLinkedDevice({ ...row, last_used_at: now, updated_at: now });
+}
+
+/** Authentication material is internal-only; public API mappers never expose it. */
+export function getDeviceDisconnectAuthentication({ deviceId, secretHash }) {
+	return open()
+		.prepare(
+			`SELECT d.id, d.public_key, d.scopes_json, d.status, d.revoked_at
+			 FROM linked_devices d JOIN device_credentials c ON c.device_id = d.id
+			 WHERE d.id = ? AND c.secret_hash = ? AND c.version = d.credential_version LIMIT 1`,
+		)
+		.get(deviceId, secretHash);
+}
+
+/** Atomic one-use nonce reservation for signed device requests. */
+export function consumeDeviceRequestNonce({ deviceId, nonce, expiresAt }) {
+	try {
+		open().prepare("DELETE FROM device_request_nonces WHERE expires_at <= ?").run(new Date().toISOString());
+		open().prepare("INSERT INTO device_request_nonces (device_id, nonce, expires_at) VALUES (?, ?, ?)").run(deviceId, nonce, expiresAt);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/** Supersede exactly the active credential; the returned object never exposes a hash. */
+export function rotateDeviceCredential({ deviceId, currentSecretHash, newSecretHash, expiresAt = null, rotatedAt = null }) {
+	if (!currentSecretHash?.trim() || !newSecretHash?.trim()) throw deviceError("invalid_device_credential", "credential hashes are required");
+	const now = rotatedAt ?? new Date().toISOString();
+	const database = open();
+	database.exec("BEGIN IMMEDIATE");
+	try {
+		const device = getLinkedDeviceRow(deviceId);
+		if (!device || device.status !== "active" || device.revoked_at) throw deviceError("device_not_active", "device is not active");
+		const credential = database
+			.prepare("SELECT * FROM device_credentials WHERE device_id = ? AND version = ? AND revoked_at IS NULL")
+			.get(deviceId, device.credential_version);
+		if (!credential || credential.secret_hash !== currentSecretHash) throw deviceError("invalid_device_credential", "invalid device credential");
+		const nextVersion = device.credential_version + 1;
+		database.prepare("UPDATE device_credentials SET revoked_at = ? WHERE device_id = ? AND version = ? AND revoked_at IS NULL").run(now, deviceId, device.credential_version);
+		database
+			.prepare("INSERT INTO device_credentials (device_id, version, secret_hash, issued_at, expires_at) VALUES (?, ?, ?, ?, ?)")
+			.run(deviceId, nextVersion, newSecretHash, now, expiresAt);
+		database
+			.prepare("UPDATE linked_devices SET credential_version = ?, updated_at = ? WHERE id = ? AND status = 'active'")
+			.run(nextVersion, now, deviceId);
+		writeDeviceAudit({ deviceId, action: "credential.rotated", createdAt: now });
+		const rotated = rowToLinkedDevice(getLinkedDeviceRow(deviceId));
+		database.exec("COMMIT");
+		return rotated;
+	} catch (err) {
+		database.exec("ROLLBACK");
+		throw err;
+	}
+}
+
+export function revokeLinkedDevice({ deviceId, actorUserId, reason = null, revokedAt = null }) {
+	if (!getAuthUserById(actorUserId)) throw deviceError("owner_not_found", "revocation actor does not exist");
+	const now = revokedAt ?? new Date().toISOString();
+	const database = open();
+	database.exec("BEGIN IMMEDIATE");
+	try {
+		const device = getLinkedDeviceRow(deviceId);
+		if (!device) throw deviceError("device_not_found", "device does not exist");
+		if (device.status === "revoked") {
+			database.exec("COMMIT");
+			return { ...rowToLinkedDevice(device), idempotent: true };
+		}
+		database
+			.prepare(
+				`UPDATE linked_devices
+				 SET status = 'revoked', revoked_at = ?, revoked_by_user_id = ?, revocation_reason = ?, updated_at = ?
+				 WHERE id = ? AND status != 'revoked'`,
+			)
+			.run(now, actorUserId, reason, now, deviceId);
+		database.prepare("UPDATE device_credentials SET revoked_at = ? WHERE device_id = ? AND revoked_at IS NULL").run(now, deviceId);
+		database.prepare("UPDATE clients SET status = 'archived' WHERE device_id = ? AND status != 'archived'").run(deviceId);
+		writeDeviceAudit({ deviceId, actorUserId, action: "device.revoked", detail: reason ? { reason } : null, createdAt: now });
+		const revoked = rowToLinkedDevice(getLinkedDeviceRow(deviceId));
+		database.exec("COMMIT");
+		return revoked;
+	} catch (err) {
+		database.exec("ROLLBACK");
+		throw err;
+	}
+}
+
+/** Device-authenticated remote disconnect. A known revoked credential is safe to replay only here. */
+export function disconnectLinkedDevice({ deviceId, secretHash, disconnectedAt = null }) {
+	const now = disconnectedAt ?? new Date().toISOString();
+	const database = open();
+	database.exec("BEGIN IMMEDIATE");
+	try {
+		const credential = database
+			.prepare("SELECT d.* FROM linked_devices d JOIN device_credentials c ON c.device_id = d.id WHERE d.id = ? AND c.secret_hash = ? LIMIT 1")
+			.get(deviceId, secretHash);
+		if (!credential) throw deviceError("invalid_device_credential", "invalid device credential");
+		if (credential.status !== "revoked" && !parseDeviceScopes(credential.scopes_json).includes("sync:write")) {
+			throw deviceError("scope_forbidden", "device cannot disconnect remote sync");
+		}
+		if (credential.status === "revoked") {
+			database.exec("COMMIT");
+			return { device: rowToLinkedDevice(credential), idempotent: true };
+		}
+		database.prepare("UPDATE linked_devices SET status = 'revoked', revoked_at = ?, revocation_reason = 'device_disconnected', updated_at = ? WHERE id = ?").run(now, now, deviceId);
+		database.prepare("UPDATE device_credentials SET revoked_at = ? WHERE device_id = ? AND revoked_at IS NULL").run(now, deviceId);
+		database.prepare("UPDATE clients SET status = 'archived' WHERE device_id = ? AND status != 'archived'").run(deviceId);
+		writeDeviceAudit({ deviceId, action: "device.disconnected", createdAt: now });
+		const device = rowToLinkedDevice(getLinkedDeviceRow(deviceId));
+		database.exec("COMMIT");
+		return { device, idempotent: false };
+	} catch (err) {
+		database.exec("ROLLBACK");
+		throw err;
+	}
+}
+
+export function listDeviceAudit({ deviceId = null, requestId = null, limit = 100 } = {}) {
+	const capped = Math.max(1, Math.min(500, limit));
+	const clause = deviceId ? "WHERE device_id = ?" : requestId ? "WHERE request_id = ?" : "";
+	const param = deviceId ?? requestId;
+	const rows = param
+		? open().prepare(`SELECT * FROM device_audit ${clause} ORDER BY created_at DESC LIMIT ?`).all(param, capped)
+		: open().prepare("SELECT * FROM device_audit ORDER BY created_at DESC LIMIT ?").all(capped);
+	return rows.map((row) => ({
+		id: row.id,
+		deviceId: row.device_id,
+		requestId: row.request_id,
+		actorUserId: row.actor_user_id,
+		action: row.action,
+		detail: row.detail_json ? JSON.parse(row.detail_json) : null,
+		createdAt: row.created_at,
+	}));
+}
+
 export async function adminHasDefaultPassword() {
 	const user = getAuthUserByEmail(DEFAULT_ADMIN_EMAIL);
 	if (!user?.passwordHash) return false;
@@ -784,15 +1339,17 @@ export async function adminHasDefaultPassword() {
 }
 
 /** Upsert the instance identity carried by a batch envelope. */
-export function upsertInstance(batch, nowIso) {
+export function upsertInstance(batch, nowIso, device = null) {
 	open()
 		.prepare(
-			`INSERT INTO instances (instance_id, display_name, version, first_seen_at, last_seen_at, events_count)
-			 VALUES (?, ?, ?, ?, ?, 0)
+			`INSERT INTO instances (instance_id, display_name, version, first_seen_at, last_seen_at, events_count, device_id, owner_user_id)
+			 VALUES (?, ?, ?, ?, ?, 0, ?, ?)
 			 ON CONFLICT(instance_id) DO UPDATE SET
 			   display_name = COALESCE(excluded.display_name, instances.display_name),
 			   version      = COALESCE(excluded.version, instances.version),
-			   last_seen_at = excluded.last_seen_at`,
+			   last_seen_at = excluded.last_seen_at,
+			   device_id = COALESCE(excluded.device_id, instances.device_id),
+			   owner_user_id = COALESCE(excluded.owner_user_id, instances.owner_user_id)`,
 		)
 		.run(
 			batch.instance_id,
@@ -800,6 +1357,8 @@ export function upsertInstance(batch, nowIso) {
 			batch.version ?? null,
 			nowIso,
 			nowIso,
+			device?.id ?? null,
+			device?.ownerUserId ?? null,
 		);
 }
 
@@ -808,12 +1367,12 @@ export function upsertInstance(batch, nowIso) {
  * A missing id is the only hard reject (we can't dedupe it); everything else is
  * stored as-is.
  */
-export function insertEvent(instanceId, version, event, nowIso) {
+export function insertEvent(instanceId, version, event, nowIso, device = null) {
 	if (!event || typeof event.id !== "string" || typeof event.kind !== "string") return "rejected";
 	const info = open()
 		.prepare(
-			`INSERT OR IGNORE INTO events (id, instance_id, kind, workflow_id, session_id, version, created_at, received_at, data)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			`INSERT OR IGNORE INTO events (id, instance_id, kind, workflow_id, session_id, version, created_at, received_at, data, device_id, owner_user_id)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		)
 		.run(
 			event.id,
@@ -825,6 +1384,8 @@ export function insertEvent(instanceId, version, event, nowIso) {
 			typeof event.created_at === "string" ? event.created_at : null,
 			nowIso,
 			JSON.stringify(event.data ?? {}),
+			device?.id ?? null,
+			device?.ownerUserId ?? null,
 		);
 	return info.changes > 0 ? "inserted" : "duplicate";
 }
@@ -1751,6 +2312,8 @@ function rowToClient(r) {
 		name: r.name,
 		tokenHash: r.token_hash,
 		status: r.status,
+		deviceId: r.device_id ?? null,
+		ownerUserId: r.owner_user_id ?? null,
 		capabilities,
 		lastSeenAt: r.last_seen_at,
 		createdAt: r.created_at,
@@ -1863,21 +2426,25 @@ export function upsertClient({
 	capabilities = null,
 	lastSeenAt = null,
 	createdAt = null,
+	deviceId = null,
+	ownerUserId = null,
 }) {
 	const now = createdAt ?? new Date().toISOString();
 	const capabilitiesJson = capabilities == null ? null : JSON.stringify(capabilities);
 	open()
 		.prepare(
-			`INSERT INTO clients (id, name, token_hash, status, capabilities_json, last_seen_at, created_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?)
+			`INSERT INTO clients (id, name, token_hash, status, capabilities_json, last_seen_at, created_at, device_id, owner_user_id)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 			 ON CONFLICT(id) DO UPDATE SET
 			   name = COALESCE(excluded.name, clients.name),
 			   token_hash = COALESCE(excluded.token_hash, clients.token_hash),
 			   status = COALESCE(excluded.status, clients.status),
 			   capabilities_json = COALESCE(excluded.capabilities_json, clients.capabilities_json),
-			   last_seen_at = COALESCE(excluded.last_seen_at, clients.last_seen_at)`,
+			   last_seen_at = COALESCE(excluded.last_seen_at, clients.last_seen_at),
+			   device_id = COALESCE(excluded.device_id, clients.device_id),
+			   owner_user_id = COALESCE(excluded.owner_user_id, clients.owner_user_id)`,
 		)
-		.run(id, name, tokenHash, status, capabilitiesJson, lastSeenAt ?? now, now);
+		.run(id, name, tokenHash, status, capabilitiesJson, lastSeenAt ?? now, now, deviceId, ownerUserId);
 	return rowToClient(open().prepare("SELECT * FROM clients WHERE id = ?").get(id));
 }
 
@@ -2087,14 +2654,15 @@ export function insertSyncEvent({
 	type,
 	payload = {},
 	receivedAt = null,
+	device = null,
 }) {
 	const now = receivedAt ?? new Date().toISOString();
 	const info = open()
 		.prepare(
-			`INSERT OR IGNORE INTO sync_events (id, client_id, remote_id, type, payload_json, received_at)
-			 VALUES (?, ?, ?, ?, ?, ?)`,
+			`INSERT OR IGNORE INTO sync_events (id, client_id, remote_id, type, payload_json, received_at, device_id, owner_user_id)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		)
-		.run(id, clientId, remoteId, type, JSON.stringify(payload), now);
+		.run(id, clientId, remoteId, type, JSON.stringify(payload), now, device?.id ?? null, device?.ownerUserId ?? null);
 	return info.changes > 0 ? "inserted" : "duplicate";
 }
 

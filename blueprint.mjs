@@ -25,6 +25,11 @@ const STRING = Joi.string().trim().min(1);
 const OPTIONAL_STRING = Joi.string().trim().allow("");
 const STEP_KEY = Joi.string().trim().min(1);
 const ISO_TIME = Joi.string().isoDate();
+const DEVICE_ID = Joi.string().trim().min(1).max(200);
+const DEVICE_PUBLIC_KEY = Joi.object({
+	algorithm: Joi.string().valid("ed25519").required(),
+	value: Joi.string().trim().min(32).max(1000).required(),
+});
 
 const STEP_DEF = Joi.object({
 	step_key: STEP_KEY.required(),
@@ -330,6 +335,16 @@ export const BLUEPRINTS = {
 			name: STRING.required(),
 			data: Joi.object().unknown(true).default({}),
 		}).required(),
+	}),
+	"device_link.create": Joi.object({
+		contract_version: Joi.string().valid("device-link/v1").required(),
+		device_name: Joi.string().trim().min(1).max(200).required(),
+		hub_version: OPTIONAL_STRING.optional(),
+		public_key: DEVICE_PUBLIC_KEY.required(),
+		requested_scopes: Joi.array().items(Joi.string().valid("ingest:write", "sync:write")).min(1).unique().required(),
+	}),
+	"device_link.rotate": Joi.object({
+		public_key: DEVICE_PUBLIC_KEY.required(),
 	}),
 
 	...COMMAND_PAYLOADS,

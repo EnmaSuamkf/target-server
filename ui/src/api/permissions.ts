@@ -9,4 +9,6 @@ export const PERMISSION_CATALOG = [
 	{ id: "remote.templates.manage", label: "Manage templates", description: "Manage remote templates." },
 	{ id: "remote.tcp-tools.manage", label: "Manage TCP tools", description: "Manage remote TCP tools." },
 	{ id: "remote.rci.manage", label: "Manage RCI", description: "Manage remote RCI resources." },
+	{ id: "devices.link", label: "Approve or deny device-link requests", description: "Approve or deny linking an authorized Target hub to your account." },
+	{ id: "devices.manage", label: "Manage linked devices", description: "List, revoke and manage linked device identities." },
 ] as const;

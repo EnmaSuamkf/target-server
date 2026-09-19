@@ -76,6 +76,7 @@ Configuration (env vars):
 | `TARGET_SEED_ADMIN_PASSWORD` | published default | Password for the seeded `admin@admin.com` — set before first boot when deployed |
 | `TARGET_TRUST_PROXY` | `0` | Use the last hop of `X-Forwarded-For` for rate limiting (only behind a trusted proxy) |
 | `TARGET_AUTH_DISABLED` | `0` | Skip the API auth guard (local dev/tests only; refused on a public bind) |
+| `TARGET_DEVICE_LINKING_MODE` | `legacy` | Device-link rollout: `legacy` keeps current ingest/sync, `optional` accepts linked and legacy hubs, `required` rejects unlinked ingest/sync |
 | `TARGET_GOOGLE_CLIENT_ID` | _(empty)_ | Google OAuth Web client ID — when set with `TARGET_GOOGLE_CLIENT_SECRET`, enables **Sign in with Google** |
 | `TARGET_GOOGLE_CLIENT_SECRET` | _(empty)_ | Google OAuth client secret (**never commit**; set in Render or local env only) |
 
@@ -97,6 +98,28 @@ role API and invitation flow.
 First run on a fresh database seeds `admin@admin.com`. Invite additional
 operators from the **Users** panel. Local/CI defaults write `.mail-outbox/*.eml`
 instead of using SMTP (or use Resend/SMTP in production).
+
+### Optional linked devices
+
+The device-link protocol is documented in
+[`docs/device-linking-v1.md`](docs/device-linking-v1.md). A hub starts the
+link, opens a browser for a signed-in human to approve it, then receives a
+device credential once. Dashboard credentials are never copied to a hub.
+
+Deploy progressively:
+
+1. Keep `TARGET_DEVICE_LINKING_MODE=legacy` on an existing installation; this
+   is the default and does not alter existing report/sync clients.
+2. Upgrade hubs to implement `device-link/v1`, then set `optional`. Verify the
+   **Linked devices** dashboard panel and remote traffic.
+3. Set `required` only after every intended hub is linked. Unlinked/revoked
+   hubs receive `401 device_link_required`, stop remote traffic and keep all
+   workflows, templates, TCP tools and RCI data locally.
+
+On a non-loopback deployment, use HTTPS for linking. Grant `devices.link` to
+human approvers and `devices.manage` to device administrators. Revocation is
+deliberately remote-only: it invalidates server credentials and signals the hub
+to relink; it never deletes hub-local data.
 
 ### Inviting operators (activation methods)
 
