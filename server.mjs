@@ -6,7 +6,7 @@
  * JWT auth guards /api/* (except /api/auth/*); ingest keeps its own token.
  */
 import { createServer } from "node:http";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, createPublicKey, randomUUID, verify } from "node:crypto";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
@@ -104,6 +104,19 @@ import {
 	deleteRemoteResource,
 	remoteResourceChannelId,
 	mirrorResourceSyncEvent,
+	createDeviceLinkRequest,
+	getDeviceLinkRequest,
+	authenticateDeviceLinkRequest,
+	decideDeviceLinkRequest,
+	consumeDeviceLinkRequest,
+	listLinkedDevices,
+	listDeviceAudit,
+	revokeLinkedDevice,
+	authenticateDevice,
+	rotateDeviceCredential,
+	disconnectLinkedDevice,
+	getDeviceDisconnectAuthentication,
+	consumeDeviceRequestNonce,
 } from "./db.mjs";
 import { initMailer, isDeliveringTransport, mailTransportName, sendMail } from "./mailer.mjs";
 import { inviteMail, resetMail, withToken } from "./mail-templates.mjs";
@@ -113,6 +126,7 @@ const PORT = Number.parseInt(process.env.PORT ?? "8900", 10);
 const HOST = process.env.HOST ?? "127.0.0.1";
 const INGEST_TOKEN = process.env.TARGET_INGEST_TOKEN ?? "";
 const AUTH_DISABLED = process.env.TARGET_AUTH_DISABLED === "1";
+const DEVICE_LINKING_MODE = process.env.TARGET_DEVICE_LINKING_MODE ?? "legacy";
 const PUBLIC_DIR = fileURLToPath(new URL("./public/dist", import.meta.url));
 const UI_DIR = fileURLToPath(new URL("./ui", import.meta.url));
 const UI_SOURCES = ["src", "index.html", "vite.config.ts", "package.json"];
@@ -259,9 +273,12 @@ function rateLimited(res, retryAfter) {
 }
 
 async function handleIngest(req, res) {
+	const device = authenticatedDevice(req);
+	if (DEVICE_LINKING_MODE === "required" && !device) return sendJson(res, 401, { error: "device_link_required" });
+	if (device && !device.scopes.includes("ingest:write")) return sendJson(res, 403, { error: "scope_forbidden" });
 	if (INGEST_TOKEN) {
 		const auth = req.headers.authorization ?? "";
-		if (auth !== `Bearer ${INGEST_TOKEN}`) return sendJson(res, 401, { error: "unauthorized" });
+		if (!device && auth !== `Bearer ${INGEST_TOKEN}`) return sendJson(res, 401, { error: "unauthorized" });
 	}
 
 	let raw;
@@ -280,15 +297,18 @@ async function handleIngest(req, res) {
 	if (!batch || typeof batch.instance_id !== "string" || !Array.isArray(batch.events)) {
 		return sendJson(res, 422, { error: "missing instance_id or events[]" });
 	}
+	if (device && batch.instance_id !== device.id) {
+		return sendJson(res, 403, { error: "device_identity_mismatch" });
+	}
 
 	const now = new Date().toISOString();
-	upsertInstance(batch, now);
+	upsertInstance(batch, now, device);
 
 	const accepted = [];
 	const rejected = [];
 	let added = 0;
 	for (const event of batch.events) {
-		const result = insertEvent(batch.instance_id, batch.version, event, now);
+		const result = insertEvent(batch.instance_id, batch.version, event, now, device);
 		if (result === "rejected") {
 			rejected.push({ id: event?.id ?? null, reason: "schema", detail: "event needs a string id and kind" });
 		} else {
@@ -957,6 +977,23 @@ function isOperatorSyncPath(pathname, method) {
 }
 
 async function requireSyncClient(req, res) {
+	const device = authenticatedDevice(req);
+	if (device) {
+		if (!device.scopes.includes("sync:write")) {
+			sendJson(res, 403, { error: "scope_forbidden" });
+			return null;
+		}
+		const client = getClientById(device.id);
+		if (!client || client.deviceId !== device.id) {
+			sendJson(res, 401, { error: "device_not_registered_for_sync" });
+			return null;
+		}
+		return client;
+	}
+	if (DEVICE_LINKING_MODE === "required") {
+		sendJson(res, 401, { error: "device_link_required" });
+		return null;
+	}
 	const auth = req.headers.authorization ?? "";
 	if (!auth.startsWith("Bearer ")) {
 		sendJson(res, 401, { error: "unauthorized" });
@@ -974,28 +1011,33 @@ async function handleSyncRoute(req, res, pathname, url) {
 	if (isOperatorSyncPath(pathname, req.method)) return false;
 
 	if (req.method === "POST" && pathname === "/api/sync/register") {
+		const device = authenticatedDevice(req);
+		if (DEVICE_LINKING_MODE === "required" && !device) return sendJson(res, 401, { error: "device_link_required" });
+		if (device && !device.scopes.includes("sync:write")) return sendJson(res, 403, { error: "scope_forbidden" });
 		const body = await readJson(req, res);
 		if (!body) return true;
 		const v = validate("sync.register", body);
 		if (!v.ok) return sendJson(res, 400, { errors: v.errors });
-		const clientId = randomUUID();
-		const clientToken = `sync_${randomTokenBytes().toString("hex")}`;
-		const tokenHash = hashToken(clientToken);
+		const clientId = device ? device.id : randomUUID();
+		const clientToken = device ? null : `sync_${randomTokenBytes().toString("hex")}`;
+		const tokenHash = device ? `device:${device.id}` : hashToken(clientToken);
 		const now = new Date().toISOString();
 		const capabilities = { ...(v.value.capabilities ?? {}) };
 		if (v.value.instance_id) capabilities.instance_id = v.value.instance_id;
 		if (v.value.version) capabilities.version = v.value.version;
 		const client = upsertClient({
 			id: clientId,
-			name: v.value.name ?? v.value.display_name ?? null,
+			name: device?.name ?? v.value.name ?? v.value.display_name ?? null,
 			tokenHash,
 			capabilities: Object.keys(capabilities).length ? capabilities : null,
 			lastSeenAt: now,
 			createdAt: now,
+			deviceId: device?.id ?? null,
+			ownerUserId: device?.ownerUserId ?? null,
 		});
 		return sendJson(res, 201, {
 			client_id: client.id,
-			client_token: clientToken,
+			...(clientToken ? { client_token: clientToken } : {}),
 			created_at: client.createdAt,
 		});
 	}
@@ -1088,6 +1130,7 @@ async function handleSyncRoute(req, res, pathname, url) {
 				type: event.type,
 				payload: event.payload ?? {},
 				receivedAt: event.created_at,
+				device: client.deviceId ? { id: client.deviceId, ownerUserId: client.ownerUserId } : null,
 			});
 			if (outcome === "inserted") {
 				accepted.push(event.id);
@@ -1385,6 +1428,245 @@ async function handleOperatorSyncRoute(req, res, pathname, url) {
 	return false;
 }
 
+function deviceLinkEnabled() {
+	return DEVICE_LINKING_MODE === "optional" || DEVICE_LINKING_MODE === "required";
+}
+
+function linkCredential(req) {
+	const auth = req.headers.authorization ?? "";
+	return auth.startsWith("Target-Link ") ? auth.slice("Target-Link ".length) : null;
+}
+
+function deviceCredential(req) {
+	const auth = req.headers.authorization ?? "";
+	const match = /^Target-Device v1 ([^.]+)\.(.+)$/.exec(auth);
+	if (!match) return null;
+	return { deviceId: match[1], secret: match[2] };
+}
+
+function authenticatedDevice(req) {
+	const credential = deviceCredential(req);
+	if (!credential) return null;
+	return authenticateDevice({ deviceId: credential.deviceId, secretHash: hashToken(credential.secret) });
+}
+
+function verifyDisconnectProof(req, body, credential) {
+	const timestamp = typeof req.headers["x-target-date"] === "string" ? req.headers["x-target-date"] : "";
+	const nonce = typeof req.headers["x-target-nonce"] === "string" ? req.headers["x-target-nonce"] : "";
+	const signature = typeof req.headers["x-target-signature"] === "string" ? req.headers["x-target-signature"] : "";
+	const at = Date.parse(timestamp);
+	if (!timestamp || !nonce || !signature || !Number.isFinite(at) || Math.abs(Date.now() - at) > 5 * 60_000) return null;
+	if (!/^[A-Za-z0-9_-]{16,256}$/.test(nonce)) return null;
+	const material = getDeviceDisconnectAuthentication({ deviceId: credential.deviceId, secretHash: hashToken(credential.secret) });
+	if (!material || !material.scopes_json.includes("sync:write")) return null;
+	let publicKey;
+	let sig;
+	try {
+		const raw = Buffer.from(material.public_key, "base64url");
+		if (raw.length !== 32) return null;
+		// RFC 8410 SubjectPublicKeyInfo prefix for an Ed25519 raw public key.
+		publicKey = createPublicKey({ key: Buffer.concat([Buffer.from("302a300506032b6570032100", "hex"), raw]), format: "der", type: "spki" });
+		sig = Buffer.from(signature, "base64url");
+	} catch {
+		return null;
+	}
+	const hash = createHash("sha256").update(JSON.stringify(body)).digest("hex");
+	const canonical = `target-device-v1\nPOST\n/api/device-links/devices/self/disconnect\n${hash}\n${timestamp}\n${nonce}\n${credential.deviceId}`;
+	if (!verify(null, Buffer.from(canonical), publicKey, sig)) return null;
+	if (!consumeDeviceRequestNonce({ deviceId: credential.deviceId, nonce, expiresAt: new Date(at + 5 * 60_000).toISOString() })) return null;
+	return material;
+}
+
+function deviceLinkDbError(res, err) {
+	const status = {
+		owner_not_found: 404,
+		link_request_not_found: 404,
+		device_not_found: 404,
+		invalid_link_credential: 401,
+		invalid_device_credential: 401,
+		scope_forbidden: 403,
+		already_consumed: 409,
+		idempotency_conflict: 409,
+		invalid_link_state: 409,
+		device_not_active: 409,
+		invalid_link_request: 422,
+		invalid_device_scopes: 422,
+	}[err?.code];
+	if (!status) return false;
+	sendJson(res, status, { error: err.code });
+	return true;
+}
+
+async function handleDeviceLinkRoute(req, res, pathname, url) {
+	if (!pathname.startsWith("/api/device-links/")) return false;
+	if (!deviceLinkEnabled()) return sendJson(res, 404, { error: "device_linking_disabled" });
+
+	const createPath = pathname === "/api/device-links/requests";
+	if (req.method === "POST" && createPath) {
+		const limited = checkRateLimit(req, "device-link-init");
+		if (limited.limited) return rateLimited(res, limited.retryAfter);
+		const body = await readJson(req, res);
+		if (!body) return true;
+		const v = validate("device_link.create", body);
+		if (!v.ok) return sendJson(res, 422, { error: "validation_failed", errors: v.errors });
+		const idempotencyKey = typeof req.headers["idempotency-key"] === "string" ? req.headers["idempotency-key"] : null;
+		if (idempotencyKey && (idempotencyKey.length > 128 || !/^[\x21-\x7e]+$/.test(idempotencyKey))) {
+			return sendJson(res, 422, { error: "validation_failed", errors: [{ field: "Idempotency-Key", code: "string.pattern.base", message: "Invalid idempotency key" }] });
+		}
+		const requestId = `dlr_${randomTokenBytes().toString("base64url")}`;
+		const pollingCredential = randomTokenBytes().toString("base64url");
+		const expiresAt = new Date(Date.now() + 10 * 60_000).toISOString();
+		try {
+			const request = createDeviceLinkRequest({
+				id: requestId,
+				idempotencyKey,
+				idempotencyFingerprint: createHash("sha256").update(JSON.stringify(v.value)).digest("hex"),
+				deviceName: v.value.device_name,
+				hubVersion: v.value.hub_version ?? null,
+				publicKey: v.value.public_key.value,
+				scopes: v.value.requested_scopes,
+				pollingCredentialHash: hashToken(pollingCredential),
+				expiresAt,
+			});
+			// An idempotent replay must not reveal a credential issued on the first request.
+			if (request.idempotent) return sendJson(res, 200, { request_id: request.id, state: request.status, expires_at: request.expiresAt, idempotent: true });
+			return sendJson(res, 201, {
+				request_id: request.id,
+				state: request.status,
+				browser_url: `${authOrigin()}/link/device/${encodeURIComponent(request.id)}`,
+				polling_credential: pollingCredential,
+				expires_at: request.expiresAt,
+				poll_after_seconds: 3,
+			});
+		} catch (err) {
+			if (deviceLinkDbError(res, err)) return true;
+			throw err;
+		}
+	}
+
+	const pollMatch = pathname.match(/^\/api\/device-links\/requests\/([^/]+)\/(poll|consume)$/);
+	if (req.method === "POST" && pollMatch) {
+		const [, requestId, operation] = pollMatch;
+		const credential = linkCredential(req);
+		if (!credential) return sendJson(res, 401, { error: "invalid_link_credential" });
+		const credentialHash = hashToken(credential);
+		const limited = checkRateLimit(req, `device-link-${operation}:${requestId}`);
+		if (limited.limited) return rateLimited(res, limited.retryAfter);
+		if (operation === "poll") {
+			const request = authenticateDeviceLinkRequest({ requestId, pollingCredentialHash: credentialHash });
+			if (!request) return sendJson(res, 401, { error: "invalid_link_credential" });
+			return sendJson(res, 200, { request_id: request.id, state: request.status, expires_at: request.expiresAt, poll_after_seconds: 3 });
+		}
+		try {
+			const deviceSecret = randomTokenBytes().toString("base64url");
+			const device = consumeDeviceLinkRequest({
+				requestId,
+				pollingCredentialHash: credentialHash,
+				deviceId: `dev_${randomTokenBytes().toString("base64url")}`,
+				deviceSecretHash: hashToken(deviceSecret),
+			});
+			return sendJson(res, 201, {
+				device: { id: device.id, status: device.status, scopes: device.scopes, credential_version: device.credentialVersion },
+				device_secret: deviceSecret,
+			});
+		} catch (err) {
+			if (deviceLinkDbError(res, err)) return true;
+			throw err;
+		}
+	}
+
+	const decisionMatch = pathname.match(/^\/api\/device-links\/requests\/([^/]+)\/(approve|deny)$/);
+	if (req.method === "POST" && decisionMatch) {
+		const user = await requireCapability(req, res, "devices.link");
+		if (!user) return true;
+		try {
+			const request = decideDeviceLinkRequest({
+				requestId: decisionMatch[1],
+				ownerUserId: user.id,
+				decision: decisionMatch[2] === "approve" ? "approved" : "denied",
+			});
+			return sendJson(res, 200, { request_id: request.id, state: request.status, device: { name: request.deviceName } });
+		} catch (err) {
+			if (deviceLinkDbError(res, err)) return true;
+			throw err;
+		}
+	}
+
+	if (req.method === "GET" && pathname === "/api/device-links/devices") {
+		if (!(await requireCapability(req, res, "devices.manage"))) return true;
+		return sendJson(res, 200, { devices: listLinkedDevices({ includeArchived: url.searchParams.get("history") === "1" }) });
+	}
+
+	const deviceAuditMatch = pathname.match(/^\/api\/device-links\/devices\/([^/]+)\/audit$/);
+	if (req.method === "GET" && deviceAuditMatch) {
+		if (!(await requireCapability(req, res, "devices.manage"))) return true;
+		const device = listLinkedDevices({ includeArchived: true }).find((row) => row.id === deviceAuditMatch[1]);
+		if (!device) return sendJson(res, 404, { error: "device_not_found" });
+		return sendJson(res, 200, { device: { id: device.id, status: device.status }, audit: listDeviceAudit({ deviceId: device.id }) });
+	}
+
+	if (req.method === "POST" && pathname === "/api/device-links/devices/self/disconnect") {
+		const credential = deviceCredential(req);
+		if (!credential) return sendJson(res, 401, { error: "invalid_device_credential" });
+		const body = await readJson(req, res);
+		if (!body) return true;
+		if (Object.keys(body).length !== 0) return sendJson(res, 422, { error: "validation_failed", errors: [{ field: "_", code: "object.unknown", message: "Disconnect does not accept a payload" }] });
+		if (!verifyDisconnectProof(req, body, credential)) return sendJson(res, 401, { error: "invalid_device_proof" });
+		try {
+			const result = disconnectLinkedDevice({ deviceId: credential.deviceId, secretHash: hashToken(credential.secret) });
+			return sendJson(res, 200, {
+				device: { id: result.device.id, status: result.device.status },
+				idempotent: result.idempotent,
+			});
+		} catch (err) {
+			if (deviceLinkDbError(res, err)) return true;
+			throw err;
+		}
+	}
+
+	const revokeMatch = pathname.match(/^\/api\/device-links\/devices\/([^/]+)\/revoke$/);
+	if (req.method === "POST" && revokeMatch) {
+		const user = await requireCapability(req, res, "devices.manage");
+		if (!user) return true;
+		const body = await readJson(req, res);
+		if (!body) return true;
+		try {
+			const device = revokeLinkedDevice({ deviceId: revokeMatch[1], actorUserId: user.id, reason: typeof body.reason === "string" ? body.reason.slice(0, 500) : null });
+			return sendJson(res, 200, { device });
+		} catch (err) {
+			if (deviceLinkDbError(res, err)) return true;
+			throw err;
+		}
+	}
+
+	// Rotation is deliberately device-authenticated: a dashboard session alone
+	// never receives the replacement secret.
+	const rotateMatch = pathname.match(/^\/api\/device-links\/devices\/([^/]+)\/rotate$/);
+	if (req.method === "POST" && rotateMatch) {
+		const credential = deviceCredential(req);
+		if (!credential || credential.deviceId !== rotateMatch[1]) return sendJson(res, 401, { error: "invalid_device_credential" });
+		const active = authenticateDevice({ deviceId: credential.deviceId, secretHash: hashToken(credential.secret) });
+		if (!active) return sendJson(res, 401, { error: "invalid_device_credential" });
+		const body = await readJson(req, res);
+		if (!body) return true;
+		const v = validate("device_link.rotate", body);
+		if (!v.ok) return sendJson(res, 422, { error: "validation_failed", errors: v.errors });
+		const replacementSecret = randomTokenBytes().toString("base64url");
+		try {
+			const device = rotateDeviceCredential({
+				deviceId: credential.deviceId,
+				currentSecretHash: hashToken(credential.secret),
+				newSecretHash: hashToken(replacementSecret),
+			});
+			return sendJson(res, 201, { device: { id: device.id, status: device.status, credential_version: device.credentialVersion }, device_secret: replacementSecret });
+		} catch (err) {
+			if (deviceLinkDbError(res, err)) return true;
+			throw err;
+		}
+	}
+	return false;
+}
+
 const server = createServer(async (req, res) => {
 	try {
 		const url = new URL(req.url, `http://${req.headers.host ?? HOST}`);
@@ -1395,6 +1677,11 @@ const server = createServer(async (req, res) => {
 
 		if (pathname.startsWith("/api/auth/")) {
 			const handled = await handleAuthRoute(req, res, pathname, url);
+			if (handled !== false) return;
+		}
+
+		if (pathname.startsWith("/api/device-links/")) {
+			const handled = await handleDeviceLinkRoute(req, res, pathname, url);
 			if (handled !== false) return;
 		}
 

@@ -10,6 +10,7 @@ import { once } from "node:events";
 
 const tmpDb = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "target-sync-api-")), "t.db");
 process.env.TARGET_SERVER_DB = tmpDb;
+process.env.TARGET_DEVICE_LINKING_MODE = "legacy";
 process.env.PORT = "0";
 process.env.HOST = "127.0.0.1";
 

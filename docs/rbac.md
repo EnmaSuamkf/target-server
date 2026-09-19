@@ -19,6 +19,8 @@ Roles contain only these permission IDs:
 | `remote.templates.manage` | Manage a client's remote templates |
 | `remote.tcp-tools.manage` | Manage a client's remote TCP tools |
 | `remote.rci.manage` | Manage a client's remote resource sets |
+| `devices.link` | Approve or deny a device-link request in the browser. This assigns the approved hub to the signed-in authorized human; it is not a dashboard/device credential. |
+| `devices.manage` | List and revoke linked device identities (and manage their lifecycle). This is separate from approving a one-time link. |
 
 `db.mjs` is the application source of truth for this closed catalogue. Unknown
 permission strings are rejected with a validation error.
