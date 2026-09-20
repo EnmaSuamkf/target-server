@@ -23,7 +23,7 @@ export function SyncClientsPanel({ clients }: { clients: SyncClientRow[] | null 
 		return (
 			<div className="empty">
 				No clients online — start Target on a machine with remote sync enabled (
-				<code className="mono">TARGET_SYNC_ENABLED=true</code>). Clients disappear ~90s after the hub stops
+				<code className="mono">TARGET_SYNC_ENABLED=true</code>). Clients disappear ~30s after the hub stops
 				heartbeating.
 			</div>
 		);
