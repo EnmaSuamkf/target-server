@@ -29,17 +29,23 @@ Operational record for invite-only Google sign-in. **Do not put `TARGET_GOOGLE_C
 
 ### Authorized JavaScript origins
 
+- `https://targetworkflows.com`
+- `https://edreams.targetworkflows.com` (customer tenant example — add each `<slug>.targetworkflows.com`)
 - `https://target-server-okjn.onrender.com`
 - `http://127.0.0.1:8900`
 
 ### Authorized redirect URIs
 
+- `https://targetworkflows.com/api/auth/google/callback`
+- `https://edreams.targetworkflows.com/api/auth/google/callback`
 - `https://target-server-okjn.onrender.com/api/auth/google/callback`
 - `http://127.0.0.1:8900/api/auth/google/callback`
 
+For more tenants, follow `docs/tenant-provisioning.md`.
+
 ## Render environment variables
 
-Set on the **target-server** web service (production URL `https://target-server-okjn.onrender.com`):
+Set on the **target-server** web service (production URL `https://targetworkflows.com`):
 
 | Key | Value |
 | --- | --- |
@@ -67,7 +73,7 @@ Local dev: export the same two variables in your shell or `.env` (gitignored); u
 
 ## Post-deploy verification — Render
 
-1. After deploy, open `https://target-server-okjn.onrender.com/api/auth/providers` — `"google":true` only if both env vars are set on the service.
+1. After deploy, open `https://targetworkflows.com/api/auth/providers` — `"google":true` only if both env vars are set on the service.
 2. **Environment** tab: confirm `TARGET_GOOGLE_CLIENT_ID` and `TARGET_GOOGLE_CLIENT_SECRET` exist (values not copied into git or chat).
 3. Invite a test user from **Users** (production dashboard).
 4. `/login` → **Sign in with Google** with that invited account → dashboard loads.

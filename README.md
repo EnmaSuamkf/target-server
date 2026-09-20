@@ -246,7 +246,8 @@ The repo includes [`render.yaml`](render.yaml) (Blueprint). To deploy:
    - `TARGET_AUTH_SECRET` — optional; generated on first boot if omitted
    - `TARGET_INGEST_TOKEN` — optional; protects `POST /ingest`
    - `TARGET_GOOGLE_CLIENT_ID` / `TARGET_GOOGLE_CLIENT_SECRET` — optional; enable Google sign-in (set in Environment; see checklist doc)
-4. Deploy. The service URL is **https://target-server-okjn.onrender.com** (matches `TARGET_PUBLIC_URL` in the Blueprint; on Render, `RENDER_EXTERNAL_URL` overrides a stale onrender hostname).
+4. Deploy. The public URL is **https://targetworkflows.com** (custom domain; `TARGET_PUBLIC_URL` in the Blueprint). The Render hostname `https://target-server-okjn.onrender.com` remains as a fallback.
+5. **Customer tenants** (isolated instances on subdomains such as `edreams.targetworkflows.com`): see [`docs/tenant-provisioning.md`](docs/tenant-provisioning.md).
 
 Build: `npm ci && npm --prefix ui ci && npm run build`. Start: `node server.mjs`.
 Health check: `GET /health`. SQLite lives at `TARGET_SERVER_DB` (ephemeral on the free plan unless you add a persistent disk).

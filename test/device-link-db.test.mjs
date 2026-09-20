@@ -120,8 +120,9 @@ test("credentials rotate and revoke without exposing or reusing a revoked creden
 	assert.equal(rotated.credentialVersion, 2);
 	assert.equal(db.authenticateDevice({ deviceId: "device-one", secretHash: hash("device-secret"), now: "2026-06-01T00:03:00.000Z" }), null);
 	assert.equal(db.authenticateDevice({ deviceId: "device-one", secretHash: hash("device-secret-v2"), now: "2026-06-01T00:03:00.000Z" }).id, "device-one");
-	assert.equal(db.listLinkedDevices({ nowMs: Date.parse("2026-06-01T00:03:30.000Z") }).find((d) => d.id === "device-one").operationalStatus, "online");
-	assert.equal(db.listLinkedDevices({ nowMs: Date.parse("2026-06-01T00:05:00.000Z") }).find((d) => d.id === "device-one").operationalStatus, "offline");
+	assert.equal(db.DEVICE_ONLINE_TTL_MS, 30_000);
+	assert.equal(db.listLinkedDevices({ nowMs: Date.parse("2026-06-01T00:03:15.000Z") }).find((d) => d.id === "device-one").operationalStatus, "online");
+	assert.equal(db.listLinkedDevices({ nowMs: Date.parse("2026-06-01T00:03:45.000Z") }).find((d) => d.id === "device-one").operationalStatus, "offline");
 
 	const revoked = db.revokeLinkedDevice({
 		deviceId: "device-one",

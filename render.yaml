@@ -25,9 +25,9 @@ services:
       - key: HOST
         value: 0.0.0.0
       - key: TARGET_PUBLIC_URL
-        value: https://target-server-okjn.onrender.com
+        value: https://targetworkflows.com
       - key: TARGET_MAIL_FROM
-        value: Target <onboarding@resend.dev>
+        value: Target <noreply@targetworkflows.com>
       - key: TARGET_MAIL_TRANSPORT
         value: resend
       - key: TARGET_ALLOW_FILE_MAIL

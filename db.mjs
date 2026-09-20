@@ -926,7 +926,7 @@ function parseDeviceScopes(json) {
 
 /** A linked identity is not automatically a currently reachable hub. */
 export const DEVICE_ONLINE_TTL_MS = Number.parseInt(
-	process.env.TARGET_DEVICE_ONLINE_TTL_MS ?? process.env.TARGET_SYNC_CLIENT_ONLINE_TTL_MS ?? "90000",
+	process.env.TARGET_DEVICE_ONLINE_TTL_MS ?? process.env.TARGET_SYNC_CLIENT_ONLINE_TTL_MS ?? "30000",
 	10,
 );
 
@@ -2456,9 +2456,9 @@ export function listClients() {
 		.map(rowToClient);
 }
 
-/** Default: 3× the usual 30s heartbeat interval — no heartbeat means offline. */
+/** Default 30s (~3× a 10s hub heartbeat); online is TTL-after-last-seen, not an explicit leave. */
 export const SYNC_CLIENT_ONLINE_TTL_MS = Number.parseInt(
-	process.env.TARGET_SYNC_CLIENT_ONLINE_TTL_MS ?? "90000",
+	process.env.TARGET_SYNC_CLIENT_ONLINE_TTL_MS ?? "30000",
 	10,
 );
 

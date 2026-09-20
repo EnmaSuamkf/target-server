@@ -16,6 +16,7 @@ const {
 	listClients,
 	listOnlineClients,
 	isSyncClientOnline,
+	SYNC_CLIENT_ONLINE_TTL_MS,
 	enqueueCommand,
 	claimPendingCommands,
 	ackCommand,
@@ -193,22 +194,23 @@ test("workflow.delete failed with already-gone error removes the remote workflow
 });
 
 test("listOnlineClients hides clients without a recent heartbeat", () => {
+	assert.equal(SYNC_CLIENT_ONLINE_TTL_MS, 30_000);
 	const clientId = "cli_offline";
 	upsertClient({
 		id: clientId,
 		name: "Stale",
 		tokenHash: "hash_off",
-		lastSeenAt: new Date(Date.now() - 120_000).toISOString(),
+		lastSeenAt: new Date(Date.now() - 45_000).toISOString(),
 	});
-	assert.equal(listOnlineClients(90_000).some((c) => c.id === clientId), false);
+	assert.equal(listOnlineClients().some((c) => c.id === clientId), false);
 	upsertClient({
 		id: clientId,
 		name: "Fresh",
 		tokenHash: "hash_off",
 		lastSeenAt: new Date().toISOString(),
 	});
-	assert.equal(listOnlineClients(90_000).some((c) => c.id === clientId), true);
-	assert.equal(isSyncClientOnline(listClients().find((c) => c.id === clientId), Date.now(), 90_000), true);
+	assert.equal(listOnlineClients().some((c) => c.id === clientId), true);
+	assert.equal(isSyncClientOnline(listClients().find((c) => c.id === clientId), Date.now()), true);
 });
 
 test("workflow.delete ack removes the remote workflow from the server plan", () => {

@@ -256,11 +256,13 @@ local workflows, execution state, templates, TCP tools and RCI data.
 `status: active` means the linked identity has not been revoked; it does not
 mean the hub is reachable. Device list responses also carry
 `operationalStatus`, derived on the server from `lastUsedAt` and
-`TARGET_DEVICE_ONLINE_TTL_MS` (default: 90 seconds): `online` only when a
-device credential was used within the TTL, otherwise `offline`. Revoked
-identities are `revoked` and omitted from operational lists unless
-`history=1` is requested. Sync-client operator lists likewise expose only
-recent active heartbeats.
+`TARGET_DEVICE_ONLINE_TTL_MS` (default: 30 seconds, ~3× a 10s hub
+heartbeat): `online` only when a device credential was used within the TTL,
+otherwise `offline`. Presence is TTL-after-last activity — there is no
+explicit offline or leave push. Revoked identities are `revoked` and omitted
+from operational lists unless `history=1` is requested. Sync-client operator
+lists likewise use `TARGET_SYNC_CLIENT_ONLINE_TTL_MS` (same default) against
+`last_seen_at` / recent heartbeats.
 
 A hub with wiped local data performs a fresh link and receives a new device
 identity even if its owner, email, or display name match an older entry. The
