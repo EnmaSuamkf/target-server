@@ -281,6 +281,9 @@ export const BLUEPRINTS = {
 	}),
 	"auth.login": Joi.object({ email: EMAIL, password: Joi.string().required() }),
 	"auth.forgot": Joi.object({ email: EMAIL }),
+	"auth.passwordReset": Joi.object({
+		deliver: Joi.string().valid("email", "link").required(),
+	}),
 	"auth.setup": Joi.object({ token: TOKEN, password: PASSWORD }),
 	"auth.reset": Joi.object({ token: TOKEN, password: PASSWORD }),
 

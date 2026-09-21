@@ -500,19 +500,29 @@ async function issueInvite(user) {
 	return { invite, mail };
 }
 
-async function issueReset(user) {
+/** Issue a password-reset token for `user`. `deliver: "email"` sends mail; `"link"` skips mail and returns the URL. */
+async function issueReset(user, { deliver = "email" } = {}) {
 	sweepExpiredResets();
 	invalidateResetTokens(user.id, "reset");
 	const raw = randomTokenBytes().toString("hex");
 	const tokenHash = hashToken(raw);
 	const expiresAt = new Date(Date.now() + 3600 * 1000).toISOString();
 	insertResetToken({ tokenHash, userId: user.id, kind: "reset", expiresAt });
-	const body = withToken(resetMail({ publicUrl: publicUrl({ host: HOST, port: PORT }), email: user.email }), raw);
-	try {
-		await sendMail({ to: user.email, ...body });
-	} catch (err) {
-		log(`reset mail failed for ${user.email}: ${String(err?.message ?? err)}`);
+	const origin = publicUrl({ host: HOST, port: PORT }).replace(/\/$/, "");
+	const resetUrl = `${origin}/reset?token=${raw}`;
+	const reset = { resetUrl, expiresAt };
+
+	let mail;
+	if (deliver === "email") {
+		const body = withToken(resetMail({ publicUrl: origin, email: user.email }), raw);
+		try {
+			mail = await sendMail({ to: user.email, ...body });
+		} catch (err) {
+			mail = { sent: false, transport: mailTransportName(), error: String(err?.message ?? err) };
+			log(`reset mail failed for ${user.email}: ${String(err?.message ?? err)}`);
+		}
 	}
+	return { reset, mail };
 }
 
 async function handleAuthRoute(req, res, pathname, url) {
@@ -609,8 +619,24 @@ async function handleAuthRoute(req, res, pathname, url) {
 		const v = validate("auth.forgot", body);
 		if (!v.ok) return sendJson(res, 422, { errors: v.errors });
 		const user = getAuthUserByEmail(v.value.email);
-		if (user?.passwordHash) await issueReset(user);
+		if (user?.passwordHash) await issueReset(user, { deliver: "email" });
 		return sendJson(res, 202, { ok: true });
+	}
+
+	// Authenticated session: request reset link for the logged-in user (email or copy link).
+	if (req.method === "POST" && pathname === "/api/auth/password-reset") {
+		const lim = checkRateLimit(req, "forgot");
+		if (lim.limited) return rateLimited(res, lim.retryAfter);
+		const user = await requireAuth(req, res);
+		if (!user) return;
+		if (!user.passwordHash) return sendJson(res, 409, { error: "no_password" });
+		const body = await readJson(req, res);
+		if (!body) return;
+		const v = validate("auth.passwordReset", body);
+		if (!v.ok) return sendJson(res, 422, { errors: v.errors });
+		const { reset, mail } = await issueReset(user, { deliver: v.value.deliver });
+		if (v.value.deliver === "link") return sendJson(res, 200, { reset: { resetUrl: reset.resetUrl, expiresAt: reset.expiresAt } });
+		return sendJson(res, 200, { ok: true, mail });
 	}
 
 	if (req.method === "POST" && pathname === "/api/auth/setup") {

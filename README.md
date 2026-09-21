@@ -408,7 +408,8 @@ All `GET /api/*` routes below require a session unless noted.
 - `POST /api/auth/login` — sign in (`admin@admin.com` on a fresh DB)
 - `POST /api/auth/logout` — sign out
 - `GET /api/auth/me` — current operator
-- `POST /api/auth/forgot-password` — email a reset link (always 202)
+- `POST /api/auth/forgot-password` — email a reset link (always 202; anonymous login/forgot flow, no URL in response)
+- `POST /api/auth/password-reset` — authenticated dashboard **Change password**: body `{ "deliver": "email" | "link" }` (email sends mail; `link` returns `reset.resetUrl` for copy)
 - `POST /api/auth/setup` — complete an invitation (`/setup?token=…`)
 - `POST /api/auth/reset-password` — set password from recovery link
 - `GET/POST /api/auth/users`, `PATCH/DELETE /api/auth/users/:id` — list, invite with `role_id`, reassign role, or delete human accounts
