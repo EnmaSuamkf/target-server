@@ -48,6 +48,34 @@ export async function forgotPassword(email: string) {
 	if (!res.ok && res.status !== 202) throw new Error(`/api/auth/forgot-password → ${res.status}`);
 }
 
+export type PasswordResetDeliver = "email" | "link";
+
+export async function requestPasswordReset(deliver: PasswordResetDeliver) {
+	const res = await fetch("/api/auth/password-reset", {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ deliver }),
+	});
+	const body = await res.json();
+	if (res.status === 409 && body.error === "no_password") {
+		return { ok: false as const, error: "no_password" as const };
+	}
+	if (res.status === 422) return { ok: false as const, errors: body.errors as FieldError[] };
+	if (!res.ok) throw new Error(`/api/auth/password-reset → ${res.status}`);
+	if (deliver === "link") {
+		return {
+			ok: true as const,
+			deliver: "link" as const,
+			reset: body.reset as { resetUrl: string; expiresAt: string },
+		};
+	}
+	return {
+		ok: true as const,
+		deliver: "email" as const,
+		mail: body.mail as { sent: boolean; transport?: string; error?: string },
+	};
+}
+
 export async function setupPassword(token: string, password: string) {
 	const res = await fetch("/api/auth/setup", {
 		method: "POST",

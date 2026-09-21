@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { kindLabel, kindTip } from "./api/kinds.ts";
-import { forgotPassword, logout } from "./api/auth.ts";
+import { logout, requestPasswordReset } from "./api/auth.ts";
 import type {
 	AuthUser,
 	EventsResponse,
@@ -41,21 +41,74 @@ const DEFAULT_PAGE_SIZE = 25;
 
 type DashboardTab = "activity" | "users" | "remote";
 
-function ChangePasswordButton({ email }: { email: string }) {
-	const [sent, setSent] = useState(false);
+function ChangePasswordButton() {
+	const rootRef = useRef<HTMLSpanElement>(null);
+	const [open, setOpen] = useState(false);
 	const [busy, setBusy] = useState(false);
+	const [feedback, setFeedback] = useState<null | "sent" | "copied">(null);
+	const [error, setError] = useState<string | null>(null);
 
-	async function onClick() {
+	const closeMenu = useCallback(() => {
+		setOpen(false);
+		setError(null);
+	}, []);
+
+	useEffect(() => {
+		if (!open) return;
+		function onKeyDown(e: KeyboardEvent) {
+			if (e.key === "Escape") closeMenu();
+		}
+		function onPointerDown(e: MouseEvent) {
+			const root = rootRef.current;
+			if (root && !root.contains(e.target as Node)) closeMenu();
+		}
+		document.addEventListener("keydown", onKeyDown);
+		document.addEventListener("mousedown", onPointerDown);
+		return () => {
+			document.removeEventListener("keydown", onKeyDown);
+			document.removeEventListener("mousedown", onPointerDown);
+		};
+	}, [open, closeMenu]);
+
+	async function onSendEmail() {
 		setBusy(true);
+		setError(null);
 		try {
-			await forgotPassword(email);
-			setSent(true);
+			const res = await requestPasswordReset("email");
+			if (!res.ok) {
+				setError(res.error === "no_password" ? "This account has no password (Google sign-in only)." : "Could not send reset email.");
+				return;
+			}
+			closeMenu();
+			setFeedback("sent");
+		} catch {
+			setError("Could not send reset email.");
 		} finally {
 			setBusy(false);
 		}
 	}
 
-	if (sent) {
+	async function onCopyLink() {
+		setBusy(true);
+		setError(null);
+		try {
+			const res = await requestPasswordReset("link");
+			if (!res.ok) {
+				setError(res.error === "no_password" ? "This account has no password (Google sign-in only)." : "Could not get reset link.");
+				return;
+			}
+			if (res.deliver !== "link") return;
+			await navigator.clipboard.writeText(res.reset.resetUrl);
+			closeMenu();
+			setFeedback("copied");
+		} catch {
+			setError("Could not copy reset link.");
+		} finally {
+			setBusy(false);
+		}
+	}
+
+	if (feedback === "sent") {
 		return (
 			<span className="topbar-pw-sent" title="Open the link in your email (or the server mail outbox in dev) to set a new password">
 				Reset link sent
@@ -63,10 +116,45 @@ function ChangePasswordButton({ email }: { email: string }) {
 		);
 	}
 
+	if (feedback === "copied") {
+		return (
+			<span className="topbar-pw-sent" title="Reset link expires in 1 hour">
+				Link copied
+			</span>
+		);
+	}
+
 	return (
-		<button type="button" className="btn btn--ghost btn--sm" disabled={busy} onClick={() => void onClick()}>
-			Change password
-		</button>
+		<span ref={rootRef} className="topbar-pw-dropdown">
+			<button
+				type="button"
+				className="btn btn--ghost btn--sm"
+				disabled={busy}
+				aria-expanded={open}
+				aria-haspopup="menu"
+				onClick={() => {
+					setOpen((was) => !was);
+					if (open) setError(null);
+				}}
+			>
+				Change password
+			</button>
+			{open ? (
+				<div className="topbar-pw-menu" role="menu" aria-label="Change password options">
+					<button type="button" role="menuitem" className="topbar-pw-menuitem" disabled={busy} onClick={() => void onSendEmail()}>
+						Send reset email
+					</button>
+					<button type="button" role="menuitem" className="topbar-pw-menuitem" disabled={busy} onClick={() => void onCopyLink()}>
+						Copy reset link
+					</button>
+					{error ? (
+						<p className="topbar-pw-error" role="alert">
+							{error}
+						</p>
+					) : null}
+				</div>
+			) : null}
+		</span>
 	);
 }
 
@@ -236,7 +324,7 @@ export function App({ user, onSignOut }: { user: AuthUser; onSignOut: () => void
 						{" · "}
 						{`live · refresh ${POLL_MS / 1000}s`}
 					</span>
-					<ChangePasswordButton email={user.email} />
+					<ChangePasswordButton />
 					<button type="button" className="btn btn--ghost btn--sm topbar-signout" onClick={() => void logout().then(onSignOut)}>
 						Sign out
 					</button>
@@ -246,7 +334,7 @@ export function App({ user, onSignOut }: { user: AuthUser; onSignOut: () => void
 			{user.usesDefaultPassword ? (
 				<div className="default-pw-banner">
 					The seeded admin account still uses the published default password —{" "}
-					<ChangePasswordButton email={user.email} /> or invite a replacement admin below.
+					<ChangePasswordButton /> or invite a replacement admin below.
 				</div>
 			) : null}
 

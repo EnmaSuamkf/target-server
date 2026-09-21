@@ -79,3 +79,49 @@ test("/login serves SPA shell", async () => {
 	assert.equal(res.status, 200);
 	assert.match(await res.text(), /<html/i);
 });
+
+test("password-reset requires session", async () => {
+	const res = await fetch(`${base}/api/auth/password-reset`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ deliver: "link" }),
+	});
+	assert.equal(res.status, 401);
+});
+
+test("authenticated password-reset link, email, and reset-password", async () => {
+	const cookie = await login(base);
+	const json = (deliver) =>
+		fetch(`${base}/api/auth/password-reset`, {
+			method: "POST",
+			headers: { cookie, "content-type": "application/json" },
+			body: JSON.stringify({ deliver }),
+		});
+
+	const linkRes = await json("link");
+	assert.equal(linkRes.status, 200);
+	const linkBody = await linkRes.json();
+	assert.match(linkBody.reset.resetUrl, /\/reset\?token=[0-9a-f]{64}/);
+	assert.ok(linkBody.reset.expiresAt);
+
+	const token = new URL(linkBody.reset.resetUrl).searchParams.get("token");
+	const newPassword = "new-admin-pass-target";
+	const resetRes = await fetch(`${base}/api/auth/reset-password`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ token, password: newPassword }),
+	});
+	assert.equal(resetRes.status, 200);
+
+	const cookie2 = await login(base, { password: newPassword });
+	const emailRes = await fetch(`${base}/api/auth/password-reset`, {
+		method: "POST",
+		headers: { cookie: cookie2, "content-type": "application/json" },
+		body: JSON.stringify({ deliver: "email" }),
+	});
+	assert.equal(emailRes.status, 200);
+	const emailBody = await emailRes.json();
+	assert.equal(emailBody.ok, true);
+	assert.ok(emailBody.mail);
+	assert.equal(emailBody.reset, undefined);
+});
