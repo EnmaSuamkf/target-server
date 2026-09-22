@@ -20,6 +20,30 @@ legacy.exec(`
 		activated_at TEXT,
 		last_login_at TEXT
 	);
+	CREATE TABLE auth_roles (
+		id TEXT PRIMARY KEY,
+		name TEXT NOT NULL UNIQUE,
+		is_system INTEGER NOT NULL DEFAULT 0,
+		created_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL
+	);
+	CREATE TABLE auth_role_permissions (
+		role_id TEXT NOT NULL,
+		permission TEXT NOT NULL CHECK (permission IN (
+			'activity.read',
+			'users.read',
+			'users.manage',
+			'remote.read',
+			'remote.workflows.manage',
+			'remote.workflows.execute',
+			'remote.templates.manage',
+			'remote.tcp-tools.manage',
+			'remote.rci.manage',
+			'devices.link',
+			'devices.manage'
+		)),
+		PRIMARY KEY (role_id, permission)
+	);
 `);
 legacy
 	.prepare(
@@ -27,6 +51,22 @@ legacy
 		 VALUES ('legacy-admin', 'legacy@example.test', 'admin', 1, '2026-01-01T00:00:00.000Z')`,
 	)
 	.run();
+legacy
+	.prepare(
+		`INSERT INTO auth_roles (id, name, is_system, created_at, updated_at)
+		 VALUES ('legacy-operator', 'Legacy Operator', 0, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
+	)
+	.run();
+for (const permission of [
+	"remote.read",
+	"remote.workflows.manage",
+	"remote.workflows.execute",
+	"remote.templates.manage",
+	"remote.tcp-tools.manage",
+	"remote.rci.manage",
+]) {
+	legacy.prepare("INSERT INTO auth_role_permissions (role_id, permission) VALUES (?, ?)").run("legacy-operator", permission);
+}
 legacy.close();
 
 process.env.TARGET_SERVER_DB = dbPath;
@@ -44,11 +84,62 @@ test("additive migration preserves legacy users and gives admin every catalogued
 	assert.equal(rbac.countUsersByRole(rbac.ADMIN_ROLE_ID), 1);
 });
 
+test("opening a pre-granular DB remaps old resource manage rows and grants workflow children", () => {
+	const operator = rbac.getRoleById("legacy-operator");
+	assert.ok(operator);
+	for (const removed of ["remote.templates.manage", "remote.tcp-tools.manage", "remote.rci.manage"]) {
+		assert.equal(operator.permissions.includes(removed), false);
+		assert.equal(rbac.isValidPermission(removed), false);
+	}
+	for (const granted of [
+		"remote.read",
+		"remote.workflows.manage",
+		"remote.workflows.execute",
+		"remote.workflows.create",
+		"remote.workflows.steps.add",
+		"remote.workflows.steps.edit",
+		"remote.templates.create",
+		"remote.templates.edit",
+		"remote.templates.delete",
+		"remote.templates.import",
+		"remote.templates.export",
+		"remote.tcp-tools.create",
+		"remote.tcp-tools.edit",
+		"remote.tcp-tools.delete",
+		"remote.tcp-tools.import",
+		"remote.tcp-tools.export",
+		"remote.rci.create",
+		"remote.rci.edit",
+		"remote.rci.delete",
+		"remote.rci.import",
+		"remote.rci.export",
+	]) {
+		assert.ok(operator.permissions.includes(granted), `missing ${granted}`);
+	}
+
+	const sql = rbac.open().prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'auth_role_permissions'").get().sql;
+	assert.ok(rbac.PERMISSIONS.every((permission) => sql.includes(`'${permission}'`)));
+	assert.ok(!sql.includes("'remote.templates.manage'"));
+	rbac.open().prepare("INSERT OR IGNORE INTO auth_role_permissions (role_id, permission) VALUES (?, ?)").run(
+		"legacy-operator",
+		"remote.templates.create",
+	);
+	assert.throws(
+		() => rbac.open().prepare("INSERT INTO auth_role_permissions (role_id, permission) VALUES (?, ?)").run("legacy-operator", "role.escalate"),
+		(error) => /CHECK|constraint/i.test(String(error.message)),
+	);
+});
+
 test("role functions reject unknown permissions and protect the system admin role", () => {
 	assert.ok(rbac.PERMISSIONS.every((permission) => rbac.isValidPermission(permission)));
 	assert.equal(rbac.isValidPermission("role.escalate"), false);
+	assert.equal(rbac.isValidPermission("remote.templates.manage"), false);
 	assert.throws(
 		() => rbac.createRole({ name: "Bad", permissions: ["anything.goes"] }),
+		(error) => error.code === "invalid_permission",
+	);
+	assert.throws(
+		() => rbac.createRole({ name: "Legacy manage", permissions: ["remote.tcp-tools.manage"] }),
 		(error) => error.code === "invalid_permission",
 	);
 	assert.throws(

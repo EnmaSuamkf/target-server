@@ -1,6 +1,6 @@
 import { useMemo, useState, type FormEvent } from "react";
 import { resetPassword, setupPassword } from "../api/auth.ts";
-import type { AuthUser, FieldError } from "../api/types.ts";
+import type { AuthSession, FieldError } from "../api/types.ts";
 import { TargetMark } from "./TargetMark.tsx";
 
 function fieldErrors(errors: FieldError[], field: string) {
@@ -12,7 +12,7 @@ export function TokenPasswordForm({
 	onSuccess,
 }: {
 	mode: "setup" | "reset";
-	onSuccess: (user: AuthUser) => void;
+	onSuccess: (session: AuthSession) => void;
 }) {
 	const token = useMemo(() => new URLSearchParams(location.search).get("token") ?? "", []);
 	const [password, setPassword] = useState("");
@@ -48,7 +48,7 @@ export function TokenPasswordForm({
 				else setFatal(mode === "setup" ? "This link is invalid or expired. Ask whoever invited you to resend." : "This link is invalid or expired.");
 				return;
 			}
-			onSuccess(res.user);
+			onSuccess({ user: res.user, catalog: res.catalog ?? { groups: [] } });
 		} finally {
 			setBusy(false);
 		}

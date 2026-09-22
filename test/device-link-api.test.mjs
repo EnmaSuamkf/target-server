@@ -124,6 +124,8 @@ test("device link requires a human session and permission for approval", async (
 	const activated = await consumed.json();
 	assert.ok(activated.device.id.startsWith("dev_"));
 	assert.ok(activated.device_secret);
+	assert.equal(activated.owner, undefined);
+	assert.equal(JSON.stringify(activated).includes("permissions"), false);
 
 	const replay = await request(`/api/device-links/requests/${link.request_id}/consume`, {
 		method: "POST",
@@ -169,7 +171,9 @@ test("optional mode preserves legacy sync registration during migration", async 
 		body: JSON.stringify({ name: "Legacy client" }),
 	});
 	assert.equal(legacy.status, 201);
-	assert.ok((await legacy.json()).client_token.startsWith("sync_"));
+	const body = await legacy.json();
+	assert.ok(body.client_token.startsWith("sync_"));
+	assert.equal(body.owner, null);
 });
 
 test("expired pairing credentials are rejected without exposing request state", async () => {

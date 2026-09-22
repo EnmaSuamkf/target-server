@@ -189,6 +189,13 @@ secret to UI/telemetry. A retry after an uncertain consume result must treat
 `409 consumed` as `relink_required`; it never causes the server to disclose a
 second copy.
 
+Consume still returns only the device identity and secret. Owner RBAC for the
+hub UI is not on this response: the first `POST /api/sync/register` and every
+later `POST /api/sync/heartbeat` attach `owner: { permissions, catalog }` from
+the device owner's current database role. That payload is display/UI
+configuration only. It does not authorize dashboard APIs and does not mix in
+device scopes (`ingest:write`, `sync:write`). See `docs/remote-sync.md`.
+
 ### 3. Human approval and denial
 
 `POST /api/device-links/requests/:requestId/approve` with a human session and
@@ -224,7 +231,8 @@ selects a human owner.
 
 `sync:write` permits only the hub's own current sync client and event/ack
 channels. `ingest:write` permits only its own reporting stream. Device scopes
-never permit user, role, device management, or arbitrary dashboard APIs.
+never permit user, role, device management, or arbitrary dashboard APIs, and
+are never folded into `owner.permissions` on register/heartbeat.
 
 ### Device-initiated remote disconnect
 

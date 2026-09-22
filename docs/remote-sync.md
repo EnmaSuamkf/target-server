@@ -15,12 +15,68 @@ authentication mechanisms:
 `POST /api/sync/register` is the first-contact exception: it creates a
 `client_id` and returns the client token. It is not an operator route.
 
+Register and heartbeat also include an `owner` object for hub UI configuration.
+This is display-only: it does not authorize dashboard APIs and is not stored
+on `client_token`. Device scopes (`ingest:write`, `sync:write`) stay on the
+device record and are never copied into `owner.permissions`.
+
+A linked device (owner known from device-link) receives the owner's current
+DB-role grants plus the same grouped catalogue as `/api/auth/me`. A legacy
+unlinked client receives `owner: null`; the server does not invent a user.
+
+```json
+{
+  "client_id": "client-id",
+  "client_token": "sync_…",
+  "created_at": "2026-09-21T21:00:00.000Z",
+  "owner": null
+}
+```
+
+Linked register / heartbeat:
+
+```json
+{
+  "ok": true,
+  "server_time": "2026-09-21T21:00:05.000Z",
+  "owner": {
+    "id": "user-id",
+    "permissions": ["remote.read", "remote.workflows.create"],
+    "catalog": {
+      "groups": [
+        {
+          "id": "client.remote",
+          "scope": "client",
+          "label": "Remote Control",
+          "description": "View connected Target hubs and their remote state",
+          "permissions": [
+            {
+              "id": "remote.read",
+              "label": "View Remote Control",
+              "description": "View Remote Control clients and state"
+            }
+          ]
+        }
+      ]
+    },
+    "granted": { "groups": [] }
+  }
+}
+```
+
+`owner.permissions` is resolved with `getAuthUserPermissions` from the current
+role. `owner.catalog` is `getPermissionCatalog()`. `owner.granted` is the same
+groups filtered to those ids. A role change is visible on the next heartbeat
+without re-register or a new device secret. Clients that ignore unknown fields
+keep working.
+
 ## Client protocol
 
 1. `POST /api/sync/register` with an optional `name` and `capabilities`.
-2. Persist the returned `client_token`.
+2. Persist the returned `client_token` (legacy) or keep using the device
+   credential (linked). Read `owner` for hub UI only.
 3. Send `POST /api/sync/heartbeat` with `status: "idle" | "busy"` and updated
-   capabilities whenever they change.
+   capabilities whenever they change. Use the latest `owner` if present.
 4. Poll `GET /api/sync/commands` with the client token, apply each command
    exactly once by `command.id`, then acknowledge it through
    `POST /api/sync/commands/:commandId/ack`.
@@ -105,14 +161,34 @@ All resource paths are scoped to one client; resources are never global.
 | Method | Path | Permission |
 | --- | --- | --- |
 | GET | `/api/sync/clients/:clientId/templates` | `remote.read` |
-| POST | `/api/sync/clients/:clientId/templates` | `remote.templates.manage` |
-| PATCH | `/api/sync/clients/:clientId/templates/:resourceId` | `remote.templates.manage` |
-| DELETE | `/api/sync/clients/:clientId/templates/:resourceId` | `remote.templates.manage` |
-| GET/POST/PATCH/DELETE | replace `templates` with `tcp-tools` | `remote.read` / `remote.tcp-tools.manage` |
-| GET/POST/PATCH/DELETE | replace `templates` with `resource-sets` | `remote.read` / `remote.rci.manage` |
+| POST | `/api/sync/clients/:clientId/templates` | `remote.templates.create` |
+| PATCH | `/api/sync/clients/:clientId/templates/:resourceId` | `remote.templates.edit` |
+| DELETE | `/api/sync/clients/:clientId/templates/:resourceId` | `remote.templates.delete` |
+| GET | `/api/sync/clients/:clientId/templates/export` | `remote.templates.export` |
+| POST | `/api/sync/clients/:clientId/templates/import` | `remote.templates.import` |
+| GET | `/api/sync/clients/:clientId/tcp-tools` | `remote.read` |
+| POST | `/api/sync/clients/:clientId/tcp-tools` | `remote.tcp-tools.create` |
+| PATCH | `/api/sync/clients/:clientId/tcp-tools/:resourceId` | `remote.tcp-tools.edit` |
+| DELETE | `/api/sync/clients/:clientId/tcp-tools/:resourceId` | `remote.tcp-tools.delete` |
+| GET | `/api/sync/clients/:clientId/tcp-tools/export` | `remote.tcp-tools.export` |
+| POST | `/api/sync/clients/:clientId/tcp-tools/import` | `remote.tcp-tools.import` |
+| GET | `/api/sync/clients/:clientId/resource-sets` | `remote.read` |
+| POST | `/api/sync/clients/:clientId/resource-sets` | `remote.rci.create` |
+| PATCH | `/api/sync/clients/:clientId/resource-sets/:resourceId` | `remote.rci.edit` |
+| DELETE | `/api/sync/clients/:clientId/resource-sets/:resourceId` | `remote.rci.delete` |
+| GET | `/api/sync/clients/:clientId/resource-sets/export` | `remote.rci.export` |
+| POST | `/api/sync/clients/:clientId/resource-sets/import` | `remote.rci.import` |
 
 `POST` and `PATCH` use the resource payload above. For `PATCH`, the
 `resource.id` must equal `:resourceId`. `DELETE` needs no request body.
+
+`GET .../export` returns a downloadable bundle
+`{ contract_version, domain, resources: [{ id, name, data }] }` (no secrets)
+with `content-disposition: attachment`. `POST .../import` accepts that shape
+(or `{ resources }`) and queues one upsert per resource; pass `Idempotency-Key`
+to retry the same bundle. Import uses the same sync/v2 capability check as
+create. Retired `remote.templates.manage` / `remote.tcp-tools.manage` /
+`remote.rci.manage` IDs are not accepted.
 
 The list response is:
 
@@ -187,9 +263,11 @@ Workflow controls remain under:
 - `GET /api/sync/clients` (`remote.read`)
 - `GET /api/sync/events` (`remote.read`)
 - `GET /api/sync/remote-workflows` and `/:remoteId` (`remote.read`)
-- create/edit/delete workflow and plan changes (`remote.workflows.manage`)
-- start/resume/restart and step run/abort/continue (`remote.workflows.execute`);
-  pause and plan edits remain workflow-management operations
+- `POST /api/sync/remote-workflows` (`remote.workflows.create`)
+- enqueue `step.add` / `step.edit` (`remote.workflows.steps.add` / `.steps.edit`)
+- delete, set context, run-selection, pause and leftover plan mutations
+  (`remote.workflows.manage`)
+- start/resume/restart and step run/abort/continue (`remote.workflows.execute`)
 
 Clients report supported workflow commands through `capabilities.commands`.
 Resource support is additional; it does not imply workflow support.

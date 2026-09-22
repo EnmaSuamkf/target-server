@@ -248,6 +248,32 @@ export interface AuthUser {
 	inviteAllowGoogle?: boolean;
 }
 
+export type PermissionScope = "server" | "client";
+
+export interface PermissionCatalogEntry {
+	id: string;
+	label: string;
+	description: string;
+}
+
+export interface PermissionCatalogGroup {
+	id: string;
+	scope: PermissionScope;
+	label: string;
+	description: string;
+	permissions: PermissionCatalogEntry[];
+}
+
+/** Closed RBAC vocabulary from GET /api/auth/me — presentation only, not authorization. */
+export interface PermissionCatalog {
+	groups: PermissionCatalogGroup[];
+}
+
+export interface AuthSession {
+	user: AuthUser;
+	catalog: PermissionCatalog;
+}
+
 export interface AuthRole {
 	id: string;
 	name: string;
@@ -407,4 +433,18 @@ export interface RemoteResource {
 export interface RemoteResourcesResponse {
 	contract_version: "sync/v2";
 	resources: RemoteResource[];
+}
+
+export interface RemoteResourceActions {
+	create: boolean;
+	edit: boolean;
+	delete: boolean;
+	import: boolean;
+	export: boolean;
+}
+
+export interface RemoteResourceBundle {
+	contract_version?: "sync/v2";
+	domain?: "templates" | "tcp_tools" | "resource_sets";
+	resources: Array<{ id: string; name: string; data?: Record<string, unknown> }>;
 }

@@ -31,10 +31,11 @@ test("sync API: register → heartbeat → poll → ack", async () => {
 		}),
 	});
 	assert.equal(reg.status, 201);
-	const { client_id, client_token, created_at } = await reg.json();
+	const { client_id, client_token, created_at, owner } = await reg.json();
 	assert.ok(client_id);
 	assert.ok(client_token.startsWith("sync_"));
 	assert.ok(created_at);
+	assert.equal(owner, null);
 
 	const auth = { authorization: `Bearer ${client_token}`, "content-type": "application/json" };
 
@@ -47,6 +48,7 @@ test("sync API: register → heartbeat → poll → ack", async () => {
 	const hbBody = await hb.json();
 	assert.equal(hbBody.ok, true);
 	assert.ok(hbBody.server_time);
+	assert.equal(hbBody.owner, null);
 
 	const { enqueueCommand, getCommandById } = await import("../db.mjs");
 	const remoteId = "rwf_e2e_1";

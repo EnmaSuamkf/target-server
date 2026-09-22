@@ -53,6 +53,7 @@ import {
 	getAuthUserByGoogleSub,
 	getAuthUserById,
 	getAuthUserInviteMethods,
+	getAuthUserPermissions,
 	invalidateResetTokens,
 	isPublishedRenderDeploy,
 	insertResetToken,
@@ -117,6 +118,7 @@ import {
 	disconnectLinkedDevice,
 	getDeviceDisconnectAuthentication,
 	consumeDeviceRequestNonce,
+	getPermissionCatalog,
 } from "./db.mjs";
 import { initMailer, isDeliveringTransport, mailTransportName, sendMail } from "./mailer.mjs";
 import { inviteMail, resetMail, withToken } from "./mail-templates.mjs";
@@ -440,7 +442,39 @@ async function serveStatic(res, urlPath) {
 async function userResponse(user) {
 	const usesDefaultPassword =
 		user.email === DEFAULT_ADMIN_EMAIL && (await adminHasDefaultPassword());
-	return { ...publicUser(user), usesDefaultPassword };
+	return {
+		user: { ...publicUser(user), usesDefaultPassword },
+		catalog: getPermissionCatalog(),
+	};
+}
+
+/** Hub UI config from the device owner's current DB role. Not a grant; not device scopes. */
+function ownerGrantedCatalog(permissions) {
+	const allowed = new Set(permissions);
+	return {
+		groups: getPermissionCatalog()
+			.groups.map((group) => ({
+				id: group.id,
+				scope: group.scope,
+				label: group.label,
+				description: group.description,
+				permissions: group.permissions.filter((entry) => allowed.has(entry.id)),
+			}))
+			.filter((group) => group.permissions.length > 0),
+	};
+}
+
+function ownerConnectionPayload(ownerUserId) {
+	if (!ownerUserId) return null;
+	const owner = getAuthUserById(ownerUserId);
+	if (!owner) return null;
+	const permissions = getAuthUserPermissions(owner);
+	return {
+		id: owner.id,
+		permissions,
+		catalog: getPermissionCatalog(),
+		granted: ownerGrantedCatalog(permissions),
+	};
 }
 
 /** Defaults match dashboard invite form (see docs/invite-activation-methods.md). */
@@ -593,7 +627,7 @@ async function handleAuthRoute(req, res, pathname, url) {
 		if (!user || !user.passwordHash || !ok) return sendJson(res, 401, { error: "invalid_credentials" });
 		recordLogin(user.id);
 		signInUser(user, res);
-		return sendJson(res, 200, { user: await userResponse(user) });
+		return sendJson(res, 200, await userResponse(user));
 	}
 
 	if (req.method === "POST" && pathname === "/api/auth/logout") {
@@ -608,7 +642,7 @@ async function handleAuthRoute(req, res, pathname, url) {
 	if (req.method === "GET" && pathname === "/api/auth/me") {
 		const user = await authenticate(req, res);
 		if (!user) return sendJson(res, 401, { error: "unauthorized" });
-		return sendJson(res, 200, { user: await userResponse(user) });
+		return sendJson(res, 200, await userResponse(user));
 	}
 
 	if (req.method === "POST" && pathname === "/api/auth/forgot-password") {
@@ -662,7 +696,7 @@ async function handleAuthRoute(req, res, pathname, url) {
 		const fresh = getAuthUserById(user.id);
 		recordLogin(fresh.id);
 		signInUser(fresh, res);
-		return sendJson(res, 200, { user: await userResponse(fresh) });
+		return sendJson(res, 200, await userResponse(fresh));
 	}
 
 	if (req.method === "POST" && pathname === "/api/auth/reset-password") {
@@ -686,7 +720,7 @@ async function handleAuthRoute(req, res, pathname, url) {
 		const fresh = bumpTokenVersion(user.id);
 		recordLogin(fresh.id);
 		signInUser(fresh, res);
-		return sendJson(res, 200, { user: await userResponse(fresh) });
+		return sendJson(res, 200, await userResponse(fresh));
 	}
 
 	if (req.method === "GET" && pathname === "/api/auth/users") {
@@ -740,7 +774,7 @@ async function handleAuthRoute(req, res, pathname, url) {
 	if (req.method === "GET" && pathname === "/api/auth/roles") {
 		const actor = await requirePermission(req, res, "users.manage");
 		if (!actor) return;
-		return sendJson(res, 200, { roles: listRoles() });
+		return sendJson(res, 200, { roles: listRoles(), catalog: getPermissionCatalog() });
 	}
 
 	if (req.method === "POST" && pathname === "/api/auth/roles") {
@@ -913,19 +947,104 @@ function validateClientAgent(client, agent) {
 }
 
 const RESOURCE_DOMAINS = {
-	templates: { capability: "templates", permission: "remote.templates.manage", command: "template" },
-	"tcp-tools": { capability: "tcp_tools", permission: "remote.tcp-tools.manage", command: "tcp-tool" },
-	"resource-sets": { capability: "resource_sets", permission: "remote.rci.manage", command: "resource-set" },
+	templates: {
+		capability: "templates",
+		command: "template",
+		permissions: {
+			create: "remote.templates.create",
+			edit: "remote.templates.edit",
+			delete: "remote.templates.delete",
+			import: "remote.templates.import",
+			export: "remote.templates.export",
+		},
+	},
+	"tcp-tools": {
+		capability: "tcp_tools",
+		command: "tcp-tool",
+		permissions: {
+			create: "remote.tcp-tools.create",
+			edit: "remote.tcp-tools.edit",
+			delete: "remote.tcp-tools.delete",
+			import: "remote.tcp-tools.import",
+			export: "remote.tcp-tools.export",
+		},
+	},
+	"resource-sets": {
+		capability: "resource_sets",
+		command: "resource-set",
+		permissions: {
+			create: "remote.rci.create",
+			edit: "remote.rci.edit",
+			delete: "remote.rci.delete",
+			import: "remote.rci.import",
+			export: "remote.rci.export",
+		},
+	},
 };
+
+const EXECUTE_STEP_COMMANDS = new Set(["step.run", "step.abort", "step.continue"]);
 
 function resourceDomainInfo(pathDomain) {
 	return RESOURCE_DOMAINS[pathDomain] ?? null;
 }
 
-function clientSupportsResourceCommand(client, info, type) {
+function resourcePermissionForMethod(info, method) {
+	if (method === "POST") return info.permissions.create;
+	if (method === "PATCH") return info.permissions.edit;
+	if (method === "DELETE") return info.permissions.delete;
+	return null;
+}
+
+function workflowCommandPermission(type) {
+	if (type === "step.add") return "remote.workflows.steps.add";
+	if (type === "step.edit") return "remote.workflows.steps.edit";
+	if (RUN_WORKFLOW_COMMANDS.has(type) || EXECUTE_STEP_COMMANDS.has(type)) return "remote.workflows.execute";
+	return "remote.workflows.manage";
+}
+
+function clientSupportsResourceDomain(client, info) {
 	const resources = client.capabilities?.resources;
+	return resources?.version === 2 && resources?.[info.capability] === true;
+}
+
+function clientSupportsResourceCommand(client, info, type) {
 	const commands = client.capabilities?.commands;
-	return resources?.version === 2 && resources?.[info.capability] === true && Array.isArray(commands) && commands.includes(type);
+	return clientSupportsResourceDomain(client, info) && Array.isArray(commands) && commands.includes(type);
+}
+
+function publicResourceBundleItem(resource) {
+	return { id: resource.id, name: resource.name, data: resource.data ?? {} };
+}
+
+function queueResourceCommand({ clientId, pathDomain, info, operation, resource = null, resourceId = null, idempotencyKey = null }) {
+	const commandType = `${info.command}.${operation}`;
+	const commandId = idempotencyKey ? stableResourceCommandId(clientId, pathDomain, idempotencyKey) : null;
+	let command = commandId ? getCommandById(commandId) : null;
+	if (command) {
+		if (command.clientId !== clientId || command.type !== commandType) {
+			const err = new Error("idempotency_key_conflict");
+			err.code = "idempotency_key_conflict";
+			throw err;
+		}
+		return { command, idempotent: true };
+	}
+	const payload = operation === "upsert" ? { resource } : { resource_id: resourceId };
+	try {
+		command = enqueueCommand({
+			id: commandId,
+			clientId,
+			remoteId: remoteResourceChannelId(clientId, info.capability),
+			type: commandType,
+			payload,
+		});
+	} catch (err) {
+		if (err.statusCode === 400) throw err;
+		if (commandId && getCommandById(commandId)) return { command: getCommandById(commandId), idempotent: true };
+		throw err;
+	}
+	if (operation === "upsert") upsertRemoteResource({ clientId, domain: info.capability, resource });
+	else deleteRemoteResource(clientId, info.capability, resourceId);
+	return { command, idempotent: false };
 }
 
 function stableResourceCommandId(clientId, domain, idempotencyKey) {
@@ -1065,6 +1184,7 @@ async function handleSyncRoute(req, res, pathname, url) {
 			client_id: client.id,
 			...(clientToken ? { client_token: clientToken } : {}),
 			created_at: client.createdAt,
+			owner: ownerConnectionPayload(device?.ownerUserId ?? client.ownerUserId),
 		});
 	}
 
@@ -1090,7 +1210,11 @@ async function handleSyncRoute(req, res, pathname, url) {
 			capabilities,
 			lastSeenAt: now,
 		});
-		return sendJson(res, 200, { ok: true, server_time: now });
+		return sendJson(res, 200, {
+			ok: true,
+			server_time: now,
+			owner: ownerConnectionPayload(client.ownerUserId),
+		});
 	}
 
 	if (req.method === "GET" && pathname === "/api/sync/commands") {
@@ -1181,6 +1305,73 @@ async function handleSyncRoute(req, res, pathname, url) {
 async function handleOperatorSyncRoute(req, res, pathname, url) {
 	if (!isOperatorSyncPath(pathname, req.method)) return false;
 
+	const resourceBundleMatch = pathname.match(/^\/api\/sync\/clients\/([^/]+)\/(templates|tcp-tools|resource-sets)\/(export|import)$/);
+	if (resourceBundleMatch && ((resourceBundleMatch[3] === "export" && req.method === "GET") || (resourceBundleMatch[3] === "import" && req.method === "POST"))) {
+		const [, clientId, pathDomain, action] = resourceBundleMatch;
+		const info = resourceDomainInfo(pathDomain);
+		const client = getClientById(clientId);
+		if (!client) return sendJson(res, 404, { error: "client_not_found" });
+		if (!(await requireCapability(req, res, info.permissions[action]))) return true;
+		if (action === "export") {
+			if (!clientSupportsResourceDomain(client, info)) {
+				return sendJson(res, 409, {
+					error: "capability_unsupported",
+					detail: `Client does not support sync/v2 ${info.capability}`,
+					required: { resources_version: 2, domain: info.capability },
+				});
+			}
+			const bundle = {
+				contract_version: "sync/v2",
+				domain: info.capability,
+				resources: listRemoteResources(clientId, info.capability).map(publicResourceBundleItem),
+			};
+			return sendJson(res, 200, bundle, {
+				"content-disposition": `attachment; filename="${pathDomain}-export.json"`,
+			});
+		}
+		const commandType = `${info.command}.upsert`;
+		if (!clientSupportsResourceCommand(client, info, commandType)) {
+			return sendJson(res, 409, {
+				error: "capability_unsupported",
+				detail: `Client does not support sync/v2 ${commandType}`,
+				required: { resources_version: 2, domain: info.capability, command: commandType },
+			});
+		}
+		const body = await readJson(req, res);
+		if (!body) return true;
+		const v = validate("sync.resource.import", body);
+		if (!v.ok) return sendJson(res, 422, { errors: v.errors });
+		if (v.value.domain && v.value.domain !== info.capability) {
+			return sendJson(res, 422, {
+				errors: [{ field: "domain", code: "mismatch", message: "Bundle domain must match the import path" }],
+			});
+		}
+		const headerKey = req.headers["idempotency-key"];
+		const bundleKey = typeof headerKey === "string" && headerKey.trim() ? headerKey.trim() : null;
+		const commands = [];
+		let created = false;
+		try {
+			for (const resource of v.value.resources) {
+				const idempotencyKey = bundleKey ? `${bundleKey}:${resource.id}` : null;
+				const queued = queueResourceCommand({
+					clientId,
+					pathDomain,
+					info,
+					operation: "upsert",
+					resource,
+					idempotencyKey,
+				});
+				if (!queued.idempotent) created = true;
+				commands.push({ command: syncCommandToApi(queued.command), idempotent: queued.idempotent });
+			}
+		} catch (err) {
+			if (err.code === "idempotency_key_conflict") return sendJson(res, 409, { error: "idempotency_key_conflict" });
+			if (err.statusCode === 400) return sendJson(res, 422, { errors: err.errors });
+			throw err;
+		}
+		return sendJson(res, created ? 201 : 200, { contract_version: "sync/v2", commands });
+	}
+
 	const resourceMatch = pathname.match(/^\/api\/sync\/clients\/([^/]+)\/(templates|tcp-tools|resource-sets)(?:\/([^/]+))?$/);
 	if (resourceMatch) {
 		const [, clientId, pathDomain, resourceId] = resourceMatch;
@@ -1195,7 +1386,8 @@ async function handleOperatorSyncRoute(req, res, pathname, url) {
 			});
 		}
 		if (!["POST", "PATCH", "DELETE"].includes(req.method) || (req.method === "POST" && resourceId)) return false;
-		if (!(await requireCapability(req, res, info.permission))) return true;
+		const permission = resourcePermissionForMethod(info, req.method);
+		if (!(await requireCapability(req, res, permission))) return true;
 		const operation = req.method === "DELETE" ? "delete" : "upsert";
 		const commandType = `${info.command}.${operation}`;
 		if (!clientSupportsResourceCommand(client, info, commandType)) {
@@ -1220,32 +1412,23 @@ async function handleOperatorSyncRoute(req, res, pathname, url) {
 		if (!effectiveResourceId) return sendJson(res, 422, { error: "resource_id_required" });
 		const headerKey = req.headers["idempotency-key"];
 		const idempotencyKey = typeof headerKey === "string" && headerKey.trim() ? headerKey.trim() : null;
-		const commandId = idempotencyKey ? stableResourceCommandId(clientId, pathDomain, idempotencyKey) : null;
-		let command = commandId ? getCommandById(commandId) : null;
-		if (command) {
-			if (command.clientId !== clientId || command.type !== commandType) {
-				return sendJson(res, 409, { error: "idempotency_key_conflict" });
-			}
-			return sendJson(res, 200, { command: syncCommandToApi(command), idempotent: true });
-		}
 		try {
-			command = enqueueCommand({
-				id: commandId,
+			const queued = queueResourceCommand({
 				clientId,
-				remoteId: remoteResourceChannelId(clientId, info.capability),
-				type: commandType,
-				payload: operation === "upsert" ? { resource } : { resource_id: effectiveResourceId },
+				pathDomain,
+				info,
+				operation,
+				resource,
+				resourceId: effectiveResourceId,
+				idempotencyKey,
 			});
+			if (queued.idempotent) return sendJson(res, 200, { command: syncCommandToApi(queued.command), idempotent: true });
+			return sendJson(res, operation === "upsert" ? 201 : 200, { command: syncCommandToApi(queued.command), idempotent: false });
 		} catch (err) {
+			if (err.code === "idempotency_key_conflict") return sendJson(res, 409, { error: "idempotency_key_conflict" });
 			if (err.statusCode === 400) return sendJson(res, 422, { errors: err.errors });
-			// Concurrent requests using the same idempotency key resolve to the
-			// command already written by the winner, without applying a second change.
-			if (commandId && getCommandById(commandId)) return sendJson(res, 200, { command: syncCommandToApi(getCommandById(commandId)), idempotent: true });
 			throw err;
 		}
-		if (operation === "upsert") upsertRemoteResource({ clientId, domain: info.capability, resource });
-		else deleteRemoteResource(clientId, info.capability, effectiveResourceId);
-		return sendJson(res, operation === "upsert" ? 201 : 200, { command: syncCommandToApi(command), idempotent: false });
 	}
 
 	if (req.method === "GET" && pathname === "/api/sync/clients") {
@@ -1316,7 +1499,7 @@ async function handleOperatorSyncRoute(req, res, pathname, url) {
 	}
 
 	if (req.method === "POST" && pathname === "/api/sync/remote-workflows") {
-		if (!(await requireCapability(req, res, "remote.workflows.manage"))) return true;
+		if (!(await requireCapability(req, res, "remote.workflows.create"))) return true;
 		const body = await readJson(req, res);
 		if (!body) return true;
 		const v = validate("sync.remote_workflow.create", body);
@@ -1391,9 +1574,7 @@ async function handleOperatorSyncRoute(req, res, pathname, url) {
 		if (!body) return true;
 		const v = validate("sync.remote_workflow.enqueue_command", body);
 		if (!v.ok) return sendJson(res, 400, { errors: v.errors });
-		const permission = RUN_WORKFLOW_COMMANDS.has(v.value.type) || ["step.run", "step.abort", "step.continue"].includes(v.value.type)
-			? "remote.workflows.execute"
-			: "remote.workflows.manage";
+		const permission = workflowCommandPermission(v.value.type);
 		if (!(await requireCapability(req, res, permission))) return true;
 		const remoteWorkflow = getRemoteWorkflowById(commandMatch[1]);
 		if (!remoteWorkflow) return sendJson(res, 404, { error: "remote_workflow_not_found" });

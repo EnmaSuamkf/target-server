@@ -339,6 +339,20 @@ export const BLUEPRINTS = {
 			data: Joi.object().unknown(true).default({}),
 		}).required(),
 	}),
+	"sync.resource.import": Joi.object({
+		contract_version: Joi.string().valid("sync/v2").optional(),
+		domain: Joi.string().valid("templates", "tcp_tools", "resource_sets").optional(),
+		resources: Joi.array()
+			.items(
+				Joi.object({
+					id: STRING.required(),
+					name: STRING.required(),
+					data: Joi.object().unknown(true).default({}),
+				}),
+			)
+			.min(1)
+			.required(),
+	}),
 	"device_link.create": Joi.object({
 		contract_version: Joi.string().valid("device-link/v1").required(),
 		device_name: Joi.string().trim().min(1).max(200).required(),

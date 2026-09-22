@@ -1,4 +1,4 @@
-import type { AuthRole, AuthUser, FieldError, InviteActivation, InviteLinks } from "./types.ts";
+import type { AuthRole, AuthSession, AuthUser, FieldError, InviteActivation, InviteLinks, PermissionCatalog } from "./types.ts";
 
 async function parseJson<T>(res: Response): Promise<T> {
 	const body = (await res.json()) as T;
@@ -15,11 +15,11 @@ export async function fetchAuthProviders(): Promise<AuthProviders> {
 	return parseJson<AuthProviders>(res);
 }
 
-export async function fetchMe(): Promise<{ user: AuthUser } | null> {
+export async function fetchMe(): Promise<AuthSession | null> {
 	const res = await fetch("/api/auth/me");
 	if (res.status === 401) return null;
 	if (!res.ok) throw new Error(`/api/auth/me → ${res.status}`);
-	return parseJson(res);
+	return parseJson<AuthSession>(res);
 }
 
 export async function login(email: string, password: string) {
@@ -32,7 +32,7 @@ export async function login(email: string, password: string) {
 	if (res.status === 401) return { ok: false as const, error: "invalid_credentials" as const };
 	if (res.status === 422) return { ok: false as const, errors: body.errors as FieldError[] };
 	if (!res.ok) throw new Error(`/api/auth/login → ${res.status}`);
-	return { ok: true as const, user: body.user as AuthUser };
+	return { ok: true as const, user: body.user as AuthUser, catalog: body.catalog as PermissionCatalog };
 }
 
 export async function logout() {
@@ -87,7 +87,7 @@ export async function setupPassword(token: string, password: string) {
 	if (res.status === 409) return { ok: false as const, error: "already_activated" as const };
 	if (res.status === 422) return { ok: false as const, errors: body.errors as FieldError[] };
 	if (!res.ok) throw new Error(`/api/auth/setup → ${res.status}`);
-	return { ok: true as const, user: body.user as AuthUser };
+	return { ok: true as const, user: body.user as AuthUser, catalog: body.catalog as PermissionCatalog };
 }
 
 export async function resetPassword(token: string, password: string) {
@@ -100,7 +100,7 @@ export async function resetPassword(token: string, password: string) {
 	if (res.status === 400) return { ok: false as const, error: "invalid_or_expired" as const };
 	if (res.status === 422) return { ok: false as const, errors: body.errors as FieldError[] };
 	if (!res.ok) throw new Error(`/api/auth/reset-password → ${res.status}`);
-	return { ok: true as const, user: body.user as AuthUser };
+	return { ok: true as const, user: body.user as AuthUser, catalog: body.catalog as PermissionCatalog };
 }
 
 export async function listAuthUsers() {
@@ -132,7 +132,7 @@ export async function createAuthUser(email: string, roleId: string, activation?:
 export async function listAuthRoles() {
 	const res = await fetch("/api/auth/roles");
 	if (!res.ok) throw new Error(`/api/auth/roles → ${res.status}`);
-	return (await res.json()) as { roles: AuthRole[] };
+	return (await res.json()) as { roles: AuthRole[]; catalog: PermissionCatalog };
 }
 
 async function roleMutation(method: "POST" | "PATCH", path: string, name: string, permissions: string[]) {

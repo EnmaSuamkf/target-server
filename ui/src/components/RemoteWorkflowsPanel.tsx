@@ -193,6 +193,14 @@ const EMPTY_STEP: StepFormState = {
 	retryInterval: "0",
 };
 
+interface WorkflowPermissions {
+	create: boolean;
+	addStep: boolean;
+	editStep: boolean;
+	manage: boolean;
+	execute: boolean;
+}
+
 interface Props {
 	clients: SyncClientRow[] | null;
 	workflows: SyncRemoteWorkflowRow[] | null;
@@ -201,6 +209,7 @@ interface Props {
 	selectedId: string;
 	onSelect: (id: string) => void;
 	onRefresh: () => void;
+	permissions: WorkflowPermissions;
 	onOpenInActivity: (localWorkflowId: string) => void;
 }
 
@@ -213,6 +222,7 @@ export function RemoteWorkflowsPanel({
 	selectedId,
 	onSelect,
 	onRefresh,
+	permissions,
 	onOpenInActivity,
 }: Props) {
 	const [clientId, setClientId] = useState("");
@@ -260,10 +270,10 @@ export function RemoteWorkflowsPanel({
 	const allStepsSelected = steps.length > 0 && selectedStepKeys.size === steps.length;
 	const persistRunSelection = useCallback(
 		async (keys: string[]) => {
-			if (!selected) return;
+			if (!selected || !permissions.manage) return;
 			await updateRemoteStepRunSelection(selected.id, keys);
 		},
-		[selected],
+		[selected, permissions.manage],
 	);
 
 	const toggleStepKey = useCallback(
@@ -452,7 +462,7 @@ export function RemoteWorkflowsPanel({
 
 	return (
 		<div className="sync-remote">
-			<form className="sync-create sync-create--stacked" onSubmit={(e) => void onCreate(e)}>
+			{permissions.create ? <form className="sync-create sync-create--stacked" onSubmit={(e) => void onCreate(e)}>
 				<div className="sync-create-row">
 					<select
 						className="select"
@@ -534,7 +544,7 @@ export function RemoteWorkflowsPanel({
 						onChange={(e) => setCreateContext(e.target.value)}
 					/>
 				</label>
-			</form>
+			</form> : null}
 			{fieldErrors(errors, "client_id")
 				.concat(fieldErrors(errors, "name"))
 				.concat(fieldErrors(errors, "agent"))
@@ -544,7 +554,7 @@ export function RemoteWorkflowsPanel({
 					</div>
 				))}
 			{notice ? <div className="panel-note">{notice}</div> : null}
-			{activeClients.length === 0 && clients ? (
+			{permissions.create && activeClients.length === 0 && clients ? (
 				<div className="empty">Register a sync client before creating remote workflows.</div>
 			) : null}
 
@@ -641,45 +651,51 @@ export function RemoteWorkflowsPanel({
 					) : null}
 
 					<div className="sync-control-actions">
-						<button
-							type="button"
-							className="btn btn--sm btn--on"
-							disabled={startDisabled}
-							title={
-								selectedStepKeys.size === 0
-									? "Select at least one step to run"
-									: pendingRunCommand
-										? "Run command already queued or in flight"
-										: isRunningOnClient
-											? "Workflow is already running on the client"
-											: runAction === "restart"
-												? "Restart resets the selected steps and runs them again"
-												: undefined
-							}
-							onClick={() => void runCommand(`workflow.${runAction}`, runPayload())}
-						>
-							{pendingRunCommand
-								? "Run queued…"
-								: isRunningOnClient
-									? "Running…"
-									: `${runLabels[runAction]}${selectedStepKeys.size > 0 ? ` (${selectedStepKeys.size})` : ""}`}
-						</button>
-						<button
-							type="button"
-							className="btn btn--sm"
-							disabled={busy || !isRunningOnClient}
-							onClick={() => void runCommand("workflow.pause")}
-						>
-							Pause
-						</button>
-						<button
-							type="button"
-							className="btn btn--sm btn--danger"
-							disabled={busy || selected.status === "deleting"}
-							onClick={() => void onDelete()}
-						>
-							Delete
-						</button>
+						{permissions.execute ? (
+							<button
+								type="button"
+								className="btn btn--sm btn--on"
+								disabled={startDisabled}
+								title={
+									selectedStepKeys.size === 0
+										? "Select at least one step to run"
+										: pendingRunCommand
+											? "Run command already queued or in flight"
+											: isRunningOnClient
+												? "Workflow is already running on the client"
+												: runAction === "restart"
+													? "Restart resets the selected steps and runs them again"
+													: undefined
+								}
+								onClick={() => void runCommand(`workflow.${runAction}`, runPayload())}
+							>
+								{pendingRunCommand
+									? "Run queued…"
+									: isRunningOnClient
+										? "Running…"
+										: `${runLabels[runAction]}${selectedStepKeys.size > 0 ? ` (${selectedStepKeys.size})` : ""}`}
+							</button>
+						) : null}
+						{permissions.manage ? (
+							<button
+								type="button"
+								className="btn btn--sm"
+								disabled={busy || !isRunningOnClient}
+								onClick={() => void runCommand("workflow.pause")}
+							>
+								Pause
+							</button>
+						) : null}
+						{permissions.manage ? (
+							<button
+								type="button"
+								className="btn btn--sm btn--danger"
+								disabled={busy || selected.status === "deleting"}
+								onClick={() => void onDelete()}
+							>
+								Delete
+							</button>
+						) : null}
 					</div>
 
 					<section className="sync-section">
@@ -691,15 +707,19 @@ export function RemoteWorkflowsPanel({
 							value={contextDraft || selected.conversation_context || ""}
 							onChange={(e) => setContextDraft(e.target.value)}
 							placeholder="Background for every step…"
+							disabled={!permissions.manage}
+							readOnly={!permissions.manage}
 						/>
-						<button
-							type="button"
-							className="btn btn--sm btn--on"
-							disabled={busy}
-							onClick={() => void saveContext()}
-						>
-							Save context
-						</button>
+						{permissions.manage ? (
+							<button
+								type="button"
+								className="btn btn--sm btn--on"
+								disabled={busy}
+								onClick={() => void saveContext()}
+							>
+								Save context
+							</button>
+						) : null}
 					</section>
 
 					{selected.local_id ? (
@@ -740,7 +760,7 @@ export function RemoteWorkflowsPanel({
 						<div className="sync-section-head">
 							<h4>Steps</h4>
 							<div className="sync-section-head-actions">
-								{steps.length > 0 ? (
+								{steps.length > 0 && (permissions.execute || permissions.manage) ? (
 									<label className="sync-step-select-all">
 										<input
 											type="checkbox"
@@ -750,7 +770,7 @@ export function RemoteWorkflowsPanel({
 										Run all
 									</label>
 								) : null}
-								{!addOpen ? (
+								{permissions.addStep && !addOpen ? (
 									<button type="button" className="btn btn--sm btn--on" onClick={() => setAddOpen(true)}>
 										+ Add step
 									</button>
@@ -758,7 +778,7 @@ export function RemoteWorkflowsPanel({
 							</div>
 						</div>
 
-						{addOpen ? (
+						{permissions.addStep && addOpen ? (
 							<StepEditorForm
 								form={stepForm}
 								setForm={setStepForm}
@@ -780,13 +800,15 @@ export function RemoteWorkflowsPanel({
 									className={`sync-step-plan__item${selectedStepKeys.has(step.step_key) ? " sync-step-plan__item--selected" : ""}`}
 								>
 									<div className="sync-step-plan__head">
-										<label className="sync-step-run-check" title="Include this step when Start/Resume/Restart runs">
-											<input
-												type="checkbox"
-												checked={selectedStepKeys.has(step.step_key)}
-												onChange={() => toggleStepKey(step.step_key)}
-											/>
-										</label>
+										{permissions.execute || permissions.manage ? (
+											<label className="sync-step-run-check" title="Include this step when Start/Resume/Restart runs">
+												<input
+													type="checkbox"
+													checked={selectedStepKeys.has(step.step_key)}
+													onChange={() => toggleStepKey(step.step_key)}
+												/>
+											</label>
+										) : null}
 										<span className="sync-step-plan__index">{idx + 1}</span>
 										<span className="sync-step-plan__title">{step.description}</span>
 										<StepClientBadge
@@ -796,48 +818,56 @@ export function RemoteWorkflowsPanel({
 											showRunStatus={!selected.local_id}
 										/>
 										<div className="sync-step-plan__actions">
-											<button
-												type="button"
-												className="btn btn--sm"
-												disabled={busy || idx === 0}
-												onClick={() => void runCommand("step.move", { step_key: step.step_key, to_index: idx - 1 })}
-											>
-												↑
-											</button>
-											<button
-												type="button"
-												className="btn btn--sm"
-												disabled={busy || idx >= steps.length - 1}
-												onClick={() => void runCommand("step.move", { step_key: step.step_key, to_index: idx + 1 })}
-											>
-												↓
-											</button>
-											<button
-												type="button"
-												className="btn btn--sm"
-												disabled={busy}
-												onClick={() => {
-													setEditingKey(editingKey === step.step_key ? null : step.step_key);
-													setStepForm({
-														description: step.description,
-														acceptanceCriteria: step.acceptance_criteria ?? "",
-														manualReview: step.manual_review,
-														useSubagent: step.use_subagent,
-														maxRetries: String(step.max_retries),
-														retryInterval: String(step.retry_interval_seconds),
-													});
-												}}
-											>
-												{editingKey === step.step_key ? "Close" : "Edit"}
-											</button>
-											<button
-												type="button"
-												className="btn btn--sm"
-												disabled={busy}
-												onClick={() => void runCommand("step.remove", { step_key: step.step_key })}
-											>
-												Remove
-											</button>
+											{permissions.manage ? (
+												<>
+													<button
+														type="button"
+														className="btn btn--sm"
+														disabled={busy || idx === 0}
+														onClick={() => void runCommand("step.move", { step_key: step.step_key, to_index: idx - 1 })}
+													>
+														↑
+													</button>
+													<button
+														type="button"
+														className="btn btn--sm"
+														disabled={busy || idx >= steps.length - 1}
+														onClick={() => void runCommand("step.move", { step_key: step.step_key, to_index: idx + 1 })}
+													>
+														↓
+													</button>
+												</>
+											) : null}
+											{permissions.editStep ? (
+												<button
+													type="button"
+													className="btn btn--sm"
+													disabled={busy}
+													onClick={() => {
+														setEditingKey(editingKey === step.step_key ? null : step.step_key);
+														setStepForm({
+															description: step.description,
+															acceptanceCriteria: step.acceptance_criteria ?? "",
+															manualReview: step.manual_review,
+															useSubagent: step.use_subagent,
+															maxRetries: String(step.max_retries),
+															retryInterval: String(step.retry_interval_seconds),
+														});
+													}}
+												>
+													{editingKey === step.step_key ? "Close" : "Edit"}
+												</button>
+											) : null}
+											{permissions.manage ? (
+												<button
+													type="button"
+													className="btn btn--sm"
+													disabled={busy}
+													onClick={() => void runCommand("step.remove", { step_key: step.step_key })}
+												>
+													Remove
+												</button>
+											) : null}
 										</div>
 									</div>
 									<div className="sync-step-plan__meta">
@@ -848,7 +878,7 @@ export function RemoteWorkflowsPanel({
 											<span className="badge badge--neutral">{`retries ${step.max_retries}`}</span>
 										) : null}
 									</div>
-									{editingKey === step.step_key ? (
+									{permissions.editStep && editingKey === step.step_key ? (
 										<StepEditorForm
 											form={stepForm}
 											setForm={setStepForm}

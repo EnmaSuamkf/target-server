@@ -13,6 +13,8 @@ const tmpDb = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "target-sync-opera
 process.env.TARGET_SERVER_DB = tmpDb;
 process.env.PORT = "0";
 process.env.HOST = "127.0.0.1";
+process.env.TARGET_MAIL_TRANSPORT = "file";
+process.env.TARGET_SKIP_UI_STALE_CHECK = "1";
 
 const { server } = await import("../server.mjs");
 if (!server.listening) await once(server, "listening");
@@ -214,4 +216,167 @@ test("operator sync: create remote workflow and client receives command", async 
 test("operator sync: rejects unauthenticated operator routes", async () => {
 	const res = await fetch(`${base}/api/sync/clients`);
 	assert.equal(res.status, 401);
+});
+
+async function createLimitedOperator(adminCookie, { email, name, permissions, password }) {
+	const roleResponse = await fetch(`${base}/api/auth/roles`, {
+		method: "POST",
+		headers: { "content-type": "application/json", cookie: adminCookie },
+		body: JSON.stringify({ name, permissions }),
+	});
+	const role = (await roleResponse.json()).role;
+	const inviteResponse = await fetch(`${base}/api/auth/users`, {
+		method: "POST",
+		headers: { "content-type": "application/json", cookie: adminCookie },
+		body: JSON.stringify({ email, role_id: role.id }),
+	});
+	const invite = await inviteResponse.json();
+	const token = new URL(invite.invite.setupUrl).searchParams.get("token");
+	const setup = await fetch(`${base}/api/auth/setup`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ token, password }),
+	});
+	return setup.headers.get("set-cookie")?.split(";")[0];
+}
+
+test("operator sync: workflow mutations check action-level permissions", async () => {
+	const admin = await login(base);
+	const creator = await createLimitedOperator(admin, {
+		email: "wf-creator@example.com",
+		name: "Workflow creator",
+		permissions: ["remote.read", "remote.workflows.create"],
+		password: "wf-creator-pass-12",
+	});
+	const stepper = await createLimitedOperator(admin, {
+		email: "wf-stepper@example.com",
+		name: "Workflow stepper",
+		permissions: ["remote.read", "remote.workflows.steps.add", "remote.workflows.steps.edit"],
+		password: "wf-stepper-pass-12",
+	});
+	const manager = await createLimitedOperator(admin, {
+		email: "wf-manager@example.com",
+		name: "Workflow manager",
+		permissions: ["remote.read", "remote.workflows.manage"],
+		password: "wf-manager-pass-12",
+	});
+	const runner = await createLimitedOperator(admin, {
+		email: "wf-runner@example.com",
+		name: "Workflow runner",
+		permissions: ["remote.read", "remote.workflows.execute"],
+		password: "wf-runner-pass-12",
+	});
+
+	const reg = await fetch(`${base}/api/sync/register`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({
+			name: "Permission Client",
+			capabilities: { commands: ["workflow.create", "step.add", "step.edit", "workflow.start", "workflow.delete"] },
+		}),
+	});
+	const { client_id } = await reg.json();
+
+	const deniedCreate = await fetch(`${base}/api/sync/remote-workflows`, {
+		method: "POST",
+		headers: { "content-type": "application/json", cookie: manager },
+		body: JSON.stringify({ client_id, name: "Denied create" }),
+	});
+	assert.equal(deniedCreate.status, 403);
+	assert.deepEqual(await deniedCreate.json(), { error: "forbidden", permission: "remote.workflows.create" });
+
+	const created = await fetch(`${base}/api/sync/remote-workflows`, {
+		method: "POST",
+		headers: { "content-type": "application/json", cookie: creator },
+		body: JSON.stringify({ client_id, name: "Created by limited role" }),
+	});
+	assert.equal(created.status, 201);
+	const remoteId = (await created.json()).remote_workflow.id;
+
+	const deniedAdd = await fetch(`${base}/api/sync/remote-workflows/${remoteId}/commands`, {
+		method: "POST",
+		headers: { "content-type": "application/json", cookie: creator },
+		body: JSON.stringify({ type: "step.add", payload: { step_key: "s1", description: "Add me" } }),
+	});
+	assert.equal(deniedAdd.status, 403);
+	assert.deepEqual(await deniedAdd.json(), { error: "forbidden", permission: "remote.workflows.steps.add" });
+
+	const added = await fetch(`${base}/api/sync/remote-workflows/${remoteId}/commands`, {
+		method: "POST",
+		headers: { "content-type": "application/json", cookie: stepper },
+		body: JSON.stringify({ type: "step.add", payload: { step_key: "s1", description: "Add me" } }),
+	});
+	assert.equal(added.status, 201);
+
+	const deniedEdit = await fetch(`${base}/api/sync/remote-workflows/${remoteId}/commands`, {
+		method: "POST",
+		headers: { "content-type": "application/json", cookie: manager },
+		body: JSON.stringify({ type: "step.edit", payload: { step_key: "s1", description: "Edited" } }),
+	});
+	assert.equal(deniedEdit.status, 403);
+	assert.deepEqual(await deniedEdit.json(), { error: "forbidden", permission: "remote.workflows.steps.edit" });
+
+	const edited = await fetch(`${base}/api/sync/remote-workflows/${remoteId}/commands`, {
+		method: "POST",
+		headers: { "content-type": "application/json", cookie: stepper },
+		body: JSON.stringify({ type: "step.edit", payload: { step_key: "s1", description: "Edited" } }),
+	});
+	assert.equal(edited.status, 201);
+
+	const deniedStart = await fetch(`${base}/api/sync/remote-workflows/${remoteId}/commands`, {
+		method: "POST",
+		headers: { "content-type": "application/json", cookie: manager },
+		body: JSON.stringify({ type: "workflow.start", payload: { step_keys: ["s1"] } }),
+	});
+	assert.equal(deniedStart.status, 403);
+	assert.deepEqual(await deniedStart.json(), { error: "forbidden", permission: "remote.workflows.execute" });
+
+	const started = await fetch(`${base}/api/sync/remote-workflows/${remoteId}/commands`, {
+		method: "POST",
+		headers: { "content-type": "application/json", cookie: runner },
+		body: JSON.stringify({ type: "workflow.start", payload: { step_keys: ["s1"] } }),
+	});
+	assert.equal(started.status, 201);
+
+	const deniedContext = await fetch(`${base}/api/sync/remote-workflows/${remoteId}`, {
+		method: "PATCH",
+		headers: { "content-type": "application/json", cookie: creator },
+		body: JSON.stringify({ conversation_context: "Nope" }),
+	});
+	assert.equal(deniedContext.status, 403);
+	assert.deepEqual(await deniedContext.json(), { error: "forbidden", permission: "remote.workflows.manage" });
+
+	const deniedSelection = await fetch(`${base}/api/sync/remote-workflows/${remoteId}/run-selection`, {
+		method: "PATCH",
+		headers: { "content-type": "application/json", cookie: runner },
+		body: JSON.stringify({ step_keys: ["s1"] }),
+	});
+	assert.equal(deniedSelection.status, 403);
+	assert.deepEqual(await deniedSelection.json(), { error: "forbidden", permission: "remote.workflows.manage" });
+
+	const context = await fetch(`${base}/api/sync/remote-workflows/${remoteId}`, {
+		method: "PATCH",
+		headers: { "content-type": "application/json", cookie: manager },
+		body: JSON.stringify({ conversation_context: "Updated" }),
+	});
+	assert.equal(context.status, 200);
+	const selection = await fetch(`${base}/api/sync/remote-workflows/${remoteId}/run-selection`, {
+		method: "PATCH",
+		headers: { "content-type": "application/json", cookie: manager },
+		body: JSON.stringify({ step_keys: ["s1"] }),
+	});
+	assert.equal(selection.status, 200);
+
+	const deniedDelete = await fetch(`${base}/api/sync/remote-workflows/${remoteId}`, {
+		method: "DELETE",
+		headers: { cookie: runner },
+	});
+	assert.equal(deniedDelete.status, 403);
+	assert.deepEqual(await deniedDelete.json(), { error: "forbidden", permission: "remote.workflows.manage" });
+
+	const deleted = await fetch(`${base}/api/sync/remote-workflows/${remoteId}`, {
+		method: "DELETE",
+		headers: { cookie: manager },
+	});
+	assert.equal(deleted.status, 200);
 });

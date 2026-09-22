@@ -20,26 +20,124 @@ export const DEFAULT_ADMIN_EMAIL = "admin@admin.com";
 export const DEFAULT_ADMIN_PASSWORD = "password-target-server";
 
 /**
+ * Presentation groups for the closed RBAC catalogue. Session/UI code should
+ * read `getPermissionCatalog()` rather than inventing a second vocabulary.
+ */
+export const PERMISSION_GROUPS = Object.freeze([
+	{ id: "server.activity", scope: "server", label: "Activity", description: "View reporting data on this dashboard server" },
+	{ id: "server.users", scope: "server", label: "Users", description: "View and manage dashboard accounts and roles" },
+	{ id: "server.devices", scope: "server", label: "Devices", description: "Approve and manage linked Target hubs" },
+	{ id: "client.remote", scope: "client", label: "Remote Control", description: "View connected Target hubs and their remote state" },
+	{ id: "client.workflows", scope: "client", label: "Workflows", description: "Create, edit and run workflows on a connected Target hub" },
+	{ id: "client.templates", scope: "client", label: "Templates", description: "Manage templates on a connected Target hub" },
+	{ id: "client.tcp", scope: "client", label: "TCP tools", description: "Manage TCP tools on a connected Target hub" },
+	{ id: "client.rci", scope: "client", label: "RCI", description: "Manage RCI resource sets on a connected Target hub" },
+]);
+
+/**
  * The complete RBAC vocabulary. This is the single application catalogue:
  * checks and role writes must use these IDs rather than client-supplied
- * capability strings.
+ * capability strings. Every entry carries a server|client scope and a group.
  */
 export const PERMISSION_CATALOG = Object.freeze([
-	{ id: "activity.read", description: "View Activity and reporting data" },
-	{ id: "users.read", description: "View users, roles and invitations" },
-	{ id: "users.manage", description: "Manage users, roles and invitations" },
-	{ id: "remote.read", description: "View Remote Control clients and state" },
-	{ id: "remote.workflows.manage", description: "Create and modify remote workflows" },
-	{ id: "remote.workflows.execute", description: "Start, pause, resume and restart remote workflows" },
-	{ id: "remote.templates.manage", description: "Manage remote workflow templates" },
-	{ id: "remote.tcp-tools.manage", description: "Manage remote TCP tools" },
-	{ id: "remote.rci.manage", description: "Manage remote RCI resources" },
-	{ id: "devices.link", description: "Approve or deny device-link requests" },
-	{ id: "devices.manage", description: "List, rotate and revoke linked devices" },
+	{ id: "activity.read", label: "View Activity", description: "View Activity and reporting data", scope: "server", group: "server.activity" },
+	{ id: "users.read", label: "View users", description: "View users, roles and invitations", scope: "server", group: "server.users" },
+	{ id: "users.manage", label: "Manage users and roles", description: "Manage users, roles and invitations", scope: "server", group: "server.users" },
+	{ id: "devices.link", label: "Approve or deny device-link requests", description: "Approve or deny device-link requests", scope: "server", group: "server.devices" },
+	{ id: "devices.manage", label: "Manage linked devices", description: "List, rotate and revoke linked devices", scope: "server", group: "server.devices" },
+	{ id: "remote.read", label: "View Remote Control", description: "View Remote Control clients and state", scope: "client", group: "client.remote" },
+	{ id: "remote.workflows.create", label: "Create workflows", description: "Create remote workflows", scope: "client", group: "client.workflows" },
+	{ id: "remote.workflows.steps.add", label: "Add workflow steps", description: "Add steps to remote workflows", scope: "client", group: "client.workflows" },
+	{ id: "remote.workflows.steps.edit", label: "Edit workflow steps", description: "Edit steps on remote workflows", scope: "client", group: "client.workflows" },
+	{ id: "remote.workflows.manage", label: "Manage remote workflows", description: "Delete remote workflows, set conversation context and choose run selection", scope: "client", group: "client.workflows" },
+	{ id: "remote.workflows.execute", label: "Execute remote workflows", description: "Start, pause, resume and restart remote workflows", scope: "client", group: "client.workflows" },
+	{ id: "remote.templates.create", label: "Create templates", description: "Create remote workflow templates", scope: "client", group: "client.templates" },
+	{ id: "remote.templates.edit", label: "Edit templates", description: "Edit remote workflow templates", scope: "client", group: "client.templates" },
+	{ id: "remote.templates.delete", label: "Delete templates", description: "Delete remote workflow templates", scope: "client", group: "client.templates" },
+	{ id: "remote.templates.import", label: "Import templates", description: "Import remote workflow templates", scope: "client", group: "client.templates" },
+	{ id: "remote.templates.export", label: "Export templates", description: "Export remote workflow templates", scope: "client", group: "client.templates" },
+	{ id: "remote.tcp-tools.create", label: "Create TCP tools", description: "Create remote TCP tools", scope: "client", group: "client.tcp" },
+	{ id: "remote.tcp-tools.edit", label: "Edit TCP tools", description: "Edit remote TCP tools", scope: "client", group: "client.tcp" },
+	{ id: "remote.tcp-tools.delete", label: "Delete TCP tools", description: "Delete remote TCP tools", scope: "client", group: "client.tcp" },
+	{ id: "remote.tcp-tools.import", label: "Import TCP tools", description: "Import remote TCP tools", scope: "client", group: "client.tcp" },
+	{ id: "remote.tcp-tools.export", label: "Export TCP tools", description: "Export remote TCP tools", scope: "client", group: "client.tcp" },
+	{ id: "remote.rci.create", label: "Create RCI resources", description: "Create remote RCI resources", scope: "client", group: "client.rci" },
+	{ id: "remote.rci.edit", label: "Edit RCI resources", description: "Edit remote RCI resources", scope: "client", group: "client.rci" },
+	{ id: "remote.rci.delete", label: "Delete RCI resources", description: "Delete remote RCI resources", scope: "client", group: "client.rci" },
+	{ id: "remote.rci.import", label: "Import RCI resources", description: "Import remote RCI resources", scope: "client", group: "client.rci" },
+	{ id: "remote.rci.export", label: "Export RCI resources", description: "Export remote RCI resources", scope: "client", group: "client.rci" },
 ]);
 export const PERMISSIONS = Object.freeze(PERMISSION_CATALOG.map(({ id }) => id));
 export const ADMIN_ROLE_ID = "admin";
 const PERMISSION_SET = new Set(PERMISSIONS);
+
+/** Retired resource-level IDs expanded into per-action children on open. */
+const LEGACY_RESOURCE_PERMISSIONS = Object.freeze({
+	"remote.templates.manage": [
+		"remote.templates.create",
+		"remote.templates.edit",
+		"remote.templates.delete",
+		"remote.templates.import",
+		"remote.templates.export",
+	],
+	"remote.tcp-tools.manage": [
+		"remote.tcp-tools.create",
+		"remote.tcp-tools.edit",
+		"remote.tcp-tools.delete",
+		"remote.tcp-tools.import",
+		"remote.tcp-tools.export",
+	],
+	"remote.rci.manage": [
+		"remote.rci.create",
+		"remote.rci.edit",
+		"remote.rci.delete",
+		"remote.rci.import",
+		"remote.rci.export",
+	],
+});
+const REMOVED_PERMISSIONS = Object.freeze(Object.keys(LEGACY_RESOURCE_PERMISSIONS));
+const WORKFLOW_MANAGE_GRANTS = Object.freeze([
+	"remote.workflows.create",
+	"remote.workflows.steps.add",
+	"remote.workflows.steps.edit",
+]);
+
+const PERMISSION_CATALOG_VIEW = Object.freeze({
+	groups: Object.freeze(
+		PERMISSION_GROUPS.map((group) =>
+			Object.freeze({
+				id: group.id,
+				scope: group.scope,
+				label: group.label,
+				description: group.description,
+				permissions: Object.freeze(
+					PERMISSION_CATALOG.filter((entry) => entry.group === group.id).map((entry) =>
+						Object.freeze({
+							id: entry.id,
+							label: entry.label,
+							description: entry.description,
+						}),
+					),
+				),
+			}),
+		),
+	),
+});
+
+/** Closed catalogue grouped by scope for session and UI rendering. */
+export function getPermissionCatalog() {
+	return PERMISSION_CATALOG_VIEW;
+}
+
+function permissionCheckValues() {
+	return PERMISSIONS.map((permission) => `'${permission}'`).join(", ");
+}
+
+function expandStoredPermission(permission) {
+	if (Object.hasOwn(LEGACY_RESOURCE_PERMISSIONS, permission)) return LEGACY_RESOURCE_PERMISSIONS[permission];
+	return PERMISSION_SET.has(permission) ? [permission] : [];
+}
+
 export const DEVICE_SCOPES = Object.freeze(["ingest:write", "sync:write"]);
 const DEVICE_SCOPE_SET = new Set(DEVICE_SCOPES);
 
@@ -252,19 +350,7 @@ function migrateRbacSchema(database) {
 			);
 			CREATE TABLE IF NOT EXISTS auth_role_permissions (
 				role_id     TEXT NOT NULL,
-				permission  TEXT NOT NULL CHECK (permission IN (
-					'activity.read',
-					'users.read',
-					'users.manage',
-					'remote.read',
-					'remote.workflows.manage',
-					'remote.workflows.execute',
-					'remote.templates.manage',
-					'remote.tcp-tools.manage',
-					'remote.rci.manage',
-					'devices.link',
-					'devices.manage'
-				)),
+				permission  TEXT NOT NULL CHECK (permission IN (${permissionCheckValues()})),
 				PRIMARY KEY (role_id, permission)
 			);
 			CREATE INDEX IF NOT EXISTS idx_auth_role_permissions_role
@@ -284,6 +370,7 @@ function migrateRbacSchema(database) {
 				ON auth_role_audit(role_id, created_at DESC);
 		`);
 		ensureRbacPermissionConstraint(database);
+		migrateLegacyRbacPermissions(database);
 		database
 			.prepare(
 				`INSERT INTO auth_roles (id, name, is_system, created_at, updated_at)
@@ -318,27 +405,66 @@ function migrateRbacSchema(database) {
 }
 
 /**
- * SQLite cannot widen a CHECK constraint in place. Older installations have
- * auth_role_permissions restricted to the pre-device catalogue, so rebuild
- * that small relation transactionally before seeding the protected admin role.
+ * SQLite cannot widen a CHECK constraint in place. Rebuild the small
+ * relation whenever its allowed list does not contain every current
+ * PERMISSIONS id (or still lists a retired resource-level id). Existing
+ * rows are remapped before the new CHECK is applied so a naive copy of
+ * `remote.*.manage` cannot fail the insert.
  */
 function ensureRbacPermissionConstraint(database) {
 	const row = database.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'auth_role_permissions'").get();
-	if (row?.sql?.includes("'devices.link'") && row.sql.includes("'devices.manage'")) return;
-	const values = PERMISSIONS.map((permission) => `'${permission}'`).join(", ");
+	const sql = row?.sql ?? "";
+	const missingCurrent = PERMISSIONS.some((permission) => !sql.includes(`'${permission}'`));
+	const listsRemoved = REMOVED_PERMISSIONS.some((permission) => sql.includes(`'${permission}'`));
+	if (!missingCurrent && !listsRemoved) return;
+	const existing = database.prepare("SELECT role_id, permission FROM auth_role_permissions").all();
+	const values = permissionCheckValues();
 	database.exec(`
 		CREATE TABLE auth_role_permissions_next (
 			role_id     TEXT NOT NULL,
 			permission  TEXT NOT NULL CHECK (permission IN (${values})),
 			PRIMARY KEY (role_id, permission)
 		);
-		INSERT INTO auth_role_permissions_next (role_id, permission)
-			SELECT role_id, permission FROM auth_role_permissions;
+	`);
+	const insert = database.prepare(
+		"INSERT OR IGNORE INTO auth_role_permissions_next (role_id, permission) VALUES (?, ?)",
+	);
+	for (const { role_id, permission } of existing) {
+		for (const mapped of expandStoredPermission(permission)) insert.run(role_id, mapped);
+	}
+	database.exec(`
 		DROP TABLE auth_role_permissions;
 		ALTER TABLE auth_role_permissions_next RENAME TO auth_role_permissions;
-		CREATE INDEX idx_auth_role_permissions_role
+		CREATE INDEX IF NOT EXISTS idx_auth_role_permissions_role
 			ON auth_role_permissions(role_id);
 	`);
+}
+
+/**
+ * Additive data migration: expand retired resource `*.manage` rows into the
+ * five action IDs, then grant create/step abilities to roles that already
+ * had `remote.workflows.manage`. Safe to repeat.
+ */
+function migrateLegacyRbacPermissions(database) {
+	const insert = database.prepare(
+		"INSERT OR IGNORE INTO auth_role_permissions (role_id, permission) VALUES (?, ?)",
+	);
+	const remove = database.prepare(
+		"DELETE FROM auth_role_permissions WHERE role_id = ? AND permission = ?",
+	);
+	for (const [legacy, children] of Object.entries(LEGACY_RESOURCE_PERMISSIONS)) {
+		const rows = database.prepare("SELECT role_id FROM auth_role_permissions WHERE permission = ?").all(legacy);
+		for (const { role_id } of rows) {
+			for (const child of children) insert.run(role_id, child);
+			remove.run(role_id, legacy);
+		}
+	}
+	const workflowRoles = database
+		.prepare("SELECT role_id FROM auth_role_permissions WHERE permission = 'remote.workflows.manage'")
+		.all();
+	for (const { role_id } of workflowRoles) {
+		for (const child of WORKFLOW_MANAGE_GRANTS) insert.run(role_id, child);
+	}
 }
 
 /** Additive schema for the device-link/v1 identity and pairing lifecycle. */

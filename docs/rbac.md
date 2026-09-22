@@ -6,24 +6,64 @@ authorization mechanism.
 
 ## Permission catalogue
 
-Roles contain only these permission IDs:
+Roles contain only these permission IDs. `db.mjs` (`PERMISSION_CATALOG` /
+`getPermissionCatalog()`) is the application source of truth. Unknown strings
+are rejected with a validation error. Resource-domain `*.manage` IDs
+(`remote.templates.manage`, `remote.tcp-tools.manage`, `remote.rci.manage`) are
+not live; they were replaced by create / edit / delete / import / export.
 
-| Permission | Allows |
-| --- | --- |
-| `activity.read` | Read Activity, events, instances and workflows |
-| `users.read` | Read dashboard accounts |
-| `users.manage` | Invite users and manage users/roles |
-| `remote.read` | Read Remote Control clients, workflows and resources |
-| `remote.workflows.manage` | Create and edit remote workflows |
-| `remote.workflows.execute` | Start, resume and restart remote workflows; run, abort or continue steps |
-| `remote.templates.manage` | Manage a client's remote templates |
-| `remote.tcp-tools.manage` | Manage a client's remote TCP tools |
-| `remote.rci.manage` | Manage a client's remote resource sets |
-| `devices.link` | Approve or deny a device-link request in the browser. This assigns the approved hub to the signed-in authorized human; it is not a dashboard/device credential. |
-| `devices.manage` | List and revoke linked device identities (and manage their lifecycle). This is separate from approving a one-time link. |
+### Server
 
-`db.mjs` is the application source of truth for this closed catalogue. Unknown
-permission strings are rejected with a validation error.
+| Permission | Group | Allows |
+| --- | --- | --- |
+| `activity.read` | Activity | Read Activity, events, instances and workflows |
+| `users.read` | Users | Read dashboard accounts |
+| `users.manage` | Users | Invite users and manage users/roles |
+| `devices.link` | Devices | Approve or deny a device-link request in the browser. This assigns the approved hub to the signed-in authorized human; it is not a dashboard/device credential. |
+| `devices.manage` | Devices | List and revoke linked device identities (and manage their lifecycle). This is separate from approving a one-time link. |
+
+### Client
+
+| Permission | Group | Allows |
+| --- | --- | --- |
+| `remote.read` | Remote Control | Read Remote Control clients, workflows and resources |
+| `remote.workflows.create` | Workflows | Create remote workflows |
+| `remote.workflows.steps.add` | Workflows | Add steps to remote workflows |
+| `remote.workflows.steps.edit` | Workflows | Edit steps on remote workflows |
+| `remote.workflows.manage` | Workflows | Delete remote workflows, set conversation context and choose run selection |
+| `remote.workflows.execute` | Workflows | Start, pause, resume and restart remote workflows; run, abort or continue steps |
+| `remote.templates.create` | Templates | Create a client's remote templates |
+| `remote.templates.edit` | Templates | Edit a client's remote templates |
+| `remote.templates.delete` | Templates | Delete a client's remote templates |
+| `remote.templates.import` | Templates | Import a client's remote templates |
+| `remote.templates.export` | Templates | Export a client's remote templates |
+| `remote.tcp-tools.create` | TCP tools | Create a client's remote TCP tools |
+| `remote.tcp-tools.edit` | TCP tools | Edit a client's remote TCP tools |
+| `remote.tcp-tools.delete` | TCP tools | Delete a client's remote TCP tools |
+| `remote.tcp-tools.import` | TCP tools | Import a client's remote TCP tools |
+| `remote.tcp-tools.export` | TCP tools | Export a client's remote TCP tools |
+| `remote.rci.create` | RCI | Create a client's remote resource sets |
+| `remote.rci.edit` | RCI | Edit a client's remote resource sets |
+| `remote.rci.delete` | RCI | Delete a client's remote resource sets |
+| `remote.rci.import` | RCI | Import a client's remote resource sets |
+| `remote.rci.export` | RCI | Export a client's remote resource sets |
+
+### Additive migration
+
+Opening an older database remaps retired IDs without a separate upgrade step:
+
+1. `remote.templates.manage` / `remote.tcp-tools.manage` / `remote.rci.manage`
+   rows expand to that domain's five children, then the old rows are deleted.
+2. Any role that already has `remote.workflows.manage` also receives
+   `remote.workflows.create`, `remote.workflows.steps.add` and
+   `remote.workflows.steps.edit`.
+3. The system `admin` role is seeded with every current catalogue ID; unknown
+   admin rows are dropped.
+4. The SQLite `CHECK` on `auth_role_permissions.permission` is rebuilt so it
+   accepts the new IDs and rejects the retired `*.manage` strings.
+
+The migration is additive and repeatable. Role create/update still rejects
+unknown IDs.
 
 ## System administrator
 
@@ -83,19 +123,44 @@ Invite example:
 ## Session responses and denied access
 
 `POST /api/auth/login`, `POST /api/auth/setup`, `POST /api/auth/reset-password`,
-and `GET /api/auth/me` return a `user` containing:
+and `GET /api/auth/me` return `{ user, catalog }`. `GET /api/auth/roles` includes
+the same `catalog` so the Users tab does not need a second source.
+
+`user.permissions` is the granted ID list from the current database role — that
+is what authorization and `hasPermission` use. `catalog.groups` is the full
+closed vocabulary (scope, group id, labels, descriptions, permission entries)
+for UI rendering. The catalog blob is not an authorization decision.
 
 ```json
 {
-  "id": "user-id",
-  "email": "operator@example.com",
-  "role": "role-id",
-  "permissions": ["activity.read"]
+  "user": {
+    "id": "user-id",
+    "email": "operator@example.com",
+    "role": "role-id",
+    "permissions": ["activity.read"]
+  },
+  "catalog": {
+    "groups": [
+      {
+        "id": "server.activity",
+        "scope": "server",
+        "label": "Activity",
+        "description": "View reporting data on this dashboard server",
+        "permissions": [
+          {
+            "id": "activity.read",
+            "label": "View Activity",
+            "description": "View Activity and reporting data"
+          }
+        ]
+      }
+    ]
+  }
 }
 ```
 
 The server resolves permissions from the current database role for each
-request, not from a stale JWT claim.
+request, not from a stale JWT claim and not from `catalog`.
 
 | Response | Meaning | Integrator action |
 | --- | --- | --- |
