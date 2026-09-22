@@ -33,6 +33,7 @@ import { RemoteResourcesPanel } from "./components/RemoteResourcesPanel.tsx";
 import { SyncClientsPanel } from "./components/SyncClientsPanel.tsx";
 import { DevicesPanel } from "./components/DevicesPanel.tsx";
 import { UsersPanel } from "./components/UsersPanel.tsx";
+import { LibraryPanel } from "./components/LibraryPanel.tsx";
 import { WorkflowDetail } from "./components/WorkflowDetail.tsx";
 import { WorkflowsTable } from "./components/WorkflowsTable.tsx";
 import { useApi } from "./hooks/useApi.ts";
@@ -42,7 +43,7 @@ import { compactNumber, localToIso } from "./lib/format.ts";
 const POLL_MS = 4000;
 const DEFAULT_PAGE_SIZE = 25;
 
-type DashboardTab = "activity" | "users" | "remote";
+type DashboardTab = "activity" | "users" | "remote" | "library";
 
 function ChangePasswordButton() {
 	const rootRef = useRef<HTMLSpanElement>(null);
@@ -191,13 +192,15 @@ export function App({ user, catalog = null, onSignOut }: { user: AuthUser; catal
 	const rciActions = resourceActions("remote.rci");
 	const canManageDevices = can("devices.manage");
 	const canSeeRemoteArea = canRemote || canManageDevices;
+	const canLibrary = can("templates.read") || can("tcp-tools.read") || can("rci.read");
 	const availableTabs = useMemo<DashboardTab[]>(
 		() => [
 			...(canActivity ? ["activity" as const] : []),
+			...(canLibrary ? ["library" as const] : []),
 			...(canUsers ? ["users" as const] : []),
 			...(canSeeRemoteArea ? ["remote" as const] : []),
 		],
-		[canActivity, canUsers, canSeeRemoteArea],
+		[canActivity, canLibrary, canUsers, canSeeRemoteArea],
 	);
 	const [tab, setTab] = useState<DashboardTab>(() => availableTabs[0] ?? "activity");
 	useEffect(() => {
@@ -361,6 +364,13 @@ export function App({ user, catalog = null, onSignOut }: { user: AuthUser; catal
 					>
 						Activity
 					</button> : null}
+					{canLibrary ? <button
+						type="button"
+						className={`dash-tab${tab === "library" ? " dash-tab--active" : ""}`}
+						onClick={() => setTab("library")}
+					>
+						Agent Resources
+					</button> : null}
 					{canUsers ? <button
 						type="button"
 						className={`dash-tab${tab === "users" ? " dash-tab--active" : ""}`}
@@ -474,6 +484,14 @@ export function App({ user, catalog = null, onSignOut }: { user: AuthUser; catal
 						<h1 className="page-title">Users</h1>
 						<p className="page-sub">Manage dashboard accounts, invitations, roles and permissions.</p>
 						<UsersPanel currentUser={user} catalog={catalog} />
+					</>
+				) : tab === "library" ? (
+					<>
+						<h1 className="page-title">Agent Resources</h1>
+						<p className="page-sub">
+							Create and manage workflow templates, TCP packs and RCI resource sets stored on this server.
+						</p>
+						<LibraryPanel user={user} />
 					</>
 				) : (
 					<>

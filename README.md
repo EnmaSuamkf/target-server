@@ -503,6 +503,10 @@ ui/
 `public/dist/`, which `server.mjs` serves as static files. The build output is
 gitignored — clone, `npm run ui:install && npm run build`, and you have it.
 
+The **Agent Resources** tab holds workflow templates, TCP packs and RCI resource sets
+stored on this server. It is not the per-client **Remote resources** panel on
+Remote control — Agent Resources items stay on the server and are not pushed to hubs.
+
 The app polls the JSON API every 4s and shows KPIs, the workflow table (with a
 per-workflow step canvas), the instance fleet, event/version breakdowns and a
 live event feed.

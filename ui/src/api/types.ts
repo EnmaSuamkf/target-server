@@ -448,3 +448,145 @@ export interface RemoteResourceBundle {
 	domain?: "templates" | "tcp_tools" | "resource_sets";
 	resources: Array<{ id: string; name: string; data?: Record<string, unknown> }>;
 }
+
+/** Server-owned catalog (Agent Resources tab) — same shapes as the hub, stored on this server. */
+export interface TemplateStepNote {
+	id: string;
+	content: string;
+	theme: StepNoteTheme;
+}
+
+export interface TemplateStep {
+	description: string;
+	acceptanceCriteria: string | null;
+	manualReview: boolean;
+	useSubagent: boolean;
+	maxRetries: number;
+	retryIntervalSeconds: number;
+	notes?: TemplateStepNote[];
+}
+
+export interface TcpSelection {
+	tcpId: string;
+	toolNames?: string[] | null;
+}
+
+export interface ResourceSelection {
+	resourceSetId: string;
+	resourceNames?: string[] | null;
+}
+
+export interface Template {
+	id: string;
+	name: string;
+	tags: string[];
+	steps: TemplateStep[];
+	tcpIds: string[];
+	tcpSelections: TcpSelection[];
+	resourceSelections: ResourceSelection[];
+	createdAt: string;
+	updatedAt: string;
+}
+
+export interface TemplateInput {
+	name: string;
+	tags: string[];
+	steps: TemplateStep[];
+	tcpIds?: string[];
+	tcpSelections?: TcpSelection[];
+	resourceSelections?: ResourceSelection[];
+}
+
+export interface TemplatesResponse {
+	templates: Template[];
+}
+
+export interface TemplateResponse {
+	template: Template;
+}
+
+export interface TcpToolInput {
+	name: string;
+	placeholder: string;
+	description: string;
+	required?: boolean;
+}
+
+export interface TcpTool {
+	name: string;
+	description: string;
+	requestTemplate: string;
+	inputs: TcpToolInput[];
+	tokens: Record<string, string>;
+}
+
+export interface Tcp {
+	id: string;
+	name: string;
+	tags: string[];
+	tools: TcpTool[];
+	createdAt: string;
+	updatedAt: string;
+}
+
+export interface TcpInput {
+	name: string;
+	tags: string[];
+	tools: TcpTool[];
+}
+
+export interface TcpsResponse {
+	tcps: Tcp[];
+}
+
+export interface TcpResponse {
+	tcp: Tcp;
+}
+
+export type ResourceKind = "skill" | "agent" | "doc";
+
+export interface ResourceFile {
+	path: string;
+	content: string;
+}
+
+export interface Resource {
+	name: string;
+	description: string;
+	kind: ResourceKind;
+	entryFile: string;
+	content: string;
+	files: ResourceFile[];
+}
+
+export interface ResourceSet {
+	id: string;
+	name: string;
+	tags: string[];
+	resources: Resource[];
+	createdAt: string;
+	updatedAt: string;
+}
+
+export interface ResourceSetInput {
+	name: string;
+	tags: string[];
+	resources: Resource[];
+}
+
+export interface ResourceSetsResponse {
+	resourceSets: ResourceSet[];
+}
+
+export interface ResourceSetResponse {
+	resourceSet: ResourceSet;
+}
+
+export interface CatalogActions {
+	read: boolean;
+	create: boolean;
+	edit: boolean;
+	delete: boolean;
+	import: boolean;
+	export: boolean;
+}

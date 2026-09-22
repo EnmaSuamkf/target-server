@@ -22,6 +22,32 @@ test("every catalogue entry carries a closed id, scope and group", () => {
 	assert.ok(PERMISSIONS.includes("remote.templates.create"));
 	assert.ok(PERMISSIONS.includes("remote.tcp-tools.export"));
 	assert.ok(PERMISSIONS.includes("remote.rci.import"));
+	const serverCatalogIds = [
+		"templates.read",
+		"templates.create",
+		"templates.edit",
+		"templates.delete",
+		"templates.import",
+		"templates.export",
+		"tcp-tools.read",
+		"tcp-tools.create",
+		"tcp-tools.edit",
+		"tcp-tools.delete",
+		"tcp-tools.import",
+		"tcp-tools.export",
+		"rci.read",
+		"rci.create",
+		"rci.edit",
+		"rci.delete",
+		"rci.import",
+		"rci.export",
+	];
+	for (const id of serverCatalogIds) {
+		assert.ok(PERMISSIONS.includes(id), `missing ${id}`);
+		const entry = PERMISSION_CATALOG.find((item) => item.id === id);
+		assert.equal(entry.scope, "server");
+		assert.ok(entry.group === "server.templates" || entry.group === "server.tcp" || entry.group === "server.rci");
+	}
 	for (const removed of REMOVED_RESOURCE_MANAGE) {
 		assert.equal(PERMISSIONS.includes(removed), false);
 	}
@@ -34,6 +60,9 @@ test("getPermissionCatalog groups the closed vocabulary by server and client sco
 		"server.activity",
 		"server.users",
 		"server.devices",
+		"server.templates",
+		"server.tcp",
+		"server.rci",
 		"client.remote",
 		"client.workflows",
 		"client.templates",

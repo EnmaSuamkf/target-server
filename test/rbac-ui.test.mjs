@@ -35,6 +35,28 @@ test("remote workflow actions are independently gated", () => {
 	assert.match(workflows, /\+ Add step/);
 });
 
+test("Agent Resources tab is gated on server catalog read permissions", () => {
+	const app = read("../ui/src/App.tsx");
+	assert.match(app, /type DashboardTab = "activity" \| "users" \| "remote" \| "library"/);
+	assert.match(app, /templates\.read/);
+	assert.match(app, /tcp-tools\.read/);
+	assert.match(app, /rci\.read/);
+	assert.match(app, /canLibrary/);
+	assert.match(app, /setTab\("library"\)/);
+	assert.match(app, /<LibraryPanel user=\{user\} \/>/);
+	assert.match(app, /\{canLibrary \? <button/);
+	assert.match(app, />\s*Agent Resources\s*</);
+	assert.match(app, /page-title">Agent Resources</);
+	assert.doesNotMatch(app, />Library</);
+	const panel = read("../ui/src/components/LibraryPanel.tsx");
+	assert.match(panel, /<h2>Agent Resources<\/h2>/);
+	assert.match(panel, /aria-label="Agent Resources catalogs"/);
+	assert.match(panel, />\s*Templates\s*</);
+	assert.match(panel, />\s*TCP tools\s*</);
+	assert.match(panel, />\s*RCI\s*</);
+	assert.doesNotMatch(panel, />Library</);
+});
+
 test("remote resources expose independent create/edit/delete/import/export actions", () => {
 	const source = read("../ui/src/components/RemoteResourcesPanel.tsx");
 	assert.match(source, /exportRemoteResources/);

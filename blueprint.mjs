@@ -262,6 +262,134 @@ const SYNC_EVENT_ITEM = Joi.object({
 	created_at: ISO_TIME.optional(),
 });
 
+const TAGS = Joi.array().items(Joi.string().trim().allow(""));
+const TEMPLATE_STEP_NOTE = Joi.object({
+	id: OPTIONAL_STRING.optional(),
+	content: STRING.required(),
+	theme: Joi.string().valid("warning", "success", "neutral").optional(),
+});
+const TEMPLATE_STEP = Joi.object({
+	description: STRING.required(),
+	acceptanceCriteria: OPTIONAL_STRING.allow(null).optional(),
+	manualReview: Joi.boolean().optional(),
+	useSubagent: Joi.boolean().optional(),
+	maxRetries: Joi.number().integer().min(0).optional(),
+	retryIntervalSeconds: Joi.number().integer().min(0).optional(),
+	notes: Joi.array().items(TEMPLATE_STEP_NOTE).optional(),
+});
+const TCP_SELECTION = Joi.object({
+	tcpId: STRING.optional(),
+	mtpId: STRING.optional(),
+	toolNames: Joi.array().items(STRING).allow(null).optional(),
+}).or("tcpId", "mtpId");
+const RESOURCE_SELECTION = Joi.object({
+	resourceSetId: STRING.optional(),
+	skillSetId: STRING.optional(),
+	resourceNames: Joi.array().items(STRING).allow(null).optional(),
+	skillNames: Joi.array().items(STRING).allow(null).optional(),
+}).or("resourceSetId", "skillSetId");
+const TEMPLATE_CREATE = Joi.object({
+	name: STRING.required(),
+	tags: TAGS.optional(),
+	steps: Joi.array().items(TEMPLATE_STEP).optional(),
+	tcpIds: Joi.array().items(STRING).optional(),
+	tcpSelections: Joi.array().items(TCP_SELECTION).optional(),
+	resourceSelections: Joi.array().items(RESOURCE_SELECTION).optional(),
+});
+const TEMPLATE_UPDATE = Joi.object({
+	name: STRING.optional(),
+	tags: TAGS.optional(),
+	steps: Joi.array().items(TEMPLATE_STEP).optional(),
+	tcpIds: Joi.array().items(STRING).optional(),
+	tcpSelections: Joi.array().items(TCP_SELECTION).optional(),
+	resourceSelections: Joi.array().items(RESOURCE_SELECTION).optional(),
+});
+const TEMPLATE_IMPORT = Joi.alternatives()
+	.try(
+		Joi.object({
+			kind: Joi.string().valid("target.templates").required(),
+			schemaVersion: Joi.number().integer().min(1).optional(),
+			exportedAt: OPTIONAL_STRING.optional(),
+			templates: Joi.array().items(TEMPLATE_CREATE).min(1).required(),
+		}),
+		TEMPLATE_CREATE,
+		Joi.array().items(TEMPLATE_CREATE).min(1),
+	)
+	.required();
+
+const TCP_TOOL_INPUT = Joi.object({
+	name: STRING.required(),
+	placeholder: STRING.required(),
+	description: OPTIONAL_STRING.optional(),
+	required: Joi.boolean().optional(),
+});
+const TCP_TOOL = Joi.object({
+	name: STRING.required(),
+	description: OPTIONAL_STRING.optional(),
+	requestTemplate: STRING.required(),
+	inputs: Joi.array().items(TCP_TOOL_INPUT).optional(),
+	tokens: Joi.object().pattern(Joi.string(), Joi.string().allow("")).optional(),
+});
+const TCP_CREATE = Joi.object({
+	name: STRING.required(),
+	tags: TAGS.optional(),
+	tools: Joi.array().items(TCP_TOOL).optional(),
+});
+const TCP_UPDATE = Joi.object({
+	name: STRING.optional(),
+	tags: TAGS.optional(),
+	tools: Joi.array().items(TCP_TOOL).optional(),
+});
+const TCP_IMPORT = Joi.alternatives()
+	.try(
+		Joi.object({
+			kind: Joi.string().valid("target.tcps").required(),
+			schemaVersion: Joi.number().integer().min(1).optional(),
+			exportedAt: OPTIONAL_STRING.optional(),
+			tcps: Joi.array().items(TCP_CREATE).min(1).required(),
+		}),
+		TCP_CREATE,
+		Joi.array().items(TCP_CREATE).min(1),
+	)
+	.required();
+
+function rejectDotDot(value, helpers) {
+	if (String(value).includes("..")) return helpers.error("any.invalid");
+	return value;
+}
+const RESOURCE_FILE = Joi.object({
+	path: STRING.required().custom(rejectDotDot),
+	content: Joi.string().allow("").required(),
+});
+const RESOURCE = Joi.object({
+	name: STRING.required(),
+	description: OPTIONAL_STRING.optional(),
+	kind: Joi.string().valid("skill", "agent", "doc").optional(),
+	entryFile: OPTIONAL_STRING.optional().custom(rejectDotDot),
+	content: Joi.string().allow("").optional(),
+	files: Joi.array().items(RESOURCE_FILE).optional(),
+});
+const RESOURCE_SET_CREATE = Joi.object({
+	name: STRING.required(),
+	tags: TAGS.optional(),
+	resources: Joi.array().items(RESOURCE).optional(),
+});
+const RESOURCE_SET_UPDATE = Joi.object({
+	name: STRING.optional(),
+	tags: TAGS.optional(),
+	resources: Joi.array().items(RESOURCE).optional(),
+});
+const RESOURCE_SET_IMPORT = Joi.alternatives()
+	.try(
+		Joi.object({
+			kind: Joi.string().valid("target-server.resource-sets").required(),
+			resourceSets: Joi.array().items(RESOURCE_SET_CREATE).min(1).required(),
+		}),
+		RESOURCE_SET_CREATE,
+		Joi.array().items(RESOURCE_SET_CREATE).min(1),
+	)
+	.required();
+
 export const BLUEPRINTS = {
 	"user.create": Joi.object({
 		email: EMAIL,
@@ -363,6 +491,16 @@ export const BLUEPRINTS = {
 	"device_link.rotate": Joi.object({
 		public_key: DEVICE_PUBLIC_KEY.required(),
 	}),
+
+	"catalog.template.create": TEMPLATE_CREATE,
+	"catalog.template.update": TEMPLATE_UPDATE,
+	"catalog.templates.import": TEMPLATE_IMPORT,
+	"catalog.tcp.create": TCP_CREATE,
+	"catalog.tcp.update": TCP_UPDATE,
+	"catalog.tcps.import": TCP_IMPORT,
+	"catalog.resource_set.create": RESOURCE_SET_CREATE,
+	"catalog.resource_set.update": RESOURCE_SET_UPDATE,
+	"catalog.resource_sets.import": RESOURCE_SET_IMPORT,
 
 	...COMMAND_PAYLOADS,
 	...EVENT_PAYLOADS,
