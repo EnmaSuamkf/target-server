@@ -105,6 +105,24 @@ import {
 	deleteRemoteResource,
 	remoteResourceChannelId,
 	mirrorResourceSyncEvent,
+	listTemplates,
+	getTemplate,
+	createTemplate,
+	updateTemplate,
+	deleteTemplate,
+	listTcps,
+	getTcp,
+	createTcp,
+	updateTcp,
+	deleteTcp,
+	listResourceSets,
+	getResourceSet,
+	createResourceSet,
+	updateResourceSet,
+	deleteResourceSet,
+	catalogTemplateBundle,
+	catalogTcpBundle,
+	catalogResourceSetBundle,
 	createDeviceLinkRequest,
 	getDeviceLinkRequest,
 	authenticateDeviceLinkRequest,
@@ -1874,6 +1892,180 @@ async function handleDeviceLinkRoute(req, res, pathname, url) {
 	return false;
 }
 
+const SERVER_CATALOGS = {
+	templates: {
+		listKey: "templates",
+		itemKey: "template",
+		permissions: {
+			read: "templates.read",
+			create: "templates.create",
+			edit: "templates.edit",
+			delete: "templates.delete",
+			import: "templates.import",
+			export: "templates.export",
+		},
+		validateCreate: "catalog.template.create",
+		validateUpdate: "catalog.template.update",
+		validateImport: "catalog.templates.import",
+		list: listTemplates,
+		get: getTemplate,
+		create: createTemplate,
+		update: updateTemplate,
+		remove: deleteTemplate,
+		bundle: catalogTemplateBundle,
+		importItems(value) {
+			const items = Array.isArray(value) ? value : value.templates ? value.templates : [value];
+			return items.map((item) =>
+				createTemplate({
+					name: item.name,
+					tags: item.tags,
+					steps: item.steps,
+					tcpIds: item.tcpIds,
+					tcpSelections: item.tcpSelections,
+					resourceSelections: item.resourceSelections,
+				}),
+			);
+		},
+		exportName: "templates-export.json",
+		itemExportName: (id) => `template-${id}.json`,
+	},
+	tcps: {
+		listKey: "tcps",
+		itemKey: "tcp",
+		permissions: {
+			read: "tcp-tools.read",
+			create: "tcp-tools.create",
+			edit: "tcp-tools.edit",
+			delete: "tcp-tools.delete",
+			import: "tcp-tools.import",
+			export: "tcp-tools.export",
+		},
+		validateCreate: "catalog.tcp.create",
+		validateUpdate: "catalog.tcp.update",
+		validateImport: "catalog.tcps.import",
+		list: listTcps,
+		get: getTcp,
+		create: createTcp,
+		update: updateTcp,
+		remove: deleteTcp,
+		bundle: catalogTcpBundle,
+		importItems(value) {
+			const items = Array.isArray(value) ? value : value.tcps ? value.tcps : [value];
+			return items.map((item) => createTcp({ name: item.name, tags: item.tags, tools: item.tools }));
+		},
+		exportName: "tcps-export.json",
+		itemExportName: (id) => `tcp-${id}.json`,
+	},
+	"resource-sets": {
+		listKey: "resourceSets",
+		itemKey: "resourceSet",
+		permissions: {
+			read: "rci.read",
+			create: "rci.create",
+			edit: "rci.edit",
+			delete: "rci.delete",
+			import: "rci.import",
+			export: "rci.export",
+		},
+		validateCreate: "catalog.resource_set.create",
+		validateUpdate: "catalog.resource_set.update",
+		validateImport: "catalog.resource_sets.import",
+		list: listResourceSets,
+		get: getResourceSet,
+		create: createResourceSet,
+		update: updateResourceSet,
+		remove: deleteResourceSet,
+		bundle: catalogResourceSetBundle,
+		importItems(value) {
+			const items = Array.isArray(value) ? value : value.resourceSets ? value.resourceSets : [value];
+			return items.map((item) => createResourceSet({ name: item.name, tags: item.tags, resources: item.resources }));
+		},
+		exportName: "resource-sets-export.json",
+		itemExportName: (id) => `resource-set-${id}.json`,
+	},
+};
+
+function catalogAttachment(filename) {
+	return { "content-disposition": `attachment; filename="${filename}"` };
+}
+
+async function handleCatalogRoute(req, res, pathname) {
+	const match = pathname.match(/^\/api\/(templates|tcps|resource-sets)(?:\/([^/]+))?(?:\/([^/]+))?$/);
+	if (!match) return false;
+	const [, domain, part, tail] = match;
+	const spec = SERVER_CATALOGS[domain];
+	if (!spec) return false;
+	if (tail && tail !== "export") return sendJson(res, 404, { error: "not_found" });
+
+	if (part === "export" && !tail) {
+		if (req.method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
+		if (!(await requireCapability(req, res, spec.permissions.export))) return true;
+		return sendJson(res, 200, spec.bundle(spec.list()), catalogAttachment(spec.exportName));
+	}
+
+	if (part === "import" && !tail) {
+		if (req.method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
+		if (!(await requireCapability(req, res, spec.permissions.import))) return true;
+		const body = await readJson(req, res);
+		if (!body) return true;
+		const v = validate(spec.validateImport, body);
+		if (!v.ok) return sendJson(res, 422, { errors: v.errors });
+		const created = spec.importItems(v.value);
+		return sendJson(res, 201, { [spec.listKey]: created });
+	}
+
+	if (part && tail === "export") {
+		if (req.method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
+		if (!(await requireCapability(req, res, spec.permissions.export))) return true;
+		const item = spec.get(part);
+		if (!item) return sendJson(res, 404, { error: "not_found" });
+		return sendJson(res, 200, spec.bundle([item]), catalogAttachment(spec.itemExportName(part)));
+	}
+
+	if (part && !tail) {
+		if (req.method === "GET") {
+			if (!(await requireCapability(req, res, spec.permissions.read))) return true;
+			const item = spec.get(part);
+			if (!item) return sendJson(res, 404, { error: "not_found" });
+			return sendJson(res, 200, { [spec.itemKey]: item });
+		}
+		if (req.method === "PATCH") {
+			if (!(await requireCapability(req, res, spec.permissions.edit))) return true;
+			const body = await readJson(req, res);
+			if (!body) return true;
+			const v = validate(spec.validateUpdate, body);
+			if (!v.ok) return sendJson(res, 422, { errors: v.errors });
+			const item = spec.update(part, v.value);
+			if (!item) return sendJson(res, 404, { error: "not_found" });
+			return sendJson(res, 200, { [spec.itemKey]: item });
+		}
+		if (req.method === "DELETE") {
+			if (!(await requireCapability(req, res, spec.permissions.delete))) return true;
+			if (!spec.remove(part)) return sendJson(res, 404, { error: "not_found" });
+			return sendJson(res, 200, { ok: true });
+		}
+		return sendJson(res, 405, { error: "method not allowed" });
+	}
+
+	if (!part) {
+		if (req.method === "GET") {
+			if (!(await requireCapability(req, res, spec.permissions.read))) return true;
+			return sendJson(res, 200, { [spec.listKey]: spec.list() });
+		}
+		if (req.method === "POST") {
+			if (!(await requireCapability(req, res, spec.permissions.create))) return true;
+			const body = await readJson(req, res);
+			if (!body) return true;
+			const v = validate(spec.validateCreate, body);
+			if (!v.ok) return sendJson(res, 422, { errors: v.errors });
+			return sendJson(res, 201, { [spec.itemKey]: spec.create(v.value) });
+		}
+		return sendJson(res, 405, { error: "method not allowed" });
+	}
+
+	return sendJson(res, 404, { error: "not_found" });
+}
+
 const server = createServer(async (req, res) => {
 	try {
 		const url = new URL(req.url, `http://${req.headers.host ?? HOST}`);
@@ -1904,6 +2096,11 @@ const server = createServer(async (req, res) => {
 
 		if (pathname.startsWith("/api/sync/")) {
 			const handled = await handleOperatorSyncRoute(req, res, pathname, url);
+			if (handled !== false) return;
+		}
+
+		if (pathname.startsWith("/api/templates") || pathname.startsWith("/api/tcps") || pathname.startsWith("/api/resource-sets")) {
+			const handled = await handleCatalogRoute(req, res, pathname);
 			if (handled !== false) return;
 		}
 

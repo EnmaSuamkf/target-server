@@ -21,6 +21,26 @@ not live; they were replaced by create / edit / delete / import / export.
 | `users.manage` | Users | Invite users and manage users/roles |
 | `devices.link` | Devices | Approve or deny a device-link request in the browser. This assigns the approved hub to the signed-in authorized human; it is not a dashboard/device credential. |
 | `devices.manage` | Devices | List and revoke linked device identities (and manage their lifecycle). This is separate from approving a one-time link. |
+| `templates.read` | Templates | View workflow templates stored on this server (Agent Resources) |
+| `templates.create` | Templates | Create workflow templates stored on this server |
+| `templates.edit` | Templates | Edit workflow templates stored on this server |
+| `templates.delete` | Templates | Delete workflow templates stored on this server |
+| `templates.import` | Templates | Import workflow templates stored on this server |
+| `templates.export` | Templates | Export workflow templates stored on this server |
+| `tcp-tools.read` | TCP tools | View TCP packs stored on this server (Agent Resources) |
+| `tcp-tools.create` | TCP tools | Create TCP packs stored on this server |
+| `tcp-tools.edit` | TCP tools | Edit TCP packs stored on this server |
+| `tcp-tools.delete` | TCP tools | Delete TCP packs stored on this server |
+| `tcp-tools.import` | TCP tools | Import TCP packs stored on this server |
+| `tcp-tools.export` | TCP tools | Export TCP packs stored on this server |
+| `rci.read` | RCI | View RCI resource sets stored on this server (Agent Resources) |
+| `rci.create` | RCI | Create RCI resource sets stored on this server |
+| `rci.edit` | RCI | Edit RCI resource sets stored on this server |
+| `rci.delete` | RCI | Delete RCI resource sets stored on this server |
+| `rci.import` | RCI | Import RCI resource sets stored on this server |
+| `rci.export` | RCI | Export RCI resource sets stored on this server |
+
+These `templates.*` / `tcp-tools.*` / `rci.*` IDs are server-owned Agent Resources catalog permissions. They are distinct from the client-scoped `remote.templates.*` / `remote.tcp-tools.*` / `remote.rci.*` IDs that gate per-client Remote resources.
 
 ### Client
 

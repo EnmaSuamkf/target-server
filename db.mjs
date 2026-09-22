@@ -27,6 +27,9 @@ export const PERMISSION_GROUPS = Object.freeze([
 	{ id: "server.activity", scope: "server", label: "Activity", description: "View reporting data on this dashboard server" },
 	{ id: "server.users", scope: "server", label: "Users", description: "View and manage dashboard accounts and roles" },
 	{ id: "server.devices", scope: "server", label: "Devices", description: "Approve and manage linked Target hubs" },
+	{ id: "server.templates", scope: "server", label: "Templates", description: "Manage workflow templates stored on this dashboard server" },
+	{ id: "server.tcp", scope: "server", label: "TCP tools", description: "Manage TCP packs stored on this dashboard server" },
+	{ id: "server.rci", scope: "server", label: "RCI", description: "Manage RCI resource sets stored on this dashboard server" },
 	{ id: "client.remote", scope: "client", label: "Remote Control", description: "View connected Target hubs and their remote state" },
 	{ id: "client.workflows", scope: "client", label: "Workflows", description: "Create, edit and run workflows on a connected Target hub" },
 	{ id: "client.templates", scope: "client", label: "Templates", description: "Manage templates on a connected Target hub" },
@@ -45,6 +48,24 @@ export const PERMISSION_CATALOG = Object.freeze([
 	{ id: "users.manage", label: "Manage users and roles", description: "Manage users, roles and invitations", scope: "server", group: "server.users" },
 	{ id: "devices.link", label: "Approve or deny device-link requests", description: "Approve or deny device-link requests", scope: "server", group: "server.devices" },
 	{ id: "devices.manage", label: "Manage linked devices", description: "List, rotate and revoke linked devices", scope: "server", group: "server.devices" },
+	{ id: "templates.read", label: "View templates", description: "View workflow templates stored on this server", scope: "server", group: "server.templates" },
+	{ id: "templates.create", label: "Create templates", description: "Create workflow templates stored on this server", scope: "server", group: "server.templates" },
+	{ id: "templates.edit", label: "Edit templates", description: "Edit workflow templates stored on this server", scope: "server", group: "server.templates" },
+	{ id: "templates.delete", label: "Delete templates", description: "Delete workflow templates stored on this server", scope: "server", group: "server.templates" },
+	{ id: "templates.import", label: "Import templates", description: "Import workflow templates stored on this server", scope: "server", group: "server.templates" },
+	{ id: "templates.export", label: "Export templates", description: "Export workflow templates stored on this server", scope: "server", group: "server.templates" },
+	{ id: "tcp-tools.read", label: "View TCP tools", description: "View TCP packs stored on this server", scope: "server", group: "server.tcp" },
+	{ id: "tcp-tools.create", label: "Create TCP tools", description: "Create TCP packs stored on this server", scope: "server", group: "server.tcp" },
+	{ id: "tcp-tools.edit", label: "Edit TCP tools", description: "Edit TCP packs stored on this server", scope: "server", group: "server.tcp" },
+	{ id: "tcp-tools.delete", label: "Delete TCP tools", description: "Delete TCP packs stored on this server", scope: "server", group: "server.tcp" },
+	{ id: "tcp-tools.import", label: "Import TCP tools", description: "Import TCP packs stored on this server", scope: "server", group: "server.tcp" },
+	{ id: "tcp-tools.export", label: "Export TCP tools", description: "Export TCP packs stored on this server", scope: "server", group: "server.tcp" },
+	{ id: "rci.read", label: "View RCI resources", description: "View RCI resource sets stored on this server", scope: "server", group: "server.rci" },
+	{ id: "rci.create", label: "Create RCI resources", description: "Create RCI resource sets stored on this server", scope: "server", group: "server.rci" },
+	{ id: "rci.edit", label: "Edit RCI resources", description: "Edit RCI resource sets stored on this server", scope: "server", group: "server.rci" },
+	{ id: "rci.delete", label: "Delete RCI resources", description: "Delete RCI resource sets stored on this server", scope: "server", group: "server.rci" },
+	{ id: "rci.import", label: "Import RCI resources", description: "Import RCI resource sets stored on this server", scope: "server", group: "server.rci" },
+	{ id: "rci.export", label: "Export RCI resources", description: "Export RCI resource sets stored on this server", scope: "server", group: "server.rci" },
 	{ id: "remote.read", label: "View Remote Control", description: "View Remote Control clients and state", scope: "client", group: "client.remote" },
 	{ id: "remote.workflows.create", label: "Create workflows", description: "Create remote workflows", scope: "client", group: "client.workflows" },
 	{ id: "remote.workflows.steps.add", label: "Add workflow steps", description: "Add steps to remote workflows", scope: "client", group: "client.workflows" },
@@ -269,6 +290,7 @@ export function open(dbPath = process.env.TARGET_SERVER_DB ?? "./target-server.d
 	migrateAuthSchema(db);
 	migrateRbacSchema(db);
 	migrateDeviceLinkSchema(db);
+	migrateCatalogSchema(db);
 	seedAuth();
 	return db;
 }
@@ -315,6 +337,36 @@ function migrateSyncSchema(database) {
 			UNIQUE(remote_id, step_key)
 		);
 		CREATE INDEX IF NOT EXISTS idx_remote_workflow_steps_remote ON remote_workflow_steps(remote_id);
+	`);
+}
+
+/** Additive server-owned catalog: templates, TCP packs, and RCI resource sets. */
+function migrateCatalogSchema(database) {
+	database.exec(`
+		CREATE TABLE IF NOT EXISTS templates (
+			id          TEXT PRIMARY KEY,
+			name        TEXT NOT NULL,
+			tags        TEXT NOT NULL DEFAULT '[]',
+			payload     TEXT NOT NULL DEFAULT '{}',
+			created_at  TEXT NOT NULL,
+			updated_at  TEXT NOT NULL
+		);
+		CREATE TABLE IF NOT EXISTS tcps (
+			id          TEXT PRIMARY KEY,
+			name        TEXT NOT NULL,
+			tags        TEXT NOT NULL DEFAULT '[]',
+			payload     TEXT NOT NULL DEFAULT '{}',
+			created_at  TEXT NOT NULL,
+			updated_at  TEXT NOT NULL
+		);
+		CREATE TABLE IF NOT EXISTS resource_sets (
+			id          TEXT PRIMARY KEY,
+			name        TEXT NOT NULL,
+			tags        TEXT NOT NULL DEFAULT '[]',
+			payload     TEXT NOT NULL DEFAULT '{}',
+			created_at  TEXT NOT NULL,
+			updated_at  TEXT NOT NULL
+		);
 	`);
 }
 
@@ -3297,5 +3349,531 @@ export function getRemoteWorkflowDetail(id) {
 		workflow: { ...workflow, stepCount: steps.length, stepsPendingSync: steps.filter((s) => !s.onClient).length },
 		steps,
 		pendingCommands: listInFlightCommands(id),
+	};
+}
+
+// --- Server catalog (templates, TCP packs, RCI resource sets) ---------
+//
+// Server-owned library, same public shapes as the hub. Each domain uses one
+// table with tags + payload JSON; remote_resources (per-client sync mirrors)
+// is a different store and is not touched here.
+
+const CATALOG_RESOURCE_KINDS = Object.freeze(["skill", "agent", "doc"]);
+const CATALOG_STEP_NOTE_THEMES = Object.freeze(["warning", "success", "neutral"]);
+
+function parseCatalogJson(raw, fallback) {
+	try {
+		return JSON.parse(raw ?? "");
+	} catch {
+		return fallback;
+	}
+}
+
+function normalizeCatalogTags(tags) {
+	if (!Array.isArray(tags)) return [];
+	return tags.map((tag) => String(tag).trim()).filter((tag) => tag !== "");
+}
+
+function normalizeCatalogName(name) {
+	return typeof name === "string" ? name.trim() : "";
+}
+
+function catalogIdSet(table) {
+	const sql =
+		table === "tcps"
+			? "SELECT id FROM tcps"
+			: table === "resource_sets"
+				? "SELECT id FROM resource_sets"
+				: null;
+	if (!sql) return new Set();
+	return new Set(open().prepare(sql).all().map((row) => row.id));
+}
+
+function normalizeCatalogTcpIds(tcpIds) {
+	if (!Array.isArray(tcpIds)) return [];
+	return [...new Set(tcpIds.map((id) => String(id).trim()).filter((id) => id !== ""))];
+}
+
+function normalizeCatalogTcpSelections(input) {
+	if (!Array.isArray(input)) return [];
+	const out = [];
+	for (const raw of input) {
+		if (raw === null || typeof raw !== "object" || Array.isArray(raw)) continue;
+		const tcpId =
+			typeof raw.tcpId === "string" ? raw.tcpId.trim() : typeof raw.mtpId === "string" ? raw.mtpId.trim() : "";
+		if (tcpId === "") continue;
+		let toolNames = null;
+		if (raw.toolNames != null) {
+			if (!Array.isArray(raw.toolNames)) continue;
+			const names = [...new Set(raw.toolNames.map((name) => String(name).trim()).filter((name) => name !== ""))];
+			toolNames = names.length === 0 ? null : names;
+		}
+		out.push({ tcpId, toolNames });
+	}
+	return out;
+}
+
+function normalizeCatalogResourceSelections(input) {
+	if (!Array.isArray(input)) return [];
+	const out = [];
+	for (const raw of input) {
+		if (raw === null || typeof raw !== "object" || Array.isArray(raw)) continue;
+		const rawId = raw.resourceSetId ?? raw.skillSetId;
+		const rawNames = raw.resourceNames ?? raw.skillNames;
+		const resourceSetId = typeof rawId === "string" ? rawId.trim() : "";
+		if (resourceSetId === "") continue;
+		let resourceNames = null;
+		if (rawNames != null) {
+			if (!Array.isArray(rawNames)) continue;
+			const names = [...new Set(rawNames.map((name) => String(name).trim()).filter((name) => name !== ""))];
+			resourceNames = names.length === 0 ? null : names;
+		}
+		out.push({ resourceSetId, resourceNames });
+	}
+	return out;
+}
+
+function filterTcpSelectionsToServer(selections) {
+	const known = catalogIdSet("tcps");
+	return selections.filter((selection) => known.has(selection.tcpId));
+}
+
+function filterResourceSelectionsToServer(selections) {
+	const known = catalogIdSet("resource_sets");
+	return selections.filter((selection) => known.has(selection.resourceSetId));
+}
+
+function normalizeCatalogStepNoteTheme(value) {
+	return CATALOG_STEP_NOTE_THEMES.includes(value) ? value : "neutral";
+}
+
+function normalizeCatalogTemplateStepNotes(notes) {
+	if (!Array.isArray(notes)) return [];
+	return notes
+		.map((raw) => {
+			const obj = raw ?? {};
+			const content = typeof obj.content === "string" ? obj.content.trim() : "";
+			if (content === "") return null;
+			const id = typeof obj.id === "string" && obj.id !== "" ? obj.id : randomUUID();
+			return { id, content, theme: normalizeCatalogStepNoteTheme(obj.theme) };
+		})
+		.filter((note) => note !== null);
+}
+
+function normalizeCatalogTemplateSteps(steps) {
+	if (!Array.isArray(steps)) return [];
+	return steps
+		.map((raw) => {
+			const obj = raw ?? {};
+			const description = typeof obj.description === "string" ? obj.description.trim() : "";
+			const acceptanceCriteria =
+				typeof obj.acceptanceCriteria === "string" && obj.acceptanceCriteria.trim() !== ""
+					? obj.acceptanceCriteria.trim()
+					: null;
+			const notes = normalizeCatalogTemplateStepNotes(obj.notes);
+			return {
+				description,
+				acceptanceCriteria,
+				manualReview: obj.manualReview === true,
+				useSubagent: obj.useSubagent !== false,
+				maxRetries: Math.max(0, Math.floor(Number(obj.maxRetries ?? 0)) || 0),
+				retryIntervalSeconds: Math.max(0, Math.floor(Number(obj.retryIntervalSeconds ?? 0)) || 0),
+				...(notes.length > 0 ? { notes } : {}),
+			};
+		})
+		.filter((step) => step.description !== "");
+}
+
+function resolveCatalogTemplateSelections(input, existing = null) {
+	let tcpSelections = existing?.tcpSelections ?? [];
+	if (input.tcpSelections !== undefined) tcpSelections = normalizeCatalogTcpSelections(input.tcpSelections);
+	else if (input.tcpIds !== undefined) {
+		tcpSelections = normalizeCatalogTcpIds(input.tcpIds).map((tcpId) => ({ tcpId }));
+	}
+	tcpSelections = filterTcpSelectionsToServer(tcpSelections);
+	const tcpIds = tcpSelections.map((selection) => selection.tcpId);
+	const resourceSelections =
+		input.resourceSelections !== undefined
+			? filterResourceSelectionsToServer(normalizeCatalogResourceSelections(input.resourceSelections))
+			: (existing?.resourceSelections ?? []);
+	return { tcpIds, tcpSelections, resourceSelections };
+}
+
+function rowToCatalogTemplate(row) {
+	const tags = Array.isArray(parseCatalogJson(row.tags, [])) ? parseCatalogJson(row.tags, []).map((tag) => String(tag)) : [];
+	const payload = parseCatalogJson(row.payload, {}) ?? {};
+	const steps = normalizeCatalogTemplateSteps(payload.steps);
+	const tcpSelections = filterTcpSelectionsToServer(
+		normalizeCatalogTcpSelections(payload.tcpSelections).length > 0
+			? normalizeCatalogTcpSelections(payload.tcpSelections)
+			: normalizeCatalogTcpIds(payload.tcpIds).map((tcpId) => ({ tcpId })),
+	);
+	const resourceSelections = filterResourceSelectionsToServer(normalizeCatalogResourceSelections(payload.resourceSelections));
+	return {
+		id: row.id,
+		name: row.name,
+		tags,
+		steps,
+		tcpIds: tcpSelections.map((selection) => selection.tcpId),
+		tcpSelections,
+		resourceSelections,
+		createdAt: row.created_at,
+		updatedAt: row.updated_at,
+	};
+}
+
+function writeCatalogTemplatePayload(template) {
+	return JSON.stringify({
+		steps: template.steps,
+		tcpIds: template.tcpIds,
+		tcpSelections: template.tcpSelections,
+		resourceSelections: template.resourceSelections,
+	});
+}
+
+export function listTemplates() {
+	return open()
+		.prepare("SELECT * FROM templates ORDER BY created_at DESC, rowid DESC")
+		.all()
+		.map(rowToCatalogTemplate);
+}
+
+export function getTemplate(id) {
+	const row = open().prepare("SELECT * FROM templates WHERE id = ?").get(id);
+	return row ? rowToCatalogTemplate(row) : null;
+}
+
+export function createTemplate(input = {}) {
+	const now = new Date().toISOString();
+	const selections = resolveCatalogTemplateSelections(input);
+	const template = {
+		id: randomUUID(),
+		name: normalizeCatalogName(input.name),
+		tags: normalizeCatalogTags(input.tags),
+		steps: normalizeCatalogTemplateSteps(input.steps),
+		...selections,
+		createdAt: now,
+		updatedAt: now,
+	};
+	open()
+		.prepare("INSERT INTO templates (id, name, tags, payload, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)")
+		.run(template.id, template.name, JSON.stringify(template.tags), writeCatalogTemplatePayload(template), template.createdAt, template.updatedAt);
+	return template;
+}
+
+export function updateTemplate(id, input = {}) {
+	const existing = getTemplate(id);
+	if (!existing) return null;
+	const selections = resolveCatalogTemplateSelections(input, existing);
+	const template = {
+		...existing,
+		name: input.name !== undefined ? normalizeCatalogName(input.name) : existing.name,
+		tags: input.tags !== undefined ? normalizeCatalogTags(input.tags) : existing.tags,
+		steps: input.steps !== undefined ? normalizeCatalogTemplateSteps(input.steps) : existing.steps,
+		...selections,
+		updatedAt: new Date().toISOString(),
+	};
+	open()
+		.prepare("UPDATE templates SET name = ?, tags = ?, payload = ?, updated_at = ? WHERE id = ?")
+		.run(template.name, JSON.stringify(template.tags), writeCatalogTemplatePayload(template), template.updatedAt, id);
+	return template;
+}
+
+export function deleteTemplate(id) {
+	return open().prepare("DELETE FROM templates WHERE id = ?").run(id).changes > 0;
+}
+
+function normalizeCatalogToolInputs(inputs) {
+	if (!Array.isArray(inputs)) return [];
+	const out = [];
+	for (const raw of inputs) {
+		const obj = raw ?? {};
+		const name = typeof obj.name === "string" ? obj.name.trim() : "";
+		const placeholder = typeof obj.placeholder === "string" ? obj.placeholder.trim() : "";
+		const description = typeof obj.description === "string" ? obj.description.trim() : "";
+		if (name === "" || placeholder === "") continue;
+		out.push({
+			name,
+			placeholder: placeholder.startsWith("$") ? placeholder : `$${placeholder}`,
+			description,
+			required: obj.required === false ? false : true,
+		});
+	}
+	return out;
+}
+
+function normalizeCatalogTokens(tokens) {
+	if (tokens == null || typeof tokens !== "object" || Array.isArray(tokens)) return {};
+	const out = {};
+	for (const [key, value] of Object.entries(tokens)) {
+		const name = String(key).trim();
+		if (name === "") continue;
+		out[name] = typeof value === "string" ? value : String(value ?? "");
+	}
+	return out;
+}
+
+function normalizeCatalogTcpTools(tools) {
+	if (!Array.isArray(tools)) return [];
+	return tools
+		.map((raw) => {
+			const obj = raw ?? {};
+			const name = typeof obj.name === "string" ? obj.name.trim() : "";
+			const description = typeof obj.description === "string" ? obj.description.trim() : "";
+			const requestTemplate = typeof obj.requestTemplate === "string" ? obj.requestTemplate.trim() : "";
+			if (name === "" || requestTemplate === "") return null;
+			return {
+				name,
+				description,
+				requestTemplate,
+				inputs: normalizeCatalogToolInputs(obj.inputs),
+				tokens: normalizeCatalogTokens(obj.tokens),
+			};
+		})
+		.filter((tool) => tool !== null);
+}
+
+function rowToCatalogTcp(row) {
+	const tags = Array.isArray(parseCatalogJson(row.tags, [])) ? parseCatalogJson(row.tags, []).map((tag) => String(tag)) : [];
+	const payload = parseCatalogJson(row.payload, {}) ?? {};
+	return {
+		id: row.id,
+		name: row.name,
+		tags,
+		tools: normalizeCatalogTcpTools(payload.tools),
+		createdAt: row.created_at,
+		updatedAt: row.updated_at,
+	};
+}
+
+export function listTcps() {
+	return open()
+		.prepare("SELECT * FROM tcps ORDER BY created_at DESC, rowid DESC")
+		.all()
+		.map(rowToCatalogTcp);
+}
+
+export function getTcp(id) {
+	const row = open().prepare("SELECT * FROM tcps WHERE id = ?").get(id);
+	return row ? rowToCatalogTcp(row) : null;
+}
+
+export function createTcp(input = {}) {
+	const now = new Date().toISOString();
+	const tcp = {
+		id: randomUUID(),
+		name: normalizeCatalogName(input.name),
+		tags: normalizeCatalogTags(input.tags),
+		tools: normalizeCatalogTcpTools(input.tools),
+		createdAt: now,
+		updatedAt: now,
+	};
+	open()
+		.prepare("INSERT INTO tcps (id, name, tags, payload, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)")
+		.run(tcp.id, tcp.name, JSON.stringify(tcp.tags), JSON.stringify({ tools: tcp.tools }), tcp.createdAt, tcp.updatedAt);
+	return tcp;
+}
+
+export function updateTcp(id, input = {}) {
+	const existing = getTcp(id);
+	if (!existing) return null;
+	const tcp = {
+		...existing,
+		name: input.name !== undefined ? normalizeCatalogName(input.name) : existing.name,
+		tags: input.tags !== undefined ? normalizeCatalogTags(input.tags) : existing.tags,
+		tools: input.tools !== undefined ? normalizeCatalogTcpTools(input.tools) : existing.tools,
+		updatedAt: new Date().toISOString(),
+	};
+	open()
+		.prepare("UPDATE tcps SET name = ?, tags = ?, payload = ?, updated_at = ? WHERE id = ?")
+		.run(tcp.name, JSON.stringify(tcp.tags), JSON.stringify({ tools: tcp.tools }), tcp.updatedAt, id);
+	return tcp;
+}
+
+export function deleteTcp(id) {
+	return open().prepare("DELETE FROM tcps WHERE id = ?").run(id).changes > 0;
+}
+
+/** Keeps a bundled file path inside its resource folder; `..` segments empty the path. */
+export function normalizeCatalogRelativePath(raw) {
+	const cleaned = String(raw).trim().replaceAll("\\", "/").replace(/^\/+/, "");
+	if (cleaned === "") return "";
+	const parts = [];
+	for (const segment of cleaned.split("/")) {
+		if (segment === "" || segment === ".") continue;
+		if (segment === "..") return "";
+		parts.push(segment);
+	}
+	return parts.join("/");
+}
+
+function catalogResourceSlug(name) {
+	const slug = name
+		.trim()
+		.toLowerCase()
+		.replace(/[^a-z0-9._-]+/g, "-")
+		.replace(/^-+|-+$/g, "");
+	return slug === "" ? "resource" : slug;
+}
+
+function normalizeCatalogResourceKind(raw) {
+	const value = String(raw ?? "").trim().toLowerCase();
+	return CATALOG_RESOURCE_KINDS.includes(value) ? value : "skill";
+}
+
+function normalizeCatalogEntryFile(raw, kind, name) {
+	const base = String(raw ?? "")
+		.trim()
+		.replaceAll("\\", "/")
+		.split("/")
+		.filter((segment) => segment !== "" && segment !== "." && segment !== "..")
+		.pop();
+	if (base && /\.(md|markdown|mdx|mdown|mkd)$/i.test(base)) return base;
+	return kind === "skill" ? "SKILL.md" : `${catalogResourceSlug(name)}.md`;
+}
+
+function normalizeCatalogResourceFiles(files) {
+	if (!Array.isArray(files)) return [];
+	const seen = new Set();
+	const out = [];
+	for (const raw of files) {
+		const obj = raw ?? {};
+		const path = typeof obj.path === "string" ? normalizeCatalogRelativePath(obj.path) : "";
+		if (path === "" || seen.has(path)) continue;
+		seen.add(path);
+		out.push({ path, content: typeof obj.content === "string" ? obj.content : String(obj.content ?? "") });
+	}
+	return out;
+}
+
+function normalizeCatalogResources(resources) {
+	if (!Array.isArray(resources)) return [];
+	const seen = new Set();
+	const out = [];
+	for (const raw of resources) {
+		const obj = raw ?? {};
+		const name = typeof obj.name === "string" ? obj.name.trim() : "";
+		const content = typeof obj.content === "string" ? obj.content : "";
+		if (name === "" || seen.has(name)) continue;
+		seen.add(name);
+		const kind = normalizeCatalogResourceKind(obj.kind);
+		out.push({
+			name,
+			description: typeof obj.description === "string" ? obj.description.trim() : "",
+			kind,
+			entryFile: normalizeCatalogEntryFile(obj.entryFile, kind, name),
+			content,
+			files: normalizeCatalogResourceFiles(obj.files),
+		});
+	}
+	return out;
+}
+
+function rowToCatalogResourceSet(row) {
+	const tags = Array.isArray(parseCatalogJson(row.tags, [])) ? parseCatalogJson(row.tags, []).map((tag) => String(tag)) : [];
+	const payload = parseCatalogJson(row.payload, {}) ?? {};
+	return {
+		id: row.id,
+		name: row.name,
+		tags,
+		resources: normalizeCatalogResources(payload.resources),
+		createdAt: row.created_at,
+		updatedAt: row.updated_at,
+	};
+}
+
+export function listResourceSets() {
+	return open()
+		.prepare("SELECT * FROM resource_sets ORDER BY created_at DESC, rowid DESC")
+		.all()
+		.map(rowToCatalogResourceSet);
+}
+
+export function getResourceSet(id) {
+	const row = open().prepare("SELECT * FROM resource_sets WHERE id = ?").get(id);
+	return row ? rowToCatalogResourceSet(row) : null;
+}
+
+export function createResourceSet(input = {}) {
+	const now = new Date().toISOString();
+	const set = {
+		id: randomUUID(),
+		name: normalizeCatalogName(input.name),
+		tags: normalizeCatalogTags(input.tags),
+		resources: normalizeCatalogResources(input.resources),
+		createdAt: now,
+		updatedAt: now,
+	};
+	open()
+		.prepare("INSERT INTO resource_sets (id, name, tags, payload, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)")
+		.run(set.id, set.name, JSON.stringify(set.tags), JSON.stringify({ resources: set.resources }), set.createdAt, set.updatedAt);
+	return set;
+}
+
+export function updateResourceSet(id, input = {}) {
+	const existing = getResourceSet(id);
+	if (!existing) return null;
+	const set = {
+		...existing,
+		name: input.name !== undefined ? normalizeCatalogName(input.name) : existing.name,
+		tags: input.tags !== undefined ? normalizeCatalogTags(input.tags) : existing.tags,
+		resources: input.resources !== undefined ? normalizeCatalogResources(input.resources) : existing.resources,
+		updatedAt: new Date().toISOString(),
+	};
+	open()
+		.prepare("UPDATE resource_sets SET name = ?, tags = ?, payload = ?, updated_at = ? WHERE id = ?")
+		.run(set.name, JSON.stringify(set.tags), JSON.stringify({ resources: set.resources }), set.updatedAt, id);
+	return set;
+}
+
+export function deleteResourceSet(id) {
+	return open().prepare("DELETE FROM resource_sets WHERE id = ?").run(id).changes > 0;
+}
+
+export const TEMPLATE_BUNDLE_KIND = "target.templates";
+export const TCP_BUNDLE_KIND = "target.tcps";
+export const RESOURCE_SET_BUNDLE_KIND = "target-server.resource-sets";
+export const CATALOG_BUNDLE_SCHEMA_VERSION = 1;
+
+export function catalogTemplateBundle(templates) {
+	return {
+		kind: TEMPLATE_BUNDLE_KIND,
+		schemaVersion: CATALOG_BUNDLE_SCHEMA_VERSION,
+		exportedAt: new Date().toISOString(),
+		templates: templates.map((template) => ({
+			name: template.name,
+			tags: template.tags,
+			steps: template.steps,
+			tcpIds: template.tcpIds,
+			tcpSelections: template.tcpSelections,
+			resourceSelections: template.resourceSelections,
+		})),
+	};
+}
+
+export function catalogTcpBundle(tcps) {
+	return {
+		kind: TCP_BUNDLE_KIND,
+		schemaVersion: CATALOG_BUNDLE_SCHEMA_VERSION,
+		exportedAt: new Date().toISOString(),
+		tcps: tcps.map((tcp) => ({
+			name: tcp.name,
+			tags: tcp.tags,
+			tools: tcp.tools.map((tool) => ({
+				...tool,
+				tokens: Object.fromEntries(Object.keys(tool.tokens ?? {}).map((key) => [key, ""])),
+			})),
+		})),
+	};
+}
+
+export function catalogResourceSetBundle(resourceSets) {
+	return {
+		kind: RESOURCE_SET_BUNDLE_KIND,
+		resourceSets: resourceSets.map((set) => ({
+			name: set.name,
+			tags: set.tags,
+			resources: set.resources,
+		})),
 	};
 }

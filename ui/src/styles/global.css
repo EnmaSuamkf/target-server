@@ -1210,3 +1210,47 @@ tbody tr.wf-row--selected, tbody tr.wf-row--selected:hover { background: var(--a
 	to { transform: rotate(360deg); }
 }
 
+/* Server catalog (Agent Resources) */
+.catalog-tabs { margin-bottom: var(--space-4); }
+.catalog-toolbar { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-bottom: var(--space-4); }
+.catalog-layout {
+	display: grid;
+	grid-template-columns: minmax(14rem, 18rem) minmax(0, 1fr);
+	gap: var(--space-4);
+	align-items: start;
+}
+.catalog-list { display: grid; gap: var(--space-2); }
+.catalog-card {
+	display: grid;
+	gap: var(--space-1);
+	width: 100%;
+	text-align: left;
+	padding: var(--space-3);
+	border: 1px solid var(--border);
+	border-radius: var(--radius-md);
+	background: var(--surface);
+	color: inherit;
+	font: inherit;
+	cursor: pointer;
+}
+.catalog-card--active { border-color: var(--accent-300, #93c5fd); background: var(--accent-50, #eff6ff); }
+.catalog-card-name { font-weight: 600; }
+.catalog-card-meta { color: var(--text-muted); font-size: var(--text-sm); }
+.catalog-editor { display: grid; gap: var(--space-3); }
+.catalog-field { display: grid; gap: var(--space-1); }
+.catalog-field span, .catalog-field-label { font-size: var(--text-sm); color: var(--text-muted); }
+.catalog-block {
+	display: grid;
+	gap: var(--space-2);
+	padding: var(--space-3);
+	border: 1px solid var(--border);
+	border-radius: var(--radius-md);
+	background: var(--surface);
+}
+.catalog-block-head { display: flex; justify-content: space-between; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
+.catalog-picker { display: grid; gap: var(--space-2); }
+.catalog-picker-tools { display: grid; gap: var(--space-1); padding-left: var(--space-4); }
+@media (max-width: 800px) {
+	.catalog-layout { grid-template-columns: 1fr; }
+}
+
