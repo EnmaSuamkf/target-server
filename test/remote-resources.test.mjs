@@ -72,7 +72,7 @@ test("remote resource operations require a declared sync/v2 capability and are i
 	const roleResponse = await fetch(`${base}/api/auth/roles`, {
 		method: "POST",
 		headers: { "content-type": "application/json", cookie: admin },
-		body: JSON.stringify({ name: "TCP operator", permissions: ["remote.read", "remote.tcp-tools.manage"] }),
+		body: JSON.stringify({ name: "TCP operator", permissions: ["remote.read", "remote.tcp-tools.create"] }),
 	});
 	const role = (await roleResponse.json()).role;
 	const inviteResponse = await fetch(`${base}/api/auth/users`, {
@@ -88,22 +88,38 @@ test("remote resource operations require a declared sync/v2 capability and are i
 		body: JSON.stringify({ token, password: "tcp-operator-pass-12" }),
 	});
 	const tcpOperator = setup.headers.get("set-cookie")?.split(";")[0];
-	assert.equal(
-		(await fetch(resourcePath, { method: "POST", headers: { "content-type": "application/json", cookie: tcpOperator }, body: JSON.stringify(body) })).status,
-		403,
-	);
+	const deniedTemplate = await fetch(resourcePath, {
+		method: "POST",
+		headers: { "content-type": "application/json", cookie: tcpOperator },
+		body: JSON.stringify(body),
+	});
+	assert.equal(deniedTemplate.status, 403);
+	assert.deepEqual(await deniedTemplate.json(), { error: "forbidden", permission: "remote.templates.create" });
 	const tcpPath = `${base}/api/sync/clients/${compatible.client_id}/tcp-tools`;
 	const tcpBody = { resource: { id: "tcp-1", name: "Browser", data: { command: "browser.open" } } };
 	assert.equal(
 		(await fetch(tcpPath, { method: "POST", headers: { "content-type": "application/json", cookie: tcpOperator }, body: JSON.stringify(tcpBody) })).status,
 		201,
 	);
+	const deniedTcpEdit = await fetch(`${tcpPath}/tcp-1`, {
+		method: "PATCH",
+		headers: { "content-type": "application/json", cookie: tcpOperator },
+		body: JSON.stringify(tcpBody),
+	});
+	assert.equal(deniedTcpEdit.status, 403);
+	assert.deepEqual(await deniedTcpEdit.json(), { error: "forbidden", permission: "remote.tcp-tools.edit" });
+	const deniedTcpDelete = await fetch(`${tcpPath}/tcp-1`, { method: "DELETE", headers: { cookie: tcpOperator } });
+	assert.equal(deniedTcpDelete.status, 403);
+	assert.deepEqual(await deniedTcpDelete.json(), { error: "forbidden", permission: "remote.tcp-tools.delete" });
 	const rciPath = `${base}/api/sync/clients/${compatible.client_id}/resource-sets`;
 	const rciBody = { resource: { id: "rci-1", name: "Project files", data: { paths: ["/tmp/project"] } } };
-	assert.equal(
-		(await fetch(rciPath, { method: "POST", headers: { "content-type": "application/json", cookie: tcpOperator }, body: JSON.stringify(rciBody) })).status,
-		403,
-	);
+	const deniedRci = await fetch(rciPath, {
+		method: "POST",
+		headers: { "content-type": "application/json", cookie: tcpOperator },
+		body: JSON.stringify(rciBody),
+	});
+	assert.equal(deniedRci.status, 403);
+	assert.deepEqual(await deniedRci.json(), { error: "forbidden", permission: "remote.rci.create" });
 	assert.equal(
 		(await fetch(rciPath, { method: "POST", headers: { "content-type": "application/json", cookie: admin }, body: JSON.stringify(rciBody) })).status,
 		201,
@@ -128,4 +144,56 @@ test("remote resource operations require a declared sync/v2 capability and are i
 	const afterDuplicate = await (await fetch(resourcePath, { headers: { cookie: admin } })).json();
 	assert.equal(afterDuplicate.resources.length, 1);
 	assert.equal(afterDuplicate.resources[0].revision, 2);
+
+	const patched = await fetch(`${resourcePath}/template-1`, {
+		method: "PATCH",
+		headers: { "content-type": "application/json", cookie: admin },
+		body: JSON.stringify({ resource: { id: "template-1", name: "Audit edited", data: { steps: [] } } }),
+	});
+	assert.equal(patched.status, 201);
+	const deletedRci = await fetch(`${rciPath}/rci-1`, { method: "DELETE", headers: { cookie: admin } });
+	assert.equal(deletedRci.status, 200);
+
+	const deniedExport = await fetch(`${resourcePath}/export`, { headers: { cookie: tcpOperator } });
+	assert.equal(deniedExport.status, 403);
+	assert.deepEqual(await deniedExport.json(), { error: "forbidden", permission: "remote.templates.export" });
+	const deniedImport = await fetch(`${resourcePath}/import`, {
+		method: "POST",
+		headers: { "content-type": "application/json", cookie: tcpOperator },
+		body: JSON.stringify({ resources: [body.resource] }),
+	});
+	assert.equal(deniedImport.status, 403);
+	assert.deepEqual(await deniedImport.json(), { error: "forbidden", permission: "remote.templates.import" });
+
+	const exported = await fetch(`${resourcePath}/export`, { headers: { cookie: admin } });
+	assert.equal(exported.status, 200);
+	assert.match(exported.headers.get("content-disposition") ?? "", /templates-export\.json/);
+	const bundle = await exported.json();
+	assert.equal(bundle.contract_version, "sync/v2");
+	assert.equal(bundle.domain, "templates");
+	assert.deepEqual(bundle.resources, [{ id: "template-1", name: "Audit edited", data: { steps: [] } }]);
+	assert.equal(JSON.stringify(bundle).includes("token"), false);
+
+	const imported = await fetch(`${tcpPath}/import`, {
+		method: "POST",
+		headers: { "content-type": "application/json", cookie: admin, "idempotency-key": "tcp-import-1" },
+		body: JSON.stringify({
+			contract_version: "sync/v2",
+			domain: "tcp_tools",
+			resources: [{ id: "tcp-imported", name: "Imported browser", data: { command: "browser.open" } }],
+		}),
+	});
+	assert.equal(imported.status, 201);
+	const importedBody = await imported.json();
+	assert.equal(importedBody.commands.length, 1);
+	assert.equal(importedBody.commands[0].command.type, "tcp-tool.upsert");
+	const importedAgain = await fetch(`${tcpPath}/import`, {
+		method: "POST",
+		headers: { "content-type": "application/json", cookie: admin, "idempotency-key": "tcp-import-1" },
+		body: JSON.stringify({
+			resources: [{ id: "tcp-imported", name: "Imported browser", data: { command: "browser.open" } }],
+		}),
+	});
+	assert.equal(importedAgain.status, 200);
+	assert.equal((await importedAgain.json()).commands[0].idempotent, true);
 });

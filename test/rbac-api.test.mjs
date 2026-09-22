@@ -56,7 +56,13 @@ test("RBAC endpoints deny insufficient permissions and revoke sessions on role c
 	assert.ok(viewer);
 
 	const me = await fetch(`${base}/api/auth/me`, { headers: { cookie: viewer } });
-	assert.deepEqual((await me.json()).user.permissions, ["activity.read"]);
+	const meBody = await me.json();
+	assert.deepEqual(meBody.user.permissions, ["activity.read"]);
+	assert.ok(meBody.catalog.groups.some((group) => group.permissions.some((permission) => permission.id === "users.manage")));
+	const rolesList = await fetch(`${base}/api/auth/roles`, { headers: { cookie: admin } });
+	const rolesBody = await rolesList.json();
+	assert.equal(rolesList.status, 200);
+	assert.deepEqual(rolesBody.catalog, meBody.catalog);
 	assert.equal((await fetch(`${base}/api/stats`, { headers: { cookie: viewer } })).status, 200);
 	assert.equal((await fetch(`${base}/api/auth/users`, { headers: { cookie: viewer } })).status, 403);
 	assert.equal((await fetch(`${base}/api/auth/roles`, { headers: { cookie: viewer } })).status, 403);

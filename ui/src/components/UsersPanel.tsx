@@ -11,8 +11,8 @@ import {
 	resendInvite,
 	updateAuthRole,
 } from "../api/auth.ts";
-import { PERMISSION_CATALOG } from "../api/permissions.ts";
-import type { AuthRole, AuthUser, FieldError, InviteLinks } from "../api/types.ts";
+import { resolvePermissionCatalog } from "../api/permissions.ts";
+import type { AuthRole, AuthUser, FieldError, InviteLinks, PermissionCatalog, PermissionCatalogGroup } from "../api/types.ts";
 import { timeAgo } from "../lib/format.ts";
 
 function fieldErrors(errors: FieldError[], field: string) {
@@ -44,9 +44,10 @@ function mergePendingInvite(userId: string, invite: InviteLinks): PendingInvite 
 	};
 }
 
-export function UsersPanel({ currentUser }: { currentUser: AuthUser }) {
+export function UsersPanel({ currentUser, catalog = null }: { currentUser: AuthUser; catalog?: PermissionCatalog | null }) {
 	const [users, setUsers] = useState<AuthUser[] | null>(null);
 	const [roles, setRoles] = useState<AuthRole[] | null>(null);
+	const [roleCatalog, setRoleCatalog] = useState<PermissionCatalog | null>(catalog);
 	const [loadError, setLoadError] = useState<string | null>(null);
 	const [email, setEmail] = useState("");
 	const [roleId, setRoleId] = useState("");
@@ -65,6 +66,7 @@ export function UsersPanel({ currentUser }: { currentUser: AuthUser }) {
 			const [userRes, roleRes] = await Promise.all([listAuthUsers(), listAuthRoles()]);
 			setUsers(userRes.users);
 			setRoles(roleRes.roles);
+			if (roleRes.catalog) setRoleCatalog(roleRes.catalog);
 			setRoleId((current) => current || roleRes.roles[0]?.id || "");
 			setLoadError(null);
 		} catch (e) {
@@ -392,17 +394,11 @@ export function UsersPanel({ currentUser }: { currentUser: AuthUser }) {
 				<div className="users-confirm" role="dialog" aria-modal="true" aria-label="Role editor">
 					<h2>{roleDraft.id ? "Edit role" : "Create role"}</h2>
 					<input className="input" value={roleDraft.name} placeholder="Role name" onChange={(e) => setRoleDraft({ ...roleDraft, name: e.target.value })} />
-					<div className="users-permissions">
-						{PERMISSION_CATALOG.map((permission) => (
-							<label className="users-check" key={permission.id}>
-								<input type="checkbox" checked={roleDraft.permissions.includes(permission.id)} onChange={(e) => setRoleDraft({
-									...roleDraft,
-									permissions: e.target.checked ? [...roleDraft.permissions, permission.id] : roleDraft.permissions.filter((id) => id !== permission.id),
-								})} />
-								<span><strong>{permission.label}</strong><small>{permission.description}</small></span>
-							</label>
-						))}
-					</div>
+					<RoleCatalogEditor
+						groups={resolvePermissionCatalog(roleCatalog ?? catalog)}
+						selected={roleDraft.permissions}
+						onChange={(permissions) => setRoleDraft({ ...roleDraft, permissions })}
+					/>
 					<div className="users-confirm-actions">
 						<button type="button" className="btn" onClick={() => setRoleDraft(null)}>Cancel</button>
 						<button type="button" className="btn btn--on" disabled={busy || !roleDraft.name.trim()} onClick={() => void saveRole()}>Save role</button>
@@ -435,6 +431,80 @@ export function UsersPanel({ currentUser }: { currentUser: AuthUser }) {
 					</div>
 				</div>
 			) : null}
+		</div>
+	);
+}
+
+const ROLE_SCOPES = [
+	{ id: "server" as const, label: "Server" },
+	{ id: "client" as const, label: "Client" },
+];
+
+function toggleIds(selected: string[], ids: string[], checked: boolean) {
+	if (checked) return [...new Set([...selected, ...ids])];
+	const drop = new Set(ids);
+	return selected.filter((id) => !drop.has(id));
+}
+
+function RoleCatalogEditor({
+	groups,
+	selected,
+	onChange,
+}: {
+	groups: PermissionCatalogGroup[];
+	selected: string[];
+	onChange: (permissions: string[]) => void;
+}) {
+	return (
+		<div className="users-permissions">
+			{ROLE_SCOPES.map((scope) => {
+				const scoped = groups.filter((group) => group.scope === scope.id);
+				if (!scoped.length) return null;
+				return (
+					<section key={scope.id} className="users-perm-scope">
+						<h3 className="users-perm-scope__title">{scope.label}</h3>
+						{scoped.map((group) => {
+							const ids = group.permissions.map((permission) => permission.id);
+							const chosen = ids.filter((id) => selected.includes(id)).length;
+							const all = ids.length > 0 && chosen === ids.length;
+							const some = chosen > 0 && !all;
+							return (
+								<div className="users-perm-group" key={group.id}>
+									<label className="users-check users-perm-group__all">
+										<input
+											type="checkbox"
+											checked={all}
+											ref={(el) => {
+												if (el) el.indeterminate = some;
+											}}
+											onChange={(e) => onChange(toggleIds(selected, ids, e.target.checked))}
+										/>
+										<span>
+											<strong>Select all · {group.label}</strong>
+											<small>{group.description}</small>
+										</span>
+									</label>
+									<div className="users-perm-group__list">
+										{group.permissions.map((permission) => (
+											<label className="users-check" key={permission.id}>
+												<input
+													type="checkbox"
+													checked={selected.includes(permission.id)}
+													onChange={(e) => onChange(toggleIds(selected, [permission.id], e.target.checked))}
+												/>
+												<span>
+													<strong>{permission.label}</strong>
+													<small>{permission.description}</small>
+												</span>
+											</label>
+										))}
+									</div>
+								</div>
+							);
+						})}
+					</section>
+				);
+			})}
 		</div>
 	);
 }

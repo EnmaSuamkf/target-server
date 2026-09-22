@@ -8,6 +8,7 @@ import type {
 	SyncRemoteWorkflowsResponse,
 	RemoteResource,
 	RemoteResourceDomain,
+	RemoteResourceBundle,
 	RemoteResourcesResponse,
 } from "./types.ts";
 
@@ -120,6 +121,51 @@ export async function mutateRemoteResource(
 		return { ok: false as const, error: data.detail ?? data.error ?? data.errors?.[0]?.message ?? `HTTP ${res.status}` };
 	}
 	return { ok: true as const, command: data.command as SyncCommand, idempotent: data.idempotent === true };
+}
+
+export async function exportRemoteResources(clientId: string, domain: RemoteResourceDomain) {
+	const res = await fetch(`/api/sync/clients/${encodeURIComponent(clientId)}/${domain}/export`);
+	if (!res.ok) {
+		const data = (await res.json().catch(() => ({}))) as { error?: string; permission?: string; detail?: string };
+		return { ok: false as const, error: data.detail ?? data.error ?? `HTTP ${res.status}`, permission: data.permission };
+	}
+	const filename =
+		res.headers.get("content-disposition")?.match(/filename="([^"]+)"/)?.[1] ?? `${domain}-export.json`;
+	const bundle = (await res.json()) as RemoteResourceBundle;
+	return { ok: true as const, filename, bundle };
+}
+
+export async function importRemoteResources(clientId: string, domain: RemoteResourceDomain, bundle: RemoteResourceBundle) {
+	const res = await fetch(`/api/sync/clients/${encodeURIComponent(clientId)}/${domain}/import`, {
+		method: "POST",
+		headers: { "content-type": "application/json", "idempotency-key": `${domain}:import:${Date.now()}` },
+		body: JSON.stringify(bundle),
+	});
+	const data = (await res.json().catch(() => ({}))) as {
+		commands?: Array<{ command: SyncCommand; idempotent: boolean }>;
+		error?: string;
+		permission?: string;
+		detail?: string;
+		errors?: FieldError[];
+	};
+	if (!res.ok) {
+		return {
+			ok: false as const,
+			error: data.detail ?? data.error ?? data.errors?.[0]?.message ?? `HTTP ${res.status}`,
+			permission: data.permission,
+		};
+	}
+	return { ok: true as const, commands: data.commands ?? [] };
+}
+
+export function downloadJson(filename: string, value: unknown) {
+	const blob = new Blob([JSON.stringify(value, null, 2)], { type: "application/json" });
+	const url = URL.createObjectURL(blob);
+	const link = document.createElement("a");
+	link.href = url;
+	link.download = filename;
+	link.click();
+	URL.revokeObjectURL(url);
 }
 
 export type { SyncClientsResponse, SyncRemoteWorkflowsResponse, SyncEventsResponse, SyncRemoteWorkflowDetailResponse, RemoteResourcesResponse, RemoteResource };

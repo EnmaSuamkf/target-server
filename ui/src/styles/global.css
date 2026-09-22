@@ -1097,9 +1097,14 @@ tbody tr.wf-row--selected, tbody tr.wf-row--selected:hover { background: var(--a
 .users-roles { display: grid; gap: var(--space-2); }
 .users-role-row, .panel-heading { display: flex; justify-content: space-between; gap: var(--space-3); align-items: center; flex-wrap: wrap; }
 .users-role-row { padding: var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-md); }
-.users-permissions { display: grid; gap: var(--space-2); margin-top: var(--space-3); }
+.users-permissions { display: grid; gap: var(--space-4); margin-top: var(--space-3); }
 .users-permissions .users-check { align-items: flex-start; }
 .users-permissions small { display: block; color: var(--text-muted); font-weight: normal; }
+.users-perm-scope { display: grid; gap: var(--space-3); }
+.users-perm-scope__title { margin: 0; font-size: var(--text-md); }
+.users-perm-group { display: grid; gap: var(--space-2); padding: var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-md); }
+.users-perm-group__all { padding-bottom: var(--space-2); border-bottom: 1px solid var(--border); }
+.users-perm-group__list { display: grid; gap: var(--space-2); padding-left: var(--space-4); }
 
 .badge--warn { background: var(--warn-50); color: var(--warn-700); border: 1px solid var(--warn-200); }
 .badge--success { background: var(--success-50); color: var(--success-700); border: 1px solid var(--success-200); }
@@ -1111,7 +1116,19 @@ tbody tr.wf-row--selected, tbody tr.wf-row--selected:hover { background: var(--a
 .sync-create-row { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
 .sync-create-row .select, .sync-create-row .input { min-width: 10rem; flex: 1; }
 .sync-create-hint { margin: 0; }
+.sr-only {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	padding: 0;
+	margin: -1px;
+	overflow: hidden;
+	clip: rect(0, 0, 0, 0);
+	white-space: nowrap;
+	border: 0;
+}
 .remote-resources { display: grid; gap: var(--space-3); }
+.remote-resources-actions { justify-content: flex-start; }
 .remote-resources-tabs { margin: 0; }
 .remote-resources-reason { padding: var(--space-3); border-radius: var(--radius-md); background: var(--warn-50); color: var(--warn-700); }
 .sync-context-field { display: flex; flex-direction: column; gap: var(--space-1); }

@@ -92,8 +92,11 @@ which still lists reporting instance display names.
 Roles are dynamic and permissions are enforced by the backend. The protected
 `admin` role has every permission; editing/deleting it, removing the last
 administrator, and deleting/changing your own account are blocked. See
-[`docs/rbac.md`](docs/rbac.md) for the permission catalogue, 401/403 semantics,
-role API and invitation flow.
+[`docs/rbac.md`](docs/rbac.md) for the permission catalogue (grouped by server
+vs client scope), `{ user, catalog }` session payload, 401/403 semantics,
+role API and invitation flow. Resource domains use `create` / `edit` /
+`delete` / `import` / `export` — not `remote.templates.manage`,
+`remote.tcp-tools.manage` or `remote.rci.manage`.
 
 First run on a fresh database seeds `admin@admin.com`. Invite additional
 operators from the **Users** panel. Local/CI defaults write `.mail-outbox/*.eml`
@@ -407,7 +410,7 @@ All `GET /api/*` routes below require a session unless noted.
 - `GET /api/auth/google/callback` — OAuth callback (invite-only; sets session cookie)
 - `POST /api/auth/login` — sign in (`admin@admin.com` on a fresh DB)
 - `POST /api/auth/logout` — sign out
-- `GET /api/auth/me` — current operator
+- `GET /api/auth/me` — `{ user, catalog }` for the current operator (`user.permissions` is the granted ID list; `catalog.groups` is the closed vocabulary)
 - `POST /api/auth/forgot-password` — email a reset link (always 202; anonymous login/forgot flow, no URL in response)
 - `POST /api/auth/password-reset` — authenticated dashboard **Change password**: body `{ "deliver": "email" | "link" }` (email sends mail; `link` returns `reset.resetUrl` for copy)
 - `POST /api/auth/setup` — complete an invitation (`/setup?token=…`)

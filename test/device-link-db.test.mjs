@@ -51,6 +51,8 @@ test("additive migration preserves legacy rows and widens the closed RBAC catalo
 	assert.equal(db.open().prepare("SELECT id FROM clients WHERE id = ?").get("preserved-client").id, "preserved-client");
 	assert.ok(db.PERMISSIONS.includes("devices.link"));
 	assert.ok(db.PERMISSIONS.includes("devices.manage"));
+	assert.ok(db.PERMISSIONS.includes("remote.templates.create"));
+	assert.equal(db.PERMISSIONS.includes("remote.templates.manage"), false);
 	assert.deepEqual(db.getRoleById("admin").permissions, [...db.PERMISSIONS].sort());
 	assert.equal(db.isValidPermission("devices.link"), true);
 	assert.equal(db.isValidPermission("devices.escalate"), false);

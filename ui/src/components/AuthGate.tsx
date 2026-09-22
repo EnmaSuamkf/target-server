@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useState } from "react";
 import { fetchMe } from "../api/auth.ts";
-import type { AuthUser } from "../api/types.ts";
+import type { AuthSession, AuthUser, PermissionCatalog } from "../api/types.ts";
 import { App } from "../App.tsx";
 import { DeviceApprovalPage } from "./DeviceApprovalPage.tsx";
 import { LoginPage } from "./LoginPage.tsx";
@@ -17,40 +17,43 @@ export function useUnauthorized() {
 export function AuthGate() {
 	const [state, setState] = useState<GateState>("checking");
 	const [user, setUser] = useState<AuthUser | null>(null);
+	const [catalog, setCatalog] = useState<PermissionCatalog | null>(null);
 	const path = typeof location !== "undefined" ? location.pathname : "/";
+
+	const applySession = useCallback((session: AuthSession | null) => {
+		if (!session) {
+			setUser(null);
+			setCatalog(null);
+			setState("anonymous");
+			return;
+		}
+		setUser(session.user);
+		setCatalog(session.catalog);
+		setState("signed-in");
+	}, []);
 
 	const probe = useCallback(async () => {
 		try {
-			const me = await fetchMe();
-			if (me) {
-				setUser(me.user);
-				setState("signed-in");
-			} else {
-				setUser(null);
-				setState("anonymous");
-			}
+			applySession(await fetchMe());
 		} catch {
-			setUser(null);
-			setState("anonymous");
+			applySession(null);
 		}
-	}, []);
+	}, [applySession]);
 
 	useEffect(() => {
 		void probe();
 	}, [probe]);
 
 	const onUnauthorized = useCallback(() => {
-		setUser(null);
-		setState("anonymous");
-	}, []);
+		applySession(null);
+	}, [applySession]);
 
-	const onSignedIn = useCallback((u: AuthUser) => {
-		setUser(u);
-		setState("signed-in");
+	const onSignedIn = useCallback((session: AuthSession) => {
+		applySession(session);
 		if (path === "/setup" || path === "/reset") {
 			history.replaceState(null, "", "/");
 		}
-	}, [path]);
+	}, [applySession, path]);
 
 	if (path === "/setup" || path === "/reset") {
 		return (
@@ -79,7 +82,7 @@ export function AuthGate() {
 
 	return (
 		<UnauthorizedContext.Provider value={onUnauthorized}>
-			<App user={user!} onSignOut={() => { setUser(null); setState("anonymous"); }} />
+			<App user={user!} catalog={catalog} onSignOut={() => { applySession(null); }} />
 		</UnauthorizedContext.Provider>
 	);
 }

@@ -90,6 +90,19 @@ test("command payload: workflow.start accepts step_keys", () => {
 	assert.deepEqual(r.value.step_keys, ["step-1", "step-2"]);
 });
 
+test("resource import bundle requires at least one resource", () => {
+	const ok = validate("sync.resource.import", {
+		contract_version: "sync/v2",
+		domain: "templates",
+		resources: [{ id: "t1", name: "Audit", data: { steps: [] } }],
+	});
+	assert.equal(ok.ok, true);
+	assert.equal(ok.value.resources[0].id, "t1");
+	const bad = validate("sync.resource.import", { resources: [] });
+	assert.equal(bad.ok, false);
+	assert.ok(bad.errors.some((e) => e.field === "resources"));
+});
+
 test("enqueue_command request keeps step_keys in payload", () => {
 	const r = validate("sync.remote_workflow.enqueue_command", {
 		type: "workflow.restart",

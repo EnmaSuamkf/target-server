@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { fetchAuthProviders, forgotPassword, login } from "../api/auth.ts";
-import type { AuthUser, FieldError } from "../api/types.ts";
+import type { AuthSession, FieldError } from "../api/types.ts";
 import { TargetMark } from "./TargetMark.tsx";
 
 function fieldErrors(errors: FieldError[], field: string) {
@@ -45,7 +45,7 @@ function oauthErrorMessage(code: string | null): string | null {
 	}
 }
 
-export function LoginPage({ onSuccess }: { onSuccess: (user: AuthUser) => void }) {
+export function LoginPage({ onSuccess }: { onSuccess: (session: AuthSession) => void }) {
 	const [email, setEmail] = useState("");
 	const [password, setPassword] = useState("");
 	const [mode, setMode] = useState<"login" | "forgot" | "sent">("login");
@@ -90,7 +90,7 @@ export function LoginPage({ onSuccess }: { onSuccess: (user: AuthUser) => void }
 				else setBadCreds(true);
 				return;
 			}
-			onSuccess(res.user);
+			onSuccess({ user: res.user, catalog: res.catalog ?? { groups: [] } });
 		} finally {
 			setBusy(false);
 		}

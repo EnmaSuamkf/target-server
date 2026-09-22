@@ -3,6 +3,7 @@ import { kindLabel, kindTip } from "./api/kinds.ts";
 import { logout, requestPasswordReset } from "./api/auth.ts";
 import type {
 	AuthUser,
+	PermissionCatalog,
 	EventsResponse,
 	Filters,
 	InstancesResponse,
@@ -17,6 +18,7 @@ import type {
 	SyncRemoteWorkflowDetailResponse,
 	SyncRemoteWorkflowsResponse,
 	LinkedDevicesResponse,
+	RemoteResourceActions,
 } from "./api/types.ts";
 import { EMPTY_FILTERS } from "./api/types.ts";
 import { Bars } from "./components/Bars.tsx";
@@ -34,6 +36,7 @@ import { UsersPanel } from "./components/UsersPanel.tsx";
 import { WorkflowDetail } from "./components/WorkflowDetail.tsx";
 import { WorkflowsTable } from "./components/WorkflowsTable.tsx";
 import { useApi } from "./hooks/useApi.ts";
+import { hasPermission } from "./api/permissions.ts";
 import { compactNumber, localToIso } from "./lib/format.ts";
 
 const POLL_MS = 4000;
@@ -166,15 +169,26 @@ function ChangePasswordButton() {
  * — filtering happens in SQL, so the KPIs, breakdowns, tables and feed below
  * always answer the same question.
  */
-export function App({ user, onSignOut }: { user: AuthUser; onSignOut: () => void }) {
-	const can = (permission: string) => user.permissions.includes(permission);
+export function App({ user, catalog = null, onSignOut }: { user: AuthUser; catalog?: PermissionCatalog | null; onSignOut: () => void }) {
+	const can = (permission: string) => hasPermission(user, permission);
 	const canActivity = can("activity.read");
 	const canUsers = can("users.manage");
 	const canRemote = can("remote.read");
+	const canCreateRemote = can("remote.workflows.create");
+	const canAddRemoteStep = can("remote.workflows.steps.add");
+	const canEditRemoteStep = can("remote.workflows.steps.edit");
 	const canManageRemote = can("remote.workflows.manage");
-	const canManageTemplates = can("remote.templates.manage");
-	const canManageTcpTools = can("remote.tcp-tools.manage");
-	const canManageRci = can("remote.rci.manage");
+	const canExecuteRemote = can("remote.workflows.execute");
+	const resourceActions = (prefix: "remote.templates" | "remote.tcp-tools" | "remote.rci"): RemoteResourceActions => ({
+		create: can(`${prefix}.create`),
+		edit: can(`${prefix}.edit`),
+		delete: can(`${prefix}.delete`),
+		import: can(`${prefix}.import`),
+		export: can(`${prefix}.export`),
+	});
+	const templateActions = resourceActions("remote.templates");
+	const tcpActions = resourceActions("remote.tcp-tools");
+	const rciActions = resourceActions("remote.rci");
 	const canManageDevices = can("devices.manage");
 	const canSeeRemoteArea = canRemote || canManageDevices;
 	const availableTabs = useMemo<DashboardTab[]>(
@@ -459,7 +473,7 @@ export function App({ user, onSignOut }: { user: AuthUser; onSignOut: () => void
 					<>
 						<h1 className="page-title">Users</h1>
 						<p className="page-sub">Manage dashboard accounts, invitations, roles and permissions.</p>
-						<UsersPanel currentUser={user} />
+						<UsersPanel currentUser={user} catalog={catalog} />
 					</>
 				) : (
 					<>
@@ -479,7 +493,7 @@ export function App({ user, onSignOut }: { user: AuthUser; onSignOut: () => void
 							<DevicesPanel devices={linkedDevices?.devices ?? null} onChanged={syncRefresh} />
 						</div> : null}
 
-						{canRemote && canManageRemote ? <div className="panel" id="sync-remote-workflows">
+						{canRemote ? <div className="panel" id="sync-remote-workflows">
 							<h2>Remote workflows</h2>
 							<div className="panel-note">Create and control workflows on connected clients.</div>
 							<RemoteWorkflowsPanel
@@ -490,21 +504,28 @@ export function App({ user, onSignOut }: { user: AuthUser; onSignOut: () => void
 								selectedId={selectedRemoteId}
 								onSelect={setSelectedRemoteId}
 								onRefresh={syncRefresh}
+								permissions={{
+									create: canCreateRemote,
+									addStep: canAddRemoteStep,
+									editStep: canEditRemoteStep,
+									manage: canManageRemote,
+									execute: canExecuteRemote,
+								}}
 								onOpenInActivity={(localId) => {
 									setTab("activity");
 									setFilters((f) => ({ ...f, workflow: localId }));
 								}}
 							/>
-						</div> : canRemote ? <div className="panel"><h2>Remote workflows</h2><p className="panel-note">You can view connected clients, but managing remote workflows requires additional permission.</p></div> : null}
+						</div> : null}
 
 						{canRemote ? <div className="panel" id="sync-remote-resources">
 							<h2>Remote resources</h2>
 							<div className="panel-note">Templates, TCP tools and RCI resource sets are mirrored per Target client and applied through the sync queue.</div>
 							<RemoteResourcesPanel
 								clients={syncClients?.clients ?? null}
-								canManageTemplates={canManageTemplates}
-								canManageTcpTools={canManageTcpTools}
-								canManageRci={canManageRci}
+								templateActions={templateActions}
+								tcpActions={tcpActions}
+								rciActions={rciActions}
 								onRefresh={syncRefresh}
 							/>
 						</div> : null}

@@ -25,6 +25,39 @@ test("login success sets cookie and me works", async () => {
 	assert.equal(me.status, 200);
 	const body = await me.json();
 	assert.equal(body.user.email, DEFAULT_ADMIN_EMAIL);
+	assert.ok(Array.isArray(body.user.permissions));
+	assert.ok(body.user.permissions.includes("activity.read"));
+	assert.ok(Array.isArray(body.catalog?.groups));
+	assert.ok(body.catalog.groups.length > 0);
+	for (const group of body.catalog.groups) {
+		assert.ok(group.scope === "server" || group.scope === "client");
+		assert.equal(typeof group.id, "string");
+		assert.equal(typeof group.label, "string");
+		assert.equal(typeof group.description, "string");
+		assert.ok(Array.isArray(group.permissions));
+		assert.ok(group.permissions.length > 0);
+		for (const permission of group.permissions) {
+			assert.equal(typeof permission.id, "string");
+			assert.equal(typeof permission.label, "string");
+			assert.equal(typeof permission.description, "string");
+		}
+	}
+	const catalogIds = body.catalog.groups.flatMap((group) => group.permissions.map((permission) => permission.id));
+	assert.ok(catalogIds.includes("remote.workflows.create"));
+	assert.ok(catalogIds.includes("remote.templates.export"));
+	assert.ok(body.user.permissions.every((id) => catalogIds.includes(id)));
+});
+
+test("login returns the same session catalog as /api/auth/me", async () => {
+	const res = await fetch(`${base}/api/auth/login`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ email: DEFAULT_ADMIN_EMAIL, password: DEFAULT_ADMIN_PASSWORD }),
+	});
+	assert.equal(res.status, 200);
+	const body = await res.json();
+	assert.ok(Array.isArray(body.user.permissions));
+	assert.ok(body.catalog.groups.some((group) => group.id === "client.workflows"));
 });
 
 test("login failure is identical for unknown email", async () => {
