@@ -320,6 +320,8 @@ function migrateSyncSchema(database) {
 	addColumn("remote_workflows", "conversation_context", "TEXT");
 	addColumn("remote_workflows", "sandbox", "TEXT NOT NULL DEFAULT 'docker'");
 	addColumn("remote_workflows", "agent", "TEXT");
+	addColumn("remote_workflows", "tcp_selections", "TEXT NOT NULL DEFAULT '[]'");
+	addColumn("remote_workflows", "resource_selections", "TEXT NOT NULL DEFAULT '[]'");
 	addColumn("remote_workflow_steps", "on_client", "INTEGER NOT NULL DEFAULT 0");
 	addColumn("remote_workflow_steps", "run_selected", "INTEGER NOT NULL DEFAULT 1");
 	database.exec(`
@@ -2512,6 +2514,15 @@ function rowToClient(r) {
 	};
 }
 
+function parseRemoteSelectionJson(raw) {
+	try {
+		const parsed = JSON.parse(raw ?? "[]");
+		return Array.isArray(parsed) ? parsed : [];
+	} catch {
+		return [];
+	}
+}
+
 function rowToRemoteWorkflow(r) {
 	if (!r) return null;
 	return {
@@ -2525,6 +2536,8 @@ function rowToRemoteWorkflow(r) {
 		stepCount: r.step_count ?? undefined,
 		stepsPendingSync: r.steps_pending_sync ?? undefined,
 		agent: r.agent ?? null,
+		tcpSelections: normalizeCatalogTcpSelections(parseRemoteSelectionJson(r.tcp_selections)),
+		resourceSelections: normalizeCatalogResourceSelections(parseRemoteSelectionJson(r.resource_selections)),
 		createdAt: r.created_at,
 	};
 }
@@ -2883,6 +2896,18 @@ export function createRemoteWorkflow({
 		)
 		.run(remoteId, clientId, name, status, conversationContext, sandbox, agent, now);
 	return getRemoteWorkflowById(remoteId);
+}
+
+/** Replace persisted TCP/RCI selections on a remote workflow. */
+export function setRemoteWorkflowSelections(id, { tcpSelections, resourceSelections } = {}) {
+	const existing = getRemoteWorkflowById(id);
+	if (!existing) return null;
+	const tcp = tcpSelections !== undefined ? tcpSelections : existing.tcpSelections;
+	const resources = resourceSelections !== undefined ? resourceSelections : existing.resourceSelections;
+	open()
+		.prepare("UPDATE remote_workflows SET tcp_selections = ?, resource_selections = ? WHERE id = ?")
+		.run(JSON.stringify(tcp), JSON.stringify(resources), id);
+	return getRemoteWorkflowById(id);
 }
 
 /** Update conversation context on a remote workflow (server-side plan). */
@@ -3456,6 +3481,94 @@ function normalizeCatalogResourceSelections(input) {
 			resourceNames = names.length === 0 ? null : names;
 		}
 		out.push({ resourceSetId, resourceNames });
+	}
+	return out;
+}
+
+/** null / empty names mean "all" and win over a partial list. */
+function mergeSelectionNames(a, b) {
+	if (!a || a.length === 0 || !b || b.length === 0) return null;
+	return [...new Set([...a, ...b])];
+}
+
+/** Union by tcpId; null toolNames (all tools) wins. */
+export function mergeTcpSelections(existing, incoming) {
+	const map = new Map();
+	for (const sel of existing ?? []) map.set(sel.tcpId, sel);
+	for (const sel of incoming ?? []) {
+		const prev = map.get(sel.tcpId);
+		if (!prev) {
+			map.set(sel.tcpId, sel);
+			continue;
+		}
+		map.set(sel.tcpId, { tcpId: sel.tcpId, toolNames: mergeSelectionNames(prev.toolNames, sel.toolNames) });
+	}
+	return [...map.values()];
+}
+
+/** Union by resourceSetId; null resourceNames (all resources) wins. */
+export function mergeResourceSelections(existing, incoming) {
+	const map = new Map();
+	for (const sel of existing ?? []) map.set(sel.resourceSetId, sel);
+	for (const sel of incoming ?? []) {
+		const prev = map.get(sel.resourceSetId);
+		if (!prev) {
+			map.set(sel.resourceSetId, sel);
+			continue;
+		}
+		map.set(sel.resourceSetId, {
+			resourceSetId: sel.resourceSetId,
+			resourceNames: mergeSelectionNames(prev.resourceNames, sel.resourceNames),
+		});
+	}
+	return [...map.values()];
+}
+
+function unknownCatalogError(code) {
+	const err = new Error(code);
+	err.statusCode = 422;
+	err.code = code;
+	return err;
+}
+
+/** Reject unknown catalog ids; drop tool names that are not on the pack. */
+export function validateRemoteTcpSelections(input) {
+	const normalized = normalizeCatalogTcpSelections(input);
+	const out = [];
+	for (const sel of normalized) {
+		const tcp = getTcp(sel.tcpId);
+		if (!tcp) throw unknownCatalogError(`unknown_tcp:${sel.tcpId}`);
+		if (sel.toolNames == null) {
+			out.push({ tcpId: sel.tcpId, toolNames: null });
+			continue;
+		}
+		const names = sel.toolNames.filter((name) => tcp.tools.some((tool) => tool.name === name));
+		if (names.length === 0) continue;
+		out.push({
+			tcpId: sel.tcpId,
+			toolNames: names.length === tcp.tools.length ? null : names,
+		});
+	}
+	return out;
+}
+
+/** Reject unknown catalog ids; drop resource names that are not in the set. */
+export function validateRemoteResourceSelections(input) {
+	const normalized = normalizeCatalogResourceSelections(input);
+	const out = [];
+	for (const sel of normalized) {
+		const set = getResourceSet(sel.resourceSetId);
+		if (!set) throw unknownCatalogError(`unknown_resource_set:${sel.resourceSetId}`);
+		if (sel.resourceNames == null) {
+			out.push({ resourceSetId: sel.resourceSetId, resourceNames: null });
+			continue;
+		}
+		const names = sel.resourceNames.filter((name) => set.resources.some((resource) => resource.name === name));
+		if (names.length === 0) continue;
+		out.push({
+			resourceSetId: sel.resourceSetId,
+			resourceNames: names.length === set.resources.length ? null : names,
+		});
 	}
 	return out;
 }

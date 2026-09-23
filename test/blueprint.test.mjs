@@ -113,6 +113,22 @@ test("steps from template requires template_id", () => {
 	assert.ok(bad.errors.some((e) => e.field === "template_id"));
 });
 
+test("remote workflow selection payloads accept arrays", () => {
+	const tcps = validate("sync.remote_workflow.set_tcps", {
+		tcp_selections: [{ tcpId: "tcp-1", toolNames: ["status"] }],
+	});
+	assert.equal(tcps.ok, true);
+	const resources = validate("sync.remote_workflow.set_resource_sets", {
+		resource_selections: [{ resourceSetId: "rci-1" }],
+	});
+	assert.equal(resources.ok, true);
+	const command = validateCommand("workflow.set_selection", {
+		tcp_selections: [{ tcpId: "tcp-1" }],
+		resource_selections: [{ resourceSetId: "rci-1" }],
+	});
+	assert.equal(command.ok, true);
+});
+
 test("command payload: workflow.start accepts empty payload", () => {
 	const r = validateCommand("workflow.start", {});
 	assert.equal(r.ok, true);

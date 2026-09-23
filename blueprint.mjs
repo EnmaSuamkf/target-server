@@ -47,6 +47,17 @@ const STEP_DEF = Joi.object({
 	retry_interval_seconds: Joi.number().integer().min(0).optional(),
 	order_index: Joi.number().integer().min(0).optional(),
 });
+const TCP_SELECTION = Joi.object({
+	tcpId: STRING.optional(),
+	mtpId: STRING.optional(),
+	toolNames: Joi.array().items(STRING).allow(null).optional(),
+}).or("tcpId", "mtpId");
+const RESOURCE_SELECTION = Joi.object({
+	resourceSetId: STRING.optional(),
+	skillSetId: STRING.optional(),
+	resourceNames: Joi.array().items(STRING).allow(null).optional(),
+	skillNames: Joi.array().items(STRING).allow(null).optional(),
+}).or("resourceSetId", "skillSetId");
 
 export const COMMAND_TYPES = [
 	"workflow.create",
@@ -137,8 +148,8 @@ const COMMAND_PAYLOADS = {
 		step_keys: Joi.array().items(STEP_KEY).optional(),
 	}).default({}),
 	"command.workflow.set_selection": Joi.object({
-		tcp_selections: Joi.object().optional(),
-		resource_selections: Joi.object().optional(),
+		tcp_selections: Joi.array().items(TCP_SELECTION).optional(),
+		resource_selections: Joi.array().items(RESOURCE_SELECTION).optional(),
 	}).min(1),
 	"command.workflow.set_status": Joi.object({
 		status: STRING.required(),
@@ -279,17 +290,6 @@ const TEMPLATE_STEP = Joi.object({
 	retryIntervalSeconds: Joi.number().integer().min(0).optional(),
 	notes: Joi.array().items(TEMPLATE_STEP_NOTE).optional(),
 });
-const TCP_SELECTION = Joi.object({
-	tcpId: STRING.optional(),
-	mtpId: STRING.optional(),
-	toolNames: Joi.array().items(STRING).allow(null).optional(),
-}).or("tcpId", "mtpId");
-const RESOURCE_SELECTION = Joi.object({
-	resourceSetId: STRING.optional(),
-	skillSetId: STRING.optional(),
-	resourceNames: Joi.array().items(STRING).allow(null).optional(),
-	skillNames: Joi.array().items(STRING).allow(null).optional(),
-}).or("resourceSetId", "skillSetId");
 const TEMPLATE_CREATE = Joi.object({
 	name: STRING.required(),
 	tags: TAGS.optional(),
@@ -465,6 +465,12 @@ export const BLUEPRINTS = {
 	}),
 	"sync.remote_workflow.run_selection": Joi.object({
 		step_keys: Joi.array().items(STEP_KEY).min(1).required(),
+	}),
+	"sync.remote_workflow.set_tcps": Joi.object({
+		tcp_selections: Joi.array().items(TCP_SELECTION).required(),
+	}),
+	"sync.remote_workflow.set_resource_sets": Joi.object({
+		resource_selections: Joi.array().items(RESOURCE_SELECTION).required(),
 	}),
 	"sync.resource.upsert": Joi.object({
 		resource: Joi.object({

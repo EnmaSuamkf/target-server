@@ -362,6 +362,8 @@ export interface SyncRemoteWorkflowRow {
 	conversation_context: string | null;
 	step_count: number;
 	steps_pending_sync: number;
+	tcp_selections?: TcpSelection[];
+	resource_selections?: ResourceSelection[];
 	created_at: string;
 }
 

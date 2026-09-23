@@ -96,6 +96,11 @@ import {
 	getRunSelectedStepKeys,
 	updateRemoteStepRunSelection,
 	createRemoteWorkflow,
+	setRemoteWorkflowSelections,
+	mergeTcpSelections,
+	mergeResourceSelections,
+	validateRemoteTcpSelections,
+	validateRemoteResourceSelections,
 	updateRemoteWorkflowStatus,
 	mirrorCommandToPlan,
 	mirrorSyncEventToPlan,
@@ -1094,8 +1099,105 @@ function remoteWorkflowToApi(rwf) {
 		step_count: rwf.stepCount ?? 0,
 		steps_pending_sync: rwf.stepsPendingSync ?? 0,
 		agent: rwf.agent ?? null,
+		tcp_selections: rwf.tcpSelections ?? [],
+		resource_selections: rwf.resourceSelections ?? [],
 		created_at: rwf.createdAt,
 	};
+}
+
+function capabilityUnsupportedBody(info, type) {
+	return {
+		error: "capability_unsupported",
+		detail: `Client does not support sync/v2 ${type}`,
+		required: { resources_version: 2, domain: info.capability, command: type },
+	};
+}
+
+function selectionCapabilityError(client, tcpSelections, resourceSelections) {
+	if (tcpSelections.length) {
+		const info = RESOURCE_DOMAINS["tcp-tools"];
+		if (!clientSupportsResourceCommand(client, info, "tcp-tool.upsert")) {
+			return capabilityUnsupportedBody(info, "tcp-tool.upsert");
+		}
+	}
+	if (resourceSelections.length) {
+		const info = RESOURCE_DOMAINS["resource-sets"];
+		if (!clientSupportsResourceCommand(client, info, "resource-set.upsert")) {
+			return capabilityUnsupportedBody(info, "resource-set.upsert");
+		}
+	}
+	return null;
+}
+
+function catalogTcpToResource(tcp) {
+	return { id: tcp.id, name: tcp.name, data: { tags: tcp.tags, tools: tcp.tools } };
+}
+
+function catalogResourceSetToResource(set) {
+	return { id: set.id, name: set.name, data: { tags: set.tags, resources: set.resources } };
+}
+
+/**
+ * Persist TCP/RCI selections and push them to the client.
+ *
+ * The hub rejects workflow.set_selection with 400 "context already injected"
+ * once conversation context has been injected. The server does not store that
+ * flag, so selection changes are accepted here; the client enforces the lock
+ * when it applies the command.
+ *
+ * Upserts share the workflow remote_id sequence with set_selection so
+ * claimPendingCommands delivers them before set_selection.
+ */
+function applyRemoteWorkflowSelections({ client, remoteId, tcpSelections, resourceSelections }) {
+	const cap = selectionCapabilityError(client, tcpSelections, resourceSelections);
+	if (cap) {
+		const err = new Error("capability_unsupported");
+		err.statusCode = 409;
+		err.body = cap;
+		throw err;
+	}
+	setRemoteWorkflowSelections(remoteId, { tcpSelections, resourceSelections });
+	const commands = [];
+	for (const sel of tcpSelections) {
+		const tcp = getTcp(sel.tcpId);
+		if (!tcp) continue;
+		const resource = catalogTcpToResource(tcp);
+		commands.push(
+			enqueueCommand({
+				clientId: client.id,
+				remoteId,
+				type: "tcp-tool.upsert",
+				payload: { resource },
+			}),
+		);
+		upsertRemoteResource({ clientId: client.id, domain: "tcp_tools", resource });
+	}
+	for (const sel of resourceSelections) {
+		const set = getResourceSet(sel.resourceSetId);
+		if (!set) continue;
+		const resource = catalogResourceSetToResource(set);
+		commands.push(
+			enqueueCommand({
+				clientId: client.id,
+				remoteId,
+				type: "resource-set.upsert",
+				payload: { resource },
+			}),
+		);
+		upsertRemoteResource({ clientId: client.id, domain: "resource_sets", resource });
+	}
+	commands.push(
+		enqueueCommand({
+			clientId: client.id,
+			remoteId,
+			type: "workflow.set_selection",
+			payload: {
+				tcp_selections: tcpSelections,
+				resource_selections: resourceSelections,
+			},
+		}),
+	);
+	return commands;
 }
 
 function remoteStepToApi(step) {
@@ -1178,6 +1280,8 @@ function isOperatorSyncPath(pathname, method) {
 	if (method === "PATCH" && /^\/api\/sync\/remote-workflows\/[^/]+\/run-selection$/.test(pathname)) return true;
 	if (method === "POST" && /^\/api\/sync\/remote-workflows\/[^/]+\/commands$/.test(pathname)) return true;
 	if (method === "POST" && /^\/api\/sync\/remote-workflows\/[^/]+\/steps\/from-template$/.test(pathname)) return true;
+	if (method === "PUT" && /^\/api\/sync\/remote-workflows\/[^/]+\/tcps$/.test(pathname)) return true;
+	if (method === "PUT" && /^\/api\/sync\/remote-workflows\/[^/]+\/resource-sets$/.test(pathname)) return true;
 	if (method === "DELETE" && /^\/api\/sync\/remote-workflows\/[^/]+$/.test(pathname)) return true;
 	if (/^\/api\/sync\/clients\/[^/]+\/(templates|tcp-tools|resource-sets)(\/[^/]+)?$/.test(pathname)) return true;
 	return false;
@@ -1578,6 +1682,19 @@ async function handleOperatorSyncRoute(req, res, pathname, url) {
 		}
 		const agentError = validateClientAgent(client, v.value.agent);
 		if (agentError) return sendJson(res, 422, { errors: [agentError] });
+		let templateTcpSelections = [];
+		let templateResourceSelections = [];
+		if (template) {
+			try {
+				templateTcpSelections = validateRemoteTcpSelections(template.tcpSelections);
+				templateResourceSelections = validateRemoteResourceSelections(template.resourceSelections);
+			} catch (err) {
+				if (err.statusCode === 422) return sendJson(res, 422, { error: err.code });
+				throw err;
+			}
+			const cap = selectionCapabilityError(client, templateTcpSelections, templateResourceSelections);
+			if (cap) return sendJson(res, 409, cap);
+		}
 		const remoteId = randomUUID();
 		const conversationContext = v.value.conversation_context?.trim() || null;
 		createRemoteWorkflow({
@@ -1594,6 +1711,7 @@ async function handleOperatorSyncRoute(req, res, pathname, url) {
 		let command;
 		let contextCommand = null;
 		let stepCommands = [];
+		let selectionCommands = [];
 		try {
 			command = enqueueCommand({
 				clientId: client.id,
@@ -1615,8 +1733,17 @@ async function handleOperatorSyncRoute(req, res, pathname, url) {
 					remoteId,
 					template,
 				});
+				if (templateTcpSelections.length || templateResourceSelections.length) {
+					selectionCommands = applyRemoteWorkflowSelections({
+						client,
+						remoteId,
+						tcpSelections: templateTcpSelections,
+						resourceSelections: templateResourceSelections,
+					});
+				}
 			}
 		} catch (err) {
+			if (err.statusCode === 409 && err.body) return sendJson(res, 409, err.body);
 			if (err.statusCode === 400) return sendJson(res, 400, { errors: err.errors });
 			throw err;
 		}
@@ -1626,6 +1753,7 @@ async function handleOperatorSyncRoute(req, res, pathname, url) {
 			command: syncCommandToApi(command),
 			context_command: contextCommand ? syncCommandToApi(contextCommand) : null,
 			step_commands: stepCommands.map(syncCommandToApi),
+			selection_commands: selectionCommands.map(syncCommandToApi),
 		});
 	}
 
@@ -1694,14 +1822,41 @@ async function handleOperatorSyncRoute(req, res, pathname, url) {
 		if (!remoteWorkflow) return sendJson(res, 404, { error: "remote_workflow_not_found" });
 		const template = getTemplate(v.value.template_id);
 		if (!template) return sendJson(res, 404, { error: "unknown_template" });
+		const client = getClientById(remoteWorkflow.clientId);
+		let incomingTcp = [];
+		let incomingRci = [];
+		try {
+			incomingTcp = validateRemoteTcpSelections(template.tcpSelections);
+			incomingRci = validateRemoteResourceSelections(template.resourceSelections);
+		} catch (err) {
+			if (err.statusCode === 422) return sendJson(res, 422, { error: err.code });
+			throw err;
+		}
+		const mergedTcp = mergeTcpSelections(remoteWorkflow.tcpSelections, incomingTcp);
+		const mergedRci = mergeResourceSelections(remoteWorkflow.resourceSelections, incomingRci);
+		const applySelections = incomingTcp.length > 0 || incomingRci.length > 0;
+		if (applySelections) {
+			const cap = selectionCapabilityError(client, mergedTcp, mergedRci);
+			if (cap) return sendJson(res, 409, cap);
+		}
 		let stepCommands;
+		let selectionCommands = [];
 		try {
 			stepCommands = enqueueTemplateStepsOnRemote({
 				clientId: remoteWorkflow.clientId,
 				remoteId: remoteWorkflow.id,
 				template,
 			});
+			if (applySelections) {
+				selectionCommands = applyRemoteWorkflowSelections({
+					client,
+					remoteId: remoteWorkflow.id,
+					tcpSelections: mergedTcp,
+					resourceSelections: mergedRci,
+				});
+			}
 		} catch (err) {
+			if (err.statusCode === 409 && err.body) return sendJson(res, 409, err.body);
 			if (err.statusCode === 400) return sendJson(res, 400, { errors: err.errors });
 			throw err;
 		}
@@ -1710,6 +1865,89 @@ async function handleOperatorSyncRoute(req, res, pathname, url) {
 			remote_workflow: remoteWorkflowToApi(detail.workflow),
 			steps: detail.steps.map(remoteStepToApi),
 			commands: stepCommands.map(syncCommandToApi),
+			selection_commands: selectionCommands.map(syncCommandToApi),
+		});
+	}
+
+	const setTcpsMatch = pathname.match(/^\/api\/sync\/remote-workflows\/([^/]+)\/tcps$/);
+	if (req.method === "PUT" && setTcpsMatch) {
+		if (!(await requireCapability(req, res, "client.workflows.manage"))) return true;
+		if (!(await requireCapability(req, res, "tcp-tools.read"))) return true;
+		const body = await readJson(req, res);
+		if (!body) return true;
+		const v = validate("sync.remote_workflow.set_tcps", body);
+		if (!v.ok) return sendJson(res, 400, { errors: v.errors });
+		const remoteWorkflow = getRemoteWorkflowById(setTcpsMatch[1]);
+		if (!remoteWorkflow) return sendJson(res, 404, { error: "remote_workflow_not_found" });
+		const client = getClientById(remoteWorkflow.clientId);
+		let tcpSelections;
+		try {
+			tcpSelections = validateRemoteTcpSelections(v.value.tcp_selections);
+		} catch (err) {
+			if (err.statusCode === 422) return sendJson(res, 422, { error: err.code });
+			throw err;
+		}
+		const resourceSelections = remoteWorkflow.resourceSelections ?? [];
+		const cap = selectionCapabilityError(client, tcpSelections, resourceSelections);
+		if (cap) return sendJson(res, 409, cap);
+		let commands;
+		try {
+			commands = applyRemoteWorkflowSelections({
+				client,
+				remoteId: remoteWorkflow.id,
+				tcpSelections,
+				resourceSelections,
+			});
+		} catch (err) {
+			if (err.statusCode === 409 && err.body) return sendJson(res, 409, err.body);
+			if (err.statusCode === 400) return sendJson(res, 400, { errors: err.errors });
+			throw err;
+		}
+		const detail = getRemoteWorkflowDetail(remoteWorkflow.id);
+		return sendJson(res, 200, {
+			remote_workflow: remoteWorkflowToApi(detail.workflow),
+			commands: commands.map(syncCommandToApi),
+		});
+	}
+
+	const setResourceSetsMatch = pathname.match(/^\/api\/sync\/remote-workflows\/([^/]+)\/resource-sets$/);
+	if (req.method === "PUT" && setResourceSetsMatch) {
+		if (!(await requireCapability(req, res, "client.workflows.manage"))) return true;
+		if (!(await requireCapability(req, res, "rci.read"))) return true;
+		const body = await readJson(req, res);
+		if (!body) return true;
+		const v = validate("sync.remote_workflow.set_resource_sets", body);
+		if (!v.ok) return sendJson(res, 400, { errors: v.errors });
+		const remoteWorkflow = getRemoteWorkflowById(setResourceSetsMatch[1]);
+		if (!remoteWorkflow) return sendJson(res, 404, { error: "remote_workflow_not_found" });
+		const client = getClientById(remoteWorkflow.clientId);
+		let resourceSelections;
+		try {
+			resourceSelections = validateRemoteResourceSelections(v.value.resource_selections);
+		} catch (err) {
+			if (err.statusCode === 422) return sendJson(res, 422, { error: err.code });
+			throw err;
+		}
+		const tcpSelections = remoteWorkflow.tcpSelections ?? [];
+		const cap = selectionCapabilityError(client, tcpSelections, resourceSelections);
+		if (cap) return sendJson(res, 409, cap);
+		let commands;
+		try {
+			commands = applyRemoteWorkflowSelections({
+				client,
+				remoteId: remoteWorkflow.id,
+				tcpSelections,
+				resourceSelections,
+			});
+		} catch (err) {
+			if (err.statusCode === 409 && err.body) return sendJson(res, 409, err.body);
+			if (err.statusCode === 400) return sendJson(res, 400, { errors: err.errors });
+			throw err;
+		}
+		const detail = getRemoteWorkflowDetail(remoteWorkflow.id);
+		return sendJson(res, 200, {
+			remote_workflow: remoteWorkflowToApi(detail.workflow),
+			commands: commands.map(syncCommandToApi),
 		});
 	}
 
