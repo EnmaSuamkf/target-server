@@ -49,10 +49,10 @@ These `templates.*` / `tcp-tools.*` / `rci.*` IDs are server-owned Agent Resourc
 | Permission | Group | Allows |
 | --- | --- | --- |
 | `client.read` | Clients | Read connected clients, their workflows and resources |
-| `client.workflows.create` | Workflows | Create client workflows |
-| `client.workflows.steps.add` | Workflows | Add steps to client workflows |
+| `client.workflows.create` | Workflows | Create client workflows. Creating from a server catalog template also requires `templates.read`. |
+| `client.workflows.steps.add` | Workflows | Add steps to client workflows. Appending a server catalog template also requires `templates.read`. |
 | `client.workflows.steps.edit` | Workflows | Edit steps on client workflows |
-| `client.workflows.manage` | Workflows | Delete client workflows, set conversation context and choose run selection |
+| `client.workflows.manage` | Workflows | Delete client workflows, set conversation context, choose run selection, and attach server catalog TCP/RCI. Attaching TCP also requires `tcp-tools.read`; attaching RCI also requires `rci.read`. |
 | `client.workflows.execute` | Workflows | Start, pause, resume and restart client workflows; run, abort or continue steps |
 | `client.templates.create` | Templates | Create a client's templates |
 | `client.templates.edit` | Templates | Edit a client's templates |

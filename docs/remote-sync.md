@@ -265,12 +265,89 @@ Workflow controls remain under:
 - `GET /api/sync/remote-workflows` and `/:remoteId` (`client.read`)
 - `POST /api/sync/remote-workflows` (`client.workflows.create`)
 - enqueue `step.add` / `step.edit` (`client.workflows.steps.add` / `.steps.edit`)
-- delete, set context, run-selection, pause and leftover plan mutations
-  (`client.workflows.manage`)
+- delete, set context, run-selection, pause, TCP/RCI selection and leftover
+  plan mutations (`client.workflows.manage`)
 - start/resume/restart and step run/abort/continue (`client.workflows.execute`)
+
+`GET` list and detail include `tcp_selections` and `resource_selections` on
+each remote workflow.
 
 Clients report supported workflow commands through `capabilities.commands`.
 Resource support is additional; it does not imply workflow support.
+
+### Server catalog templates on remote workflows
+
+`POST /api/sync/remote-workflows` accepts optional `template_id` (a server
+catalog template, not a per-client remote resource). That also requires
+`templates.read`. The server expands the template itself: `workflow.create`,
+optional `workflow.set_context`, then one `step.add` per template step with a
+unique `step_key` (`step-N`). It does **not** send `workflow.apply_template`.
+
+`step.add` may include `notes`: `{ id?, content, theme? }` where `theme` is
+`warning` | `success` | `neutral`. The hub copies those onto the local step.
+
+To append later:
+
+| Method | Path | Permission |
+| --- | --- | --- |
+| POST | `/api/sync/remote-workflows/:id/steps/from-template` | `client.workflows.steps.add` and `templates.read` |
+
+Body: `{ "template_id": "…" }`. Every template step is appended with a new
+`step_key`. Template TCP/RCI selections are merged into the workflow
+(union by id; `null` tool/resource names mean “all” and win).
+
+Unknown `template_id` is `404 { "error": "unknown_template" }`.
+
+### Server catalog TCP / RCI on remote workflows
+
+| Method | Path | Permission |
+| --- | --- | --- |
+| PUT | `/api/sync/remote-workflows/:id/tcps` | `client.workflows.manage` and `tcp-tools.read` |
+| PUT | `/api/sync/remote-workflows/:id/resource-sets` | `client.workflows.manage` and `rci.read` |
+
+```json
+{ "tcp_selections": [{ "tcpId": "…", "toolNames": ["status"] }] }
+```
+
+```json
+{ "resource_selections": [{ "resourceSetId": "…", "resourceNames": null }] }
+```
+
+`toolNames` / `resourceNames` omitted, `null`, or `[]` means the whole
+pack/set. Unknown catalog ids are `422 { "error": "unknown_tcp:<id>" }` or
+`unknown_resource_set:<id>`. Names that are not on that catalog item are
+dropped.
+
+If the client lacks `resources.version === 2` plus the matching domain flag
+and `tcp-tool.upsert` / `resource-set.upsert` in `capabilities.commands`, the
+server returns `409 capability_unsupported` and does not persist the
+selection.
+
+### Upsert then `workflow.set_selection`
+
+Applying a selection (PUT or template merge) saves it, then enqueues, on the
+**workflow** `remote_id` sequence:
+
+1. `tcp-tool.upsert` for each referenced server TCP (same id; payload
+   `{ resource: { id, name, data: { tags, tools } } }`)
+2. `resource-set.upsert` for each referenced resource set
+   (`data: { tags, resources }`)
+3. `workflow.set_selection` with the full `tcp_selections` /
+   `resource_selections` arrays
+
+Those upserts share the workflow pipeline so `claimPendingCommands` delivers
+them before `set_selection`. Do not put catalog upserts on the
+`resources:<client>:<domain>` channel when attaching them to a workflow.
+
+The hub applies upserts with `origin = "server"` and keeps that id. Hub
+PATCH/DELETE of a server-managed TCP or resource set returns `409 { "error":
+"server_managed" }` unless the caller is the sync upsert/delete path. The
+server does not store “context already injected”; the hub rejects
+`workflow.set_selection` after context injection.
+
+See `test/remote-workflow-templates.test.mjs`,
+`test/remote-workflow-selections.test.mjs`, and
+`test/sync-e2e-smoke.test.mjs`.
 
 ## Errors
 
