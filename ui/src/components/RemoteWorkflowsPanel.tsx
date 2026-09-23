@@ -1,23 +1,37 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import {
+	appendRemoteTemplate,
 	createRemoteWorkflow,
 	deleteRemoteWorkflow,
 	enqueueRemoteCommand,
+	setRemoteWorkflowResourceSets,
+	setRemoteWorkflowTcps,
 	updateRemoteWorkflowContext,
 	updateRemoteStepRunSelection,
 } from "../api/sync.ts";
 import type {
 	FieldError,
+	ResourceSelection,
+	ResourceSetsResponse,
 	SyncClientRow,
 	SyncCommand,
 	SyncEventRow,
 	SyncRemoteStepRow,
 	SyncRemoteWorkflowDetailResponse,
 	SyncRemoteWorkflowRow,
+	TcpSelection,
+	TcpsResponse,
+	TemplatesResponse,
 	WorkflowDetailResponse,
 	WorkflowStep,
 } from "../api/types.ts";
 import { useApi } from "../hooks/useApi.ts";
+import { sameResourceSelections } from "../lib/rciSelection.ts";
+import { sameTcpSelections } from "../lib/tcpSelection.ts";
+import { Field } from "./Field.tsx";
+import { Modal } from "./Modal.tsx";
+import { ResourceSelectionEditor } from "./ResourceSelectionEditor.tsx";
+import { TcpSelectionEditor } from "./TcpSelectionEditor.tsx";
 import { shortId, timeAgo } from "../lib/format.ts";
 import { WorkflowDetail } from "./WorkflowDetail.tsx";
 import {
@@ -33,6 +47,17 @@ import { WorkflowCanvas } from "./WorkflowCanvas.tsx";
 
 function fieldErrors(errors: FieldError[], field: string) {
 	return errors.filter((e) => e.field === field || e.field.startsWith(`${field}.`));
+}
+
+
+/** Next `step-N` key that does not collide after removals (N = max existing suffix + 1). */
+function nextRemoteStepKey(existingKeys: string[]): string {
+	let max = 0;
+	for (const key of existingKeys) {
+		const match = /^step-(\d+)$/.exec(key);
+		if (match) max = Math.max(max, Number(match[1]));
+	}
+	return `step-${max + 1}`;
 }
 
 /** Plan-preview steps only — run state lives in Client activity (ingest), not the sync mirror. */
@@ -199,6 +224,9 @@ interface WorkflowPermissions {
 	editStep: boolean;
 	manage: boolean;
 	execute: boolean;
+	templatesRead: boolean;
+	tcpRead: boolean;
+	rciRead: boolean;
 }
 
 interface Props {
@@ -238,6 +266,12 @@ export function RemoteWorkflowsPanel({
 	const [addOpen, setAddOpen] = useState(false);
 	const [editingKey, setEditingKey] = useState<string | null>(null);
 	const [selectedStepKeys, setSelectedStepKeys] = useState<Set<string>>(new Set());
+	const [templateId, setTemplateId] = useState("");
+	const [createOpen, setCreateOpen] = useState(false);
+	const [appendTemplateId, setAppendTemplateId] = useState("");
+	const [tcpDraft, setTcpDraft] = useState<TcpSelection[]>([]);
+	const [rciDraft, setRciDraft] = useState<ResourceSelection[]>([]);
+	const [catalogError, setCatalogError] = useState<string | null>(null);
 
 	const activeClients = (clients ?? []).filter((c) => c.status === "active");
 	const createClient = activeClients.find((c) => c.id === clientId) ?? null;
@@ -250,6 +284,18 @@ export function RemoteWorkflowsPanel({
 		selected?.local_id ? `/api/workflows/${encodeURIComponent(selected.local_id)}` : null,
 		POLL_MS,
 	);
+	const { data: templatesData } = useApi<TemplatesResponse>(
+		permissions.templatesRead ? "/api/templates" : null,
+	);
+	const { data: tcpsData } = useApi<TcpsResponse>(permissions.tcpRead ? "/api/tcps" : null);
+	const { data: resourceSetsData } = useApi<ResourceSetsResponse>(
+		permissions.rciRead ? "/api/resource-sets" : null,
+	);
+	const templates = templatesData?.templates ?? [];
+	const tcps = tcpsData?.tcps ?? [];
+	const resourceSets = resourceSetsData?.resourceSets ?? [];
+	const canSaveTcps = permissions.manage && permissions.tcpRead;
+	const canSaveRci = permissions.manage && permissions.rciRead;
 	const canvasSteps = useMemo(
 		() => remoteStepsToCanvas(steps, selected?.conversation_context ?? null),
 		[steps, selected?.conversation_context],
@@ -265,6 +311,13 @@ export function RemoteWorkflowsPanel({
 			new Set(steps.filter((s) => s.run_selected !== false).map((s) => s.step_key)),
 		);
 	}, [selectedId, stepPlanSignature]);
+
+	useEffect(() => {
+		setTcpDraft(selected?.tcp_selections ?? []);
+		setRciDraft(selected?.resource_selections ?? []);
+		setAppendTemplateId("");
+		setCatalogError(null);
+	}, [selectedId]);
 
 	const selectedStepKeysList = useMemo(() => [...selectedStepKeys], [selectedStepKeys]);
 	const allStepsSelected = steps.length > 0 && selectedStepKeys.size === steps.length;
@@ -303,32 +356,44 @@ export function RemoteWorkflowsPanel({
 			setErrors([]);
 			setNotice(null);
 			try {
-				const body: { client_id: string; name: string; conversation_context?: string; agent?: string } = {
+				const body: {
+					client_id: string;
+					name: string;
+					conversation_context?: string;
+					agent?: string;
+					template_id?: string;
+				} = {
 					client_id: clientId,
 					name,
 				};
 				const ctx = createContext.trim();
 				if (ctx) body.conversation_context = ctx;
 				if (agent) body.agent = agent;
+				if (templateId) body.template_id = templateId;
 				const res = await createRemoteWorkflow(body);
 				if (!res.ok) {
 					setErrors(res.errors);
 					return;
 				}
 				const agentLabel = res.data.remote_workflow.agent ?? agent ?? "client default";
+				const fromTemplate = templateId
+					? ` from template “${templates.find((t) => t.id === templateId)?.name ?? templateId}”`
+					: "";
 				setNotice(
-					`Created “${res.data.remote_workflow.name}” (${agentLabel}, docker) — workflow.create queued.`,
+					`Created “${res.data.remote_workflow.name}” (${agentLabel}, docker)${fromTemplate} — workflow.create queued.`,
 				);
 				setName("");
 				setCreateContext("");
 				setAgent("");
+				setTemplateId("");
+				setCreateOpen(false);
 				onSelect(res.data.remote_workflow.id);
 				onRefresh();
 			} finally {
 				setBusy(false);
 			}
 		},
-		[clientId, name, agent, createContext, onRefresh, onSelect],
+		[clientId, name, agent, createContext, templateId, templates, onRefresh, onSelect],
 	);
 
 	const runCommand = useCallback(
@@ -381,6 +446,68 @@ export function RemoteWorkflowsPanel({
 		}
 	}, [selected, onRefresh, onSelect]);
 
+	const onAppendTemplate = useCallback(async () => {
+		if (!selected || !appendTemplateId) return;
+		setBusy(true);
+		setNotice(null);
+		setErrors([]);
+		setCatalogError(null);
+		try {
+			const res = await appendRemoteTemplate(selected.id, appendTemplateId);
+			if (!res.ok) {
+				setErrors(res.errors);
+				setCatalogError(res.errors[0]?.message ?? "Could not append template.");
+				return;
+			}
+			const label = templates.find((t) => t.id === appendTemplateId)?.name ?? appendTemplateId;
+			setNotice(`Appended steps from “${label}” — step.add queued.`);
+			setAppendTemplateId("");
+			setTcpDraft(res.data.remote_workflow.tcp_selections ?? []);
+			setRciDraft(res.data.remote_workflow.resource_selections ?? []);
+			onRefresh();
+		} finally {
+			setBusy(false);
+		}
+	}, [selected, appendTemplateId, templates, onRefresh]);
+
+	const onSaveTcps = useCallback(async () => {
+		if (!selected) return;
+		setBusy(true);
+		setCatalogError(null);
+		setNotice(null);
+		try {
+			const res = await setRemoteWorkflowTcps(selected.id, tcpDraft);
+			if (!res.ok) {
+				setCatalogError(res.error);
+				return;
+			}
+			setTcpDraft(res.remote_workflow.tcp_selections ?? tcpDraft);
+			setNotice("TCP selection saved and queued for the client.");
+			onRefresh();
+		} finally {
+			setBusy(false);
+		}
+	}, [selected, tcpDraft, onRefresh]);
+
+	const onSaveRci = useCallback(async () => {
+		if (!selected) return;
+		setBusy(true);
+		setCatalogError(null);
+		setNotice(null);
+		try {
+			const res = await setRemoteWorkflowResourceSets(selected.id, rciDraft);
+			if (!res.ok) {
+				setCatalogError(res.error);
+				return;
+			}
+			setRciDraft(res.remote_workflow.resource_selections ?? rciDraft);
+			setNotice("RCI selection saved and queued for the client.");
+			onRefresh();
+		} finally {
+			setBusy(false);
+		}
+	}, [selected, rciDraft, onRefresh]);
+
 	const saveContext = useCallback(async () => {
 		if (!selected) return;
 		setBusy(true);
@@ -418,12 +545,12 @@ export function RemoteWorkflowsPanel({
 		async (e: FormEvent) => {
 			e.preventDefault();
 			if (!selected || !stepForm.description.trim()) return;
-			const stepKey = `step-${steps.length + 1}`;
+			const stepKey = nextRemoteStepKey(steps.map((s) => s.step_key));
 			await runCommand("step.add", buildStepPayload(stepKey, stepForm));
 			setStepForm(EMPTY_STEP);
 			setAddOpen(false);
 		},
-		[runCommand, selected, stepForm, steps.length],
+		[runCommand, selected, stepForm, steps],
 	);
 
 	const onSaveStepEdit = useCallback(
@@ -459,100 +586,185 @@ export function RemoteWorkflowsPanel({
 		pendingRunCommand ||
 		selectedStepKeys.size === 0 ||
 		steps.length === 0;
+	const agentTitle = !clientId
+		? "Pick a client first"
+		: installedRunners.length === 0
+			? "Waiting for the client to report installed agents (next heartbeat)"
+			: "Agent CLI that will run this workflow on the client";
+	const clientError = fieldErrors(errors, "client_id")[0]?.message;
+	const agentError = fieldErrors(errors, "agent")[0]?.message;
+	const nameError = fieldErrors(errors, "name")[0]?.message;
+	const templateError = fieldErrors(errors, "template_id")[0]?.message;
+	const formError = fieldErrors(errors, "_")[0]?.message;
 
 	return (
 		<div className="sync-remote">
-			{permissions.create ? <form className="sync-create sync-create--stacked" onSubmit={(e) => void onCreate(e)}>
-				<div className="sync-create-row">
-					<select
-						className="select"
-						required
-						value={clientId}
-						onChange={(e) => {
-							const nextClientId = e.target.value;
-							setClientId(nextClientId);
-							const nextClient = activeClients.find((c) => c.id === nextClientId);
-							const nextRunners = (nextClient?.capabilities?.runners ?? []).filter((r) => r.installed);
-							setAgent(nextRunners[0]?.id ?? "");
-						}}
-					>
-						<option value="">Select client…</option>
-						{activeClients.map((c) => (
-							<option key={c.id} value={c.id}>
-								{c.name || shortId(c.id)}
-								{c.availability ? ` · ${c.availability}` : ""}
-							</option>
-						))}
-					</select>
-					<select
-						className="select"
-						required={installedRunners.length > 0}
-						disabled={!clientId || installedRunners.length === 0}
-						value={agent}
-						onChange={(e) => setAgent(e.target.value)}
-						title={
-							!clientId
-								? "Pick a client first"
-								: installedRunners.length === 0
-									? "Waiting for the client to report installed agents (next heartbeat)"
-									: "Agent CLI that will run this workflow on the client"
-						}
-					>
-						<option value="">
-							{!clientId
-								? "Agent…"
-								: installedRunners.length === 0
-									? "No agents reported yet"
-									: "Select agent…"}
-						</option>
-						{installedRunners.map((r) => (
-							<option key={r.id} value={r.id}>
-								{RUNNER_LABELS[r.id] ?? r.id}
-							</option>
-						))}
-					</select>
-					<input
-						className="input"
-						required
-						placeholder="Workflow name"
-						value={name}
-						onChange={(e) => setName(e.target.value)}
-					/>
-					<button
-						type="submit"
-						className="btn btn--on"
-						disabled={
-							busy ||
-							activeClients.length === 0 ||
-							(installedRunners.length > 0 && !agent)
-						}
-					>
-						Create remote workflow
+			{permissions.create ? (
+				<div className="sync-remote-toolbar">
+					<button type="button" className="btn btn--on" onClick={() => setCreateOpen(true)}>
+						+ New remote workflow
 					</button>
 				</div>
-				<p className="hint sync-create-hint">
-					Remote workflows always run in the <strong>docker</strong> sandbox on the client. The agent list
-					comes from the client heartbeat — only installed CLIs are selectable.
-				</p>
-				<label className="field sync-context-field">
-					<span className="label">Conversation context (optional)</span>
-					<textarea
-						className="input sync-context-input"
-						rows={3}
-						placeholder="Background that applies to every step of this workflow…"
-						value={createContext}
-						onChange={(e) => setCreateContext(e.target.value)}
-					/>
-				</label>
-			</form> : null}
-			{fieldErrors(errors, "client_id")
-				.concat(fieldErrors(errors, "name"))
-				.concat(fieldErrors(errors, "agent"))
-				.map((err) => (
-					<div key={`${err.field}-${err.code}`} className="field-err">
-						{err.message}
-					</div>
-				))}
+			) : null}
+			<Modal
+				open={createOpen && permissions.create}
+				title="New remote workflow"
+				description="Creates a remote workflow on the chosen client. Its steps then run in order on that machine."
+				onClose={() => setCreateOpen(false)}
+				footer={
+					<>
+						<button type="button" className="btn" onClick={() => setCreateOpen(false)} disabled={busy}>
+							Cancel
+						</button>
+						<button
+							type="submit"
+							form="create-remote-workflow"
+							className="btn btn--on"
+							disabled={
+								busy ||
+								activeClients.length === 0 ||
+								(installedRunners.length > 0 && !agent)
+							}
+						>
+							Create remote workflow
+						</button>
+					</>
+				}
+			>
+				<form id="create-remote-workflow" className="sync-create" onSubmit={(e) => void onCreate(e)}>
+					<fieldset className="sync-create-group">
+						<legend>Where it runs</legend>
+						<Field
+							label="Client"
+							required
+							hint="The Target hub that will own this workflow."
+							{...(clientError ? { error: clientError } : {})}
+						>
+							{(props) => (
+								<select
+									{...props}
+									className="select"
+									required
+									value={clientId}
+									onChange={(e) => {
+										const nextClientId = e.target.value;
+										setClientId(nextClientId);
+										const nextClient = activeClients.find((c) => c.id === nextClientId);
+										const nextRunners = (nextClient?.capabilities?.runners ?? []).filter((r) => r.installed);
+										setAgent(nextRunners[0]?.id ?? "");
+									}}
+								>
+									<option value="">Select client…</option>
+									{activeClients.map((c) => (
+										<option key={c.id} value={c.id}>
+											{c.name || shortId(c.id)}
+											{c.availability ? ` · ${c.availability}` : ""}
+										</option>
+									))}
+								</select>
+							)}
+						</Field>
+						<Field
+							label="Agent"
+							required={installedRunners.length > 0}
+							hint={agentTitle}
+							{...(agentError ? { error: agentError } : {})}
+						>
+							{(props) => (
+								<select
+									{...props}
+									className="select"
+									required={installedRunners.length > 0}
+									disabled={!clientId || installedRunners.length === 0}
+									value={agent}
+									onChange={(e) => setAgent(e.target.value)}
+									title={agentTitle}
+								>
+									<option value="">
+										{!clientId
+											? "Agent…"
+											: installedRunners.length === 0
+												? "No agents reported yet"
+												: "Select agent…"}
+									</option>
+									{installedRunners.map((r) => (
+										<option key={r.id} value={r.id}>
+											{RUNNER_LABELS[r.id] ?? r.id}
+										</option>
+									))}
+								</select>
+							)}
+						</Field>
+						<p className="hint">
+							Remote workflows always run in the <strong>docker</strong> sandbox on the client. The agent list
+							comes from the client heartbeat — only installed CLIs are selectable.
+						</p>
+					</fieldset>
+					<fieldset className="sync-create-group">
+						<legend>What it does</legend>
+						<Field
+							label="Name"
+							required
+							hint="Shown in this list and on the client. Pick something an operator can recognise later."
+							{...(nameError ? { error: nameError } : {})}
+						>
+							{(props) => (
+								<input
+									{...props}
+									className="input"
+									required
+									placeholder="e.g. release-notes"
+									value={name}
+									onChange={(e) => setName(e.target.value)}
+								/>
+							)}
+						</Field>
+						{permissions.templatesRead ? (
+							<Field
+								label="Start from template"
+								hint="Optional — seeds the workflow with the template's steps and merged TCP/RCI selections."
+								{...(templateError ? { error: templateError } : {})}
+							>
+								{(props) => (
+									<select
+										{...props}
+										className="select"
+										value={templateId}
+										onChange={(e) => setTemplateId(e.target.value)}
+									>
+										<option value="">No template — start empty</option>
+										{templates.map((template) => (
+											<option key={template.id} value={template.id}>
+												{template.name} ({template.steps.length} step{template.steps.length === 1 ? "" : "s"})
+											</option>
+										))}
+									</select>
+								)}
+							</Field>
+						) : null}
+						<Field
+							label="Conversation context"
+							hint="Optional. Delivered before every step on the client — same as a Target hub conversation context."
+						>
+							{(props) => (
+								<textarea
+									{...props}
+									className="input sync-context-input"
+									rows={3}
+									placeholder="Background that applies to every step of this workflow…"
+									value={createContext}
+									onChange={(e) => setCreateContext(e.target.value)}
+								/>
+							)}
+						</Field>
+					</fieldset>
+					{formError ? (
+						<p className="msg msg--error" role="alert">
+							{formError}
+						</p>
+					) : null}
+				</form>
+			</Modal>
 			{notice ? <div className="panel-note">{notice}</div> : null}
 			{permissions.create && activeClients.length === 0 && clients ? (
 				<div className="empty">Register a sync client before creating remote workflows.</div>
@@ -697,6 +909,112 @@ export function RemoteWorkflowsPanel({
 							</button>
 						) : null}
 					</div>
+
+					{permissions.addStep && permissions.templatesRead ? (
+						<section className="sync-section">
+							<div className="sync-create-row">
+								<Field
+									label="Append a template's steps"
+									hint="Adds every step from a server catalog template. TCP and RCI selections are merged into this workflow."
+								>
+									{(props) => (
+										<select
+											{...props}
+											className="select"
+											value={appendTemplateId}
+											onChange={(e) => setAppendTemplateId(e.target.value)}
+											disabled={busy}
+										>
+											<option value="">Select a template…</option>
+											{templates.map((template) => (
+												<option key={template.id} value={template.id}>
+													{template.name} ({template.steps.length} step{template.steps.length === 1 ? "" : "s"})
+												</option>
+											))}
+										</select>
+									)}
+								</Field>
+								<button
+									type="button"
+									className="btn btn--sm btn--on"
+									disabled={busy || !appendTemplateId}
+									onClick={() => void onAppendTemplate()}
+								>
+									Append template
+								</button>
+							</div>
+						</section>
+					) : null}
+
+					<section className="sync-section">
+						<div className="sync-section-head">
+							<h4>TCP</h4>
+							{canSaveTcps ? (
+								<button
+									type="button"
+									className="btn btn--sm btn--on"
+									disabled={
+										busy || sameTcpSelections(tcpDraft, selected.tcp_selections ?? [])
+									}
+									onClick={() => void onSaveTcps()}
+								>
+									Save TCP selection
+								</button>
+							) : null}
+						</div>
+						<p className="hint">
+							Attach server catalog TCP packs. Whole packs or individual tools are pushed to the client.
+						</p>
+						{permissions.tcpRead ? (
+							<TcpSelectionEditor
+								tcps={tcps}
+								selections={tcpDraft}
+								disabled={!canSaveTcps || busy}
+								onChange={setTcpDraft}
+							/>
+						) : (
+							<p className="hint">Needs tcp-tools.read to list server TCP packs.</p>
+						)}
+						{!canSaveTcps && permissions.tcpRead ? (
+							<p className="hint">Saving TCP selections needs client.workflows.manage.</p>
+						) : null}
+					</section>
+
+					<section className="sync-section">
+						<div className="sync-section-head">
+							<h4>RCI</h4>
+							{canSaveRci ? (
+								<button
+									type="button"
+									className="btn btn--sm btn--on"
+									disabled={
+										busy || sameResourceSelections(rciDraft, selected.resource_selections ?? [])
+									}
+									onClick={() => void onSaveRci()}
+								>
+									Save RCI selection
+								</button>
+							) : null}
+						</div>
+						<p className="hint">
+							Attach server catalog resource sets. Whole sets or individual resources are pushed to the client.
+						</p>
+						{permissions.rciRead ? (
+							<ResourceSelectionEditor
+								resourceSets={resourceSets}
+								selections={rciDraft}
+								disabled={!canSaveRci || busy}
+								onChange={setRciDraft}
+							/>
+						) : (
+							<p className="hint">Needs rci.read to list server resource sets.</p>
+						)}
+						{!canSaveRci && permissions.rciRead ? (
+							<p className="hint">Saving RCI selections needs client.workflows.manage.</p>
+						) : null}
+					</section>
+
+					{catalogError ? <div className="err">{catalogError}</div> : null}
 
 					<section className="sync-section">
 						<h4>Conversation context</h4>
@@ -968,67 +1286,100 @@ function StepEditorForm({
 }) {
 	return (
 		<form className="sync-step-form" onSubmit={onSubmit}>
-			<label className="field">
-				<span className="label">Task description</span>
-				<textarea
-					className="input"
-					required
-					rows={3}
-					value={form.description}
-					onChange={(e) => setForm({ ...form, description: e.target.value })}
-					placeholder="What the agent should do in this step…"
-				/>
-			</label>
-			<label className="field">
-				<span className="label">Acceptance criteria</span>
-				<textarea
-					className="input"
-					rows={2}
-					value={form.acceptanceCriteria}
-					onChange={(e) => setForm({ ...form, acceptanceCriteria: e.target.value })}
-					placeholder="Optional — what a good result must satisfy."
-				/>
-			</label>
-			<div className="sync-step-form__toggles">
-				<label className="sync-toggle">
-					<input
-						type="checkbox"
-						checked={form.manualReview}
-						onChange={(e) => setForm({ ...form, manualReview: e.target.checked })}
+			<Field
+				label="Task description"
+				required
+				hint="What the agent should do in this step."
+			>
+				{(props) => (
+					<textarea
+						{...props}
+						className="input"
+						required
+						rows={3}
+						value={form.description}
+						onChange={(e) => setForm({ ...form, description: e.target.value })}
+						placeholder="What the agent should do in this step…"
 					/>
-					Manual review
-				</label>
-				<label className="sync-toggle">
-					<input
-						type="checkbox"
-						checked={form.useSubagent}
-						onChange={(e) => setForm({ ...form, useSubagent: e.target.checked })}
+				)}
+			</Field>
+			<Field
+				label="Acceptance criteria"
+				hint="If set, the agent self-evaluates its result after running and re-runs the step on a reject, up to the retry budget."
+			>
+				{(props) => (
+					<textarea
+						{...props}
+						className="input"
+						rows={2}
+						value={form.acceptanceCriteria}
+						onChange={(e) => setForm({ ...form, acceptanceCriteria: e.target.value })}
+						placeholder="Optional — what a good result must satisfy."
 					/>
-					Use subagent
-				</label>
-			</div>
+				)}
+			</Field>
+			<Field
+				label="Manual review"
+				hint="The workflow stops after this step and waits for you. No further step runs until you continue it."
+			>
+				{(props) => (
+					<label className="sync-toggle">
+						<input
+							{...props}
+							type="checkbox"
+							checked={form.manualReview}
+							onChange={(e) => setForm({ ...form, manualReview: e.target.checked })}
+						/>
+						Stop after this step for a human continue
+					</label>
+				)}
+			</Field>
+			<Field
+				label="Use subagent"
+				hint="On: the agent delegates this step to a subagent, so the shared session only keeps its summary. Off: it solves the step itself."
+			>
+				{(props) => (
+					<label className="sync-toggle">
+						<input
+							{...props}
+							type="checkbox"
+							checked={form.useSubagent}
+							onChange={(e) => setForm({ ...form, useSubagent: e.target.checked })}
+						/>
+						Delegate this step to a subagent
+					</label>
+				)}
+			</Field>
 			<div className="sync-step-form__grid">
-				<label className="field">
-					<span className="label">Max retries</span>
-					<input
-						type="number"
-						className="input"
-						min={0}
-						value={form.maxRetries}
-						onChange={(e) => setForm({ ...form, maxRetries: e.target.value })}
-					/>
-				</label>
-				<label className="field">
-					<span className="label">Interval (s)</span>
-					<input
-						type="number"
-						className="input"
-						min={0}
-						disabled={!intervalEnabled}
-						value={intervalEnabled ? form.retryInterval : "0"}
-						onChange={(e) => setForm({ ...form, retryInterval: e.target.value })}
-					/>
-				</label>
+				<Field label="Max retries" hint="How many times the step may re-run after a rejected result.">
+					{(props) => (
+						<input
+							{...props}
+							type="number"
+							className="input"
+							min={0}
+							value={form.maxRetries}
+							onChange={(e) => setForm({ ...form, maxRetries: e.target.value })}
+						/>
+					)}
+				</Field>
+				<Field
+					label="Interval (s)"
+					hint="Seconds to wait before each re-run after a judge reject. Only editable with more than one retry."
+				>
+					{(props) => (
+						<input
+							{...props}
+							type="number"
+							className="input"
+							min={0}
+							disabled={!intervalEnabled}
+							value={intervalEnabled ? form.retryInterval : "0"}
+							onChange={(e) => setForm({ ...form, retryInterval: e.target.value })}
+							title="Seconds to wait before each re-run after a judge reject. Only editable with more than one retry."
+						/>
+					)}
+				</Field>
 			</div>
 			<div className="sync-step-form__actions">
 				<button type="submit" className="btn btn--sm btn--on" disabled={busy || !form.description.trim()}>

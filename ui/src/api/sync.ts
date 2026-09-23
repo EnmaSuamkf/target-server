@@ -1,33 +1,120 @@
 import type {
 	FieldError,
+	ResourceSelection,
 	SyncClientsResponse,
 	SyncCommand,
 	SyncCreateRemoteWorkflowResponse,
 	SyncEventsResponse,
 	SyncRemoteWorkflowDetailResponse,
+	SyncRemoteWorkflowRow,
 	SyncRemoteWorkflowsResponse,
 	RemoteResource,
 	RemoteResourceDomain,
 	RemoteResourceBundle,
 	RemoteResourcesResponse,
+	TcpSelection,
 } from "./types.ts";
+
+function syncApiErrors(res: Response, data: unknown): FieldError[] {
+	const body = (data ?? {}) as {
+		errors?: FieldError[];
+		error?: string;
+		detail?: string;
+	};
+	if (Array.isArray(body.errors) && body.errors.length) return body.errors;
+	if (body.error === "capability_unsupported") {
+		return [
+			{
+				field: "_",
+				code: "capability_unsupported",
+				message: body.detail ?? "Client does not support this catalog operation (capability_unsupported).",
+			},
+		];
+	}
+	if (typeof body.error === "string" && body.error) {
+		return [{ field: "_", code: body.error, message: body.detail ?? body.error }];
+	}
+	return [{ field: "_", code: "request_failed", message: `HTTP ${res.status}` }];
+}
+
+function firstErrorMessage(errors: FieldError[]): string {
+	return errors[0]?.message ?? "Request failed";
+}
 
 export async function createRemoteWorkflow(body: {
 	client_id: string;
 	name: string;
 	conversation_context?: string;
 	agent?: string;
+	template_id?: string;
 }): Promise<{ ok: true; data: SyncCreateRemoteWorkflowResponse } | { ok: false; errors: FieldError[] }> {
 	const res = await fetch("/api/sync/remote-workflows", {
 		method: "POST",
 		headers: { "content-type": "application/json" },
 		body: JSON.stringify(body),
 	});
-	const data = (await res.json()) as SyncCreateRemoteWorkflowResponse | { errors: FieldError[] };
+	const data = (await res.json()) as SyncCreateRemoteWorkflowResponse | Record<string, unknown>;
 	if (!res.ok) {
-		return { ok: false, errors: "errors" in data && Array.isArray(data.errors) ? data.errors : [{ field: "_", code: "request_failed", message: `HTTP ${res.status}` }] };
+		return { ok: false, errors: syncApiErrors(res, data) };
 	}
 	return { ok: true, data: data as SyncCreateRemoteWorkflowResponse };
+}
+
+export async function appendRemoteTemplate(
+	remoteId: string,
+	templateId: string,
+): Promise<{ ok: true; data: SyncRemoteWorkflowDetailResponse } | { ok: false; errors: FieldError[] }> {
+	const res = await fetch(`/api/sync/remote-workflows/${encodeURIComponent(remoteId)}/steps/from-template`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		credentials: "same-origin",
+		body: JSON.stringify({ template_id: templateId }),
+	});
+	const data = (await res.json()) as SyncRemoteWorkflowDetailResponse | Record<string, unknown>;
+	if (!res.ok) {
+		return { ok: false, errors: syncApiErrors(res, data) };
+	}
+	return { ok: true, data: data as SyncRemoteWorkflowDetailResponse };
+}
+
+export async function setRemoteWorkflowTcps(
+	remoteId: string,
+	selections: TcpSelection[],
+): Promise<{ ok: true; remote_workflow: SyncRemoteWorkflowRow } | { ok: false; error: string }> {
+	const res = await fetch(`/api/sync/remote-workflows/${encodeURIComponent(remoteId)}/tcps`, {
+		method: "PUT",
+		headers: { "content-type": "application/json" },
+		credentials: "same-origin",
+		body: JSON.stringify({ tcp_selections: selections }),
+	});
+	const data = (await res.json()) as { remote_workflow?: SyncRemoteWorkflowRow } & Record<string, unknown>;
+	if (!res.ok) {
+		return { ok: false, error: firstErrorMessage(syncApiErrors(res, data)) };
+	}
+	if (!data.remote_workflow) {
+		return { ok: false, error: "missing remote workflow in response" };
+	}
+	return { ok: true, remote_workflow: data.remote_workflow };
+}
+
+export async function setRemoteWorkflowResourceSets(
+	remoteId: string,
+	selections: ResourceSelection[],
+): Promise<{ ok: true; remote_workflow: SyncRemoteWorkflowRow } | { ok: false; error: string }> {
+	const res = await fetch(`/api/sync/remote-workflows/${encodeURIComponent(remoteId)}/resource-sets`, {
+		method: "PUT",
+		headers: { "content-type": "application/json" },
+		credentials: "same-origin",
+		body: JSON.stringify({ resource_selections: selections }),
+	});
+	const data = (await res.json()) as { remote_workflow?: SyncRemoteWorkflowRow } & Record<string, unknown>;
+	if (!res.ok) {
+		return { ok: false, error: firstErrorMessage(syncApiErrors(res, data)) };
+	}
+	if (!data.remote_workflow) {
+		return { ok: false, error: "missing remote workflow in response" };
+	}
+	return { ok: true, remote_workflow: data.remote_workflow };
 }
 
 export async function updateRemoteStepRunSelection(

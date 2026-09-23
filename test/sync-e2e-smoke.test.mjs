@@ -1,6 +1,7 @@
 /**
  * End-to-end smoke: operator creates a remote workflow (2 steps + start),
- * Target hub sync agent applies commands locally, events land on the server.
+ * then a catalog template with TCP/RCI; the hub applies steps (with notes)
+ * and server-managed selections. Skipped when the hub is not checked out.
  *
  * Mirrors the manual checklist in README § Remote sync.
  * Skipped in CI when the target hub is not checked out alongside target-server.
@@ -45,7 +46,9 @@ test(
 
 		const { runSyncTick, resetSyncExecutorState } = await import("../../target/hub/sync.ts");
 		const { loadConfig, loadSyncConfig } = await import("../../target/hub/config.ts");
-		const { getWorkflowByRemoteId, listSteps, getSyncCredentials } = await import("../../target/hub/db.ts");
+		const { getWorkflowByRemoteId, listStepNotes, listSteps, getSyncCredentials } = await import("../../target/hub/db.ts");
+		const { getTcp, listWorkflowTcpSelections } = await import("../../target/hub/tcp-store.ts");
+		const { getResourceSet, listWorkflowResourceSelections } = await import("../../target/hub/rci-store.ts");
 
 		after(() => server.close());
 
@@ -53,6 +56,18 @@ test(
 			const cfg = loadSyncConfig();
 			return { ...cfg, url: base, enabled: true };
 		}
+
+		async function drainSync(times = 16) {
+			for (let i = 0; i < times; i++) {
+				await runSyncTick({ hubConfig: hubCfg, config: syncCfg() });
+			}
+		}
+
+		const json = (method, body) => ({
+			method,
+			headers: { ...authed(cookie), "content-type": "application/json" },
+			body: JSON.stringify(body),
+		});
 
 		async function enqueueOperator(cookie, remoteId, type, payload = {}) {
 			const res = await fetch(`${base}/api/sync/remote-workflows/${remoteId}/commands`, {
@@ -129,5 +144,81 @@ test(
 		const row = clients.find((c) => c.id === clientId);
 		assert.ok(row);
 		assert.ok(row.last_seen_at);
+
+		const tcpRes = await fetch(
+			`${base}/api/tcps`,
+			json("POST", {
+				name: "Smoke TCP",
+				tools: [{ name: "status", requestTemplate: "git status" }],
+			}),
+		);
+		assert.equal(tcpRes.status, 201);
+		const tcp = (await tcpRes.json()).tcp;
+		const rciRes = await fetch(
+			`${base}/api/resource-sets`,
+			json("POST", {
+				name: "Smoke docs",
+				resources: [{ name: "guide", kind: "doc", content: "# Guide" }],
+			}),
+		);
+		assert.equal(rciRes.status, 201);
+		const resourceSet = (await rciRes.json()).resourceSet;
+		const templateRes = await fetch(
+			`${base}/api/templates`,
+			json("POST", {
+				name: "Smoke catalog template",
+				steps: [
+					{
+						description: "Catalog step one",
+						notes: [{ content: "from server template", theme: "warning" }],
+					},
+					{ description: "Catalog step two" },
+				],
+				tcpSelections: [{ tcpId: tcp.id }],
+				resourceSelections: [{ resourceSetId: resourceSet.id }],
+			}),
+		);
+		assert.equal(templateRes.status, 201);
+		const template = (await templateRes.json()).template;
+
+		const catalogCreate = await fetch(
+			`${base}/api/sync/remote-workflows`,
+			json("POST", {
+				client_id: clientId,
+				name: "From catalog template",
+				template_id: template.id,
+			}),
+		);
+		assert.equal(catalogCreate.status, 201);
+		const catalogBody = await catalogCreate.json();
+		assert.deepEqual(catalogBody.remote_workflow.tcp_selections, [{ tcpId: tcp.id, toolNames: null }]);
+		assert.deepEqual(catalogBody.remote_workflow.resource_selections, [
+			{ resourceSetId: resourceSet.id, resourceNames: null },
+		]);
+		const catalogRemoteId = catalogBody.remote_workflow.id;
+		await drainSync();
+
+		const catalogLocal = getWorkflowByRemoteId(catalogRemoteId);
+		assert.ok(catalogLocal, "template create should materialize on the hub");
+		const catalogTasks = listSteps(catalogLocal.id).filter((s) => s.kind === "task");
+		assert.equal(catalogTasks.length, 2);
+		assert.equal(catalogTasks[0].description, "Catalog step one");
+		assert.equal(catalogTasks[1].description, "Catalog step two");
+		const notes = listStepNotes(catalogTasks[0].id);
+		assert.equal(notes.length, 1);
+		assert.equal(notes[0].content, "from server template");
+		assert.equal(notes[0].theme, "warning");
+
+		const hubTcp = getTcp(tcp.id);
+		assert.ok(hubTcp);
+		assert.equal(hubTcp.origin, "server");
+		assert.equal(hubTcp.name, "Smoke TCP");
+		const hubRci = getResourceSet(resourceSet.id);
+		assert.ok(hubRci);
+		assert.equal(hubRci.origin, "server");
+		assert.deepEqual(listWorkflowTcpSelections(catalogLocal.id), [{ tcpId: tcp.id, toolNames: null }]);
+		assert.deepEqual(listWorkflowResourceSelections(catalogLocal.id), [
+			{ resourceSetId: resourceSet.id, resourceNames: null },
+		]);
 	},
 );

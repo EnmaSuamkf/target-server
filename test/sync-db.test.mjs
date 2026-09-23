@@ -28,6 +28,7 @@ const {
 	getRemoteWorkflowDetail,
 	getRemoteWorkflowById,
 	listRemoteSteps,
+	nextRemoteStepKey,
 	updateRemoteWorkflowStatus,
 } = await import("../db.mjs");
 
@@ -94,6 +95,12 @@ test("sync layer: insert client, enqueue command, claim and ack it", () => {
 	);
 
 	assert.deepEqual(listRemoteWorkflows(), []);
+});
+
+test("nextRemoteStepKey skips gaps after removals", () => {
+	assert.equal(nextRemoteStepKey([]), "step-1");
+	assert.equal(nextRemoteStepKey(["step-1", "step-3"]), "step-4");
+	assert.equal(nextRemoteStepKey(["s1", "custom"]), "step-1");
 });
 
 test("remote workflow plan: mirror step.add into remote_workflow_steps", () => {
