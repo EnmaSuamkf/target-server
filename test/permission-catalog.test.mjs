@@ -15,13 +15,14 @@ test("every catalogue entry carries a closed id, scope and group", () => {
 		assert.equal(typeof entry.group, "string");
 		assert.ok(entry.group.startsWith(`${entry.scope}.`));
 	}
-	assert.ok(PERMISSIONS.includes("remote.workflows.manage"));
-	assert.ok(PERMISSIONS.includes("remote.workflows.create"));
-	assert.ok(PERMISSIONS.includes("remote.workflows.steps.add"));
-	assert.ok(PERMISSIONS.includes("remote.workflows.steps.edit"));
-	assert.ok(PERMISSIONS.includes("remote.templates.create"));
-	assert.ok(PERMISSIONS.includes("remote.tcp-tools.export"));
-	assert.ok(PERMISSIONS.includes("remote.rci.import"));
+	assert.ok(PERMISSIONS.includes("client.read"));
+	assert.ok(PERMISSIONS.includes("client.workflows.manage"));
+	assert.ok(PERMISSIONS.includes("client.workflows.create"));
+	assert.ok(PERMISSIONS.includes("client.workflows.steps.add"));
+	assert.ok(PERMISSIONS.includes("client.workflows.steps.edit"));
+	assert.ok(PERMISSIONS.includes("client.templates.create"));
+	assert.ok(PERMISSIONS.includes("client.tcp-tools.export"));
+	assert.ok(PERMISSIONS.includes("client.rci.import"));
 	const serverCatalogIds = [
 		"templates.read",
 		"templates.create",
@@ -51,6 +52,10 @@ test("every catalogue entry carries a closed id, scope and group", () => {
 	for (const removed of REMOVED_RESOURCE_MANAGE) {
 		assert.equal(PERMISSIONS.includes(removed), false);
 	}
+	for (const entry of PERMISSION_CATALOG.filter(({ scope }) => scope === "client")) {
+		assert.ok(entry.id.startsWith("client."), `client permission ${entry.id} must use the client. prefix`);
+	}
+	assert.equal(PERMISSIONS.some((id) => id.startsWith("remote.")), false);
 });
 
 test("getPermissionCatalog groups the closed vocabulary by server and client scope", () => {
@@ -80,6 +85,9 @@ test("getPermissionCatalog groups the closed vocabulary by server and client sco
 			assert.equal(permission.description, entry.description);
 		}
 	}
+	const clients = catalog.groups.find((group) => group.id === "client.remote");
+	assert.equal(clients.label, "Clients");
+	assert.equal(clients.permissions.find((permission) => permission.id === "client.read").label, "View clients");
 	assert.deepEqual(
 		catalog.groups.flatMap((group) => group.permissions.map((permission) => permission.id)).sort(),
 		[...PERMISSIONS].sort(),

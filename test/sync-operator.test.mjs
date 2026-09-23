@@ -245,25 +245,25 @@ test("operator sync: workflow mutations check action-level permissions", async (
 	const creator = await createLimitedOperator(admin, {
 		email: "wf-creator@example.com",
 		name: "Workflow creator",
-		permissions: ["remote.read", "remote.workflows.create"],
+		permissions: ["client.read", "client.workflows.create"],
 		password: "wf-creator-pass-12",
 	});
 	const stepper = await createLimitedOperator(admin, {
 		email: "wf-stepper@example.com",
 		name: "Workflow stepper",
-		permissions: ["remote.read", "remote.workflows.steps.add", "remote.workflows.steps.edit"],
+		permissions: ["client.read", "client.workflows.steps.add", "client.workflows.steps.edit"],
 		password: "wf-stepper-pass-12",
 	});
 	const manager = await createLimitedOperator(admin, {
 		email: "wf-manager@example.com",
 		name: "Workflow manager",
-		permissions: ["remote.read", "remote.workflows.manage"],
+		permissions: ["client.read", "client.workflows.manage"],
 		password: "wf-manager-pass-12",
 	});
 	const runner = await createLimitedOperator(admin, {
 		email: "wf-runner@example.com",
 		name: "Workflow runner",
-		permissions: ["remote.read", "remote.workflows.execute"],
+		permissions: ["client.read", "client.workflows.execute"],
 		password: "wf-runner-pass-12",
 	});
 
@@ -283,7 +283,7 @@ test("operator sync: workflow mutations check action-level permissions", async (
 		body: JSON.stringify({ client_id, name: "Denied create" }),
 	});
 	assert.equal(deniedCreate.status, 403);
-	assert.deepEqual(await deniedCreate.json(), { error: "forbidden", permission: "remote.workflows.create" });
+	assert.deepEqual(await deniedCreate.json(), { error: "forbidden", permission: "client.workflows.create" });
 
 	const created = await fetch(`${base}/api/sync/remote-workflows`, {
 		method: "POST",
@@ -299,7 +299,7 @@ test("operator sync: workflow mutations check action-level permissions", async (
 		body: JSON.stringify({ type: "step.add", payload: { step_key: "s1", description: "Add me" } }),
 	});
 	assert.equal(deniedAdd.status, 403);
-	assert.deepEqual(await deniedAdd.json(), { error: "forbidden", permission: "remote.workflows.steps.add" });
+	assert.deepEqual(await deniedAdd.json(), { error: "forbidden", permission: "client.workflows.steps.add" });
 
 	const added = await fetch(`${base}/api/sync/remote-workflows/${remoteId}/commands`, {
 		method: "POST",
@@ -314,7 +314,7 @@ test("operator sync: workflow mutations check action-level permissions", async (
 		body: JSON.stringify({ type: "step.edit", payload: { step_key: "s1", description: "Edited" } }),
 	});
 	assert.equal(deniedEdit.status, 403);
-	assert.deepEqual(await deniedEdit.json(), { error: "forbidden", permission: "remote.workflows.steps.edit" });
+	assert.deepEqual(await deniedEdit.json(), { error: "forbidden", permission: "client.workflows.steps.edit" });
 
 	const edited = await fetch(`${base}/api/sync/remote-workflows/${remoteId}/commands`, {
 		method: "POST",
@@ -329,7 +329,7 @@ test("operator sync: workflow mutations check action-level permissions", async (
 		body: JSON.stringify({ type: "workflow.start", payload: { step_keys: ["s1"] } }),
 	});
 	assert.equal(deniedStart.status, 403);
-	assert.deepEqual(await deniedStart.json(), { error: "forbidden", permission: "remote.workflows.execute" });
+	assert.deepEqual(await deniedStart.json(), { error: "forbidden", permission: "client.workflows.execute" });
 
 	const started = await fetch(`${base}/api/sync/remote-workflows/${remoteId}/commands`, {
 		method: "POST",
@@ -344,7 +344,7 @@ test("operator sync: workflow mutations check action-level permissions", async (
 		body: JSON.stringify({ conversation_context: "Nope" }),
 	});
 	assert.equal(deniedContext.status, 403);
-	assert.deepEqual(await deniedContext.json(), { error: "forbidden", permission: "remote.workflows.manage" });
+	assert.deepEqual(await deniedContext.json(), { error: "forbidden", permission: "client.workflows.manage" });
 
 	const deniedSelection = await fetch(`${base}/api/sync/remote-workflows/${remoteId}/run-selection`, {
 		method: "PATCH",
@@ -352,7 +352,7 @@ test("operator sync: workflow mutations check action-level permissions", async (
 		body: JSON.stringify({ step_keys: ["s1"] }),
 	});
 	assert.equal(deniedSelection.status, 403);
-	assert.deepEqual(await deniedSelection.json(), { error: "forbidden", permission: "remote.workflows.manage" });
+	assert.deepEqual(await deniedSelection.json(), { error: "forbidden", permission: "client.workflows.manage" });
 
 	const context = await fetch(`${base}/api/sync/remote-workflows/${remoteId}`, {
 		method: "PATCH",
@@ -372,7 +372,7 @@ test("operator sync: workflow mutations check action-level permissions", async (
 		headers: { cookie: runner },
 	});
 	assert.equal(deniedDelete.status, 403);
-	assert.deepEqual(await deniedDelete.json(), { error: "forbidden", permission: "remote.workflows.manage" });
+	assert.deepEqual(await deniedDelete.json(), { error: "forbidden", permission: "client.workflows.manage" });
 
 	const deleted = await fetch(`${base}/api/sync/remote-workflows/${remoteId}`, {
 		method: "DELETE",

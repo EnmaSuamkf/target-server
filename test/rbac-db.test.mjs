@@ -39,6 +39,8 @@ legacy.exec(`
 			'remote.templates.manage',
 			'remote.tcp-tools.manage',
 			'remote.rci.manage',
+			'remote.workflows.create',
+			'remote.templates.create',
 			'devices.link',
 			'devices.manage'
 		)),
@@ -67,6 +69,16 @@ for (const permission of [
 ]) {
 	legacy.prepare("INSERT INTO auth_role_permissions (role_id, permission) VALUES (?, ?)").run("legacy-operator", permission);
 }
+legacy
+	.prepare(
+		`INSERT INTO auth_roles (id, name, is_system, created_at, updated_at)
+		 VALUES ('legacy-creator', 'Legacy Creator', 0, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
+	)
+	.run();
+// Pre-rename live `remote.*` IDs are remapped one-to-one onto `client.*`.
+for (const permission of ["remote.read", "remote.workflows.create", "remote.templates.create"]) {
+	legacy.prepare("INSERT INTO auth_role_permissions (role_id, permission) VALUES (?, ?)").run("legacy-creator", permission);
+}
 legacy.close();
 
 process.env.TARGET_SERVER_DB = dbPath;
@@ -92,27 +104,27 @@ test("opening a pre-granular DB remaps old resource manage rows and grants workf
 		assert.equal(rbac.isValidPermission(removed), false);
 	}
 	for (const granted of [
-		"remote.read",
-		"remote.workflows.manage",
-		"remote.workflows.execute",
-		"remote.workflows.create",
-		"remote.workflows.steps.add",
-		"remote.workflows.steps.edit",
-		"remote.templates.create",
-		"remote.templates.edit",
-		"remote.templates.delete",
-		"remote.templates.import",
-		"remote.templates.export",
-		"remote.tcp-tools.create",
-		"remote.tcp-tools.edit",
-		"remote.tcp-tools.delete",
-		"remote.tcp-tools.import",
-		"remote.tcp-tools.export",
-		"remote.rci.create",
-		"remote.rci.edit",
-		"remote.rci.delete",
-		"remote.rci.import",
-		"remote.rci.export",
+		"client.read",
+		"client.workflows.manage",
+		"client.workflows.execute",
+		"client.workflows.create",
+		"client.workflows.steps.add",
+		"client.workflows.steps.edit",
+		"client.templates.create",
+		"client.templates.edit",
+		"client.templates.delete",
+		"client.templates.import",
+		"client.templates.export",
+		"client.tcp-tools.create",
+		"client.tcp-tools.edit",
+		"client.tcp-tools.delete",
+		"client.tcp-tools.import",
+		"client.tcp-tools.export",
+		"client.rci.create",
+		"client.rci.edit",
+		"client.rci.delete",
+		"client.rci.import",
+		"client.rci.export",
 	]) {
 		assert.ok(operator.permissions.includes(granted), `missing ${granted}`);
 	}
@@ -122,12 +134,37 @@ test("opening a pre-granular DB remaps old resource manage rows and grants workf
 	assert.ok(!sql.includes("'remote.templates.manage'"));
 	rbac.open().prepare("INSERT OR IGNORE INTO auth_role_permissions (role_id, permission) VALUES (?, ?)").run(
 		"legacy-operator",
-		"remote.templates.create",
+		"client.templates.create",
 	);
 	assert.throws(
 		() => rbac.open().prepare("INSERT INTO auth_role_permissions (role_id, permission) VALUES (?, ?)").run("legacy-operator", "role.escalate"),
 		(error) => /CHECK|constraint/i.test(String(error.message)),
 	);
+});
+
+test("opening a pre-rename DB remaps live remote.* rows onto client.*", () => {
+	const creator = rbac.getRoleById("legacy-creator");
+	assert.deepEqual(creator.permissions, ["client.read", "client.templates.create", "client.workflows.create"]);
+	const leftover = rbac
+		.open()
+		.prepare("SELECT COUNT(*) AS n FROM auth_role_permissions WHERE permission LIKE 'remote.%'")
+		.get().n;
+	assert.equal(leftover, 0);
+	const sql = rbac.open().prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'auth_role_permissions'").get().sql;
+	assert.ok(!sql.includes("'remote.workflows.create'"));
+	assert.ok(!sql.includes("'remote.read'"));
+	for (const renamed of ["remote.read", "remote.workflows.create", "remote.workflows.manage"]) {
+		assert.equal(rbac.isValidPermission(renamed), false);
+	}
+	assert.deepEqual(rbac.expandStoredPermission("remote.workflows.create"), ["client.workflows.create"]);
+	assert.deepEqual(rbac.expandStoredPermission("remote.templates.manage"), [
+		"client.templates.create",
+		"client.templates.edit",
+		"client.templates.delete",
+		"client.templates.import",
+		"client.templates.export",
+	]);
+	assert.deepEqual(rbac.expandStoredPermission("remote.unknown"), []);
 });
 
 test("role functions reject unknown permissions and protect the system admin role", () => {
@@ -154,8 +191,8 @@ test("role functions reject unknown permissions and protect the system admin rol
 
 test("custom roles support create, edit and deletion when unassigned", () => {
 	const role = rbac.createRole({ name: "Temporary", permissions: ["activity.read"] });
-	const changed = rbac.updateRole(role.id, { name: "Temporary editor", permissions: ["remote.read"] });
-	assert.deepEqual(changed.permissions, ["remote.read"]);
+	const changed = rbac.updateRole(role.id, { name: "Temporary editor", permissions: ["client.read"] });
+	assert.deepEqual(changed.permissions, ["client.read"]);
 	assert.equal(rbac.deleteRole(role.id), true);
 	assert.equal(rbac.getRoleById(role.id), null);
 });
@@ -163,7 +200,7 @@ test("custom roles support create, edit and deletion when unassigned", () => {
 test("assigned roles cannot be deleted and the last administrator cannot be lost", () => {
 	const operator = rbac.createRole({
 		name: "Operator",
-		permissions: ["activity.read", "remote.read", "remote.workflows.execute"],
+		permissions: ["activity.read", "client.read", "client.workflows.execute"],
 		actorUserId: "legacy-admin",
 	});
 	const secondAdmin = rbac.createAuthUser({ email: "second-admin@example.test" });
@@ -177,7 +214,7 @@ test("assigned roles cannot be deleted and the last administrator cannot be lost
 	assert.equal(rbac.countUsersByRole(operator.id), 1);
 	rbac.updateRole(operator.id, {
 		name: "Operator",
-		permissions: ["activity.read", "remote.read"],
+		permissions: ["activity.read", "client.read"],
 		actorUserId: secondAdmin.id,
 	});
 	assert.equal(rbac.getAuthUserById("legacy-admin").tokenVersion, 3);

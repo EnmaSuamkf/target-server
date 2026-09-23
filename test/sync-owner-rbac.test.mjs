@@ -92,7 +92,7 @@ test("linked register and heartbeat expose the owner's current role and refresh 
 			await fetch(`${base}/api/auth/roles`, {
 				method: "POST",
 				headers: { "content-type": "application/json", cookie: admin },
-				body: JSON.stringify({ name: "Hub viewer", permissions: ["remote.read", "remote.workflows.create"] }),
+				body: JSON.stringify({ name: "Hub viewer", permissions: ["client.read", "client.workflows.create"] }),
 			})
 		).json()
 	).role;
@@ -111,7 +111,7 @@ test("linked register and heartbeat expose the owner's current role and refresh 
 	});
 	assert.equal(setup.status, 200);
 	const owner = (await setup.json()).user;
-	assert.deepEqual(owner.permissions, ["remote.read", "remote.workflows.create"]);
+	assert.deepEqual(owner.permissions, ["client.read", "client.workflows.create"]);
 
 	const device = linkDevice({ requestId: "owner-rbac", ownerUserId: owner.id, secret: "owner-secret" });
 	const headers = { authorization: "Target-Device v1 dev-owner-rbac.owner-secret", "content-type": "application/json" };
@@ -123,7 +123,7 @@ test("linked register and heartbeat expose the owner's current role and refresh 
 	assert.equal(register.status, 201);
 	const registered = await register.json();
 	assert.equal(registered.client_token, undefined);
-	assertOwnerShape(registered.owner, ["remote.read", "remote.workflows.create"]);
+	assertOwnerShape(registered.owner, ["client.read", "client.workflows.create"]);
 	assert.equal(registered.owner.id, owner.id);
 
 	const firstBeat = await fetch(`${base}/api/sync/heartbeat`, {
@@ -132,12 +132,12 @@ test("linked register and heartbeat expose the owner's current role and refresh 
 		body: JSON.stringify({ status: "idle" }),
 	});
 	assert.equal(firstBeat.status, 200);
-	assertOwnerShape((await firstBeat.json()).owner, ["remote.read", "remote.workflows.create"]);
+	assertOwnerShape((await firstBeat.json()).owner, ["client.read", "client.workflows.create"]);
 
 	const changed = await fetch(`${base}/api/auth/roles/${role.id}`, {
 		method: "PATCH",
 		headers: { "content-type": "application/json", cookie: admin },
-		body: JSON.stringify({ name: "Hub viewer", permissions: ["activity.read", "remote.read"] }),
+		body: JSON.stringify({ name: "Hub viewer", permissions: ["activity.read", "client.read"] }),
 	});
 	assert.equal(changed.status, 200);
 
@@ -148,7 +148,7 @@ test("linked register and heartbeat expose the owner's current role and refresh 
 	});
 	assert.equal(refreshed.status, 200);
 	const after = await refreshed.json();
-	assertOwnerShape(after.owner, ["activity.read", "remote.read"]);
+	assertOwnerShape(after.owner, ["activity.read", "client.read"]);
 	assert.equal(after.owner.id, owner.id);
 	assert.equal(device.scopes.includes("sync:write"), true);
 });

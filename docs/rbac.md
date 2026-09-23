@@ -8,9 +8,11 @@ authorization mechanism.
 
 Roles contain only these permission IDs. `db.mjs` (`PERMISSION_CATALOG` /
 `getPermissionCatalog()`) is the application source of truth. Unknown strings
-are rejected with a validation error. Resource-domain `*.manage` IDs
+are rejected with a validation error. Client-scoped IDs use the `client.`
+prefix; the older `remote.*` spellings are not live and are remapped on open
+(see [Additive migration](#additive-migration)). Resource-domain `*.manage` IDs
 (`remote.templates.manage`, `remote.tcp-tools.manage`, `remote.rci.manage`) are
-not live; they were replaced by create / edit / delete / import / export.
+retired; they were replaced by create / edit / delete / import / export.
 
 ### Server
 
@@ -40,47 +42,55 @@ not live; they were replaced by create / edit / delete / import / export.
 | `rci.import` | RCI | Import RCI resource sets stored on this server |
 | `rci.export` | RCI | Export RCI resource sets stored on this server |
 
-These `templates.*` / `tcp-tools.*` / `rci.*` IDs are server-owned Agent Resources catalog permissions. They are distinct from the client-scoped `remote.templates.*` / `remote.tcp-tools.*` / `remote.rci.*` IDs that gate per-client Remote resources.
+These `templates.*` / `tcp-tools.*` / `rci.*` IDs are server-owned Agent Resources catalog permissions. They are distinct from the client-scoped `client.templates.*` / `client.tcp-tools.*` / `client.rci.*` IDs that gate per-client Remote resources.
 
 ### Client
 
 | Permission | Group | Allows |
 | --- | --- | --- |
-| `remote.read` | Remote Control | Read Remote Control clients, workflows and resources |
-| `remote.workflows.create` | Workflows | Create remote workflows |
-| `remote.workflows.steps.add` | Workflows | Add steps to remote workflows |
-| `remote.workflows.steps.edit` | Workflows | Edit steps on remote workflows |
-| `remote.workflows.manage` | Workflows | Delete remote workflows, set conversation context and choose run selection |
-| `remote.workflows.execute` | Workflows | Start, pause, resume and restart remote workflows; run, abort or continue steps |
-| `remote.templates.create` | Templates | Create a client's remote templates |
-| `remote.templates.edit` | Templates | Edit a client's remote templates |
-| `remote.templates.delete` | Templates | Delete a client's remote templates |
-| `remote.templates.import` | Templates | Import a client's remote templates |
-| `remote.templates.export` | Templates | Export a client's remote templates |
-| `remote.tcp-tools.create` | TCP tools | Create a client's remote TCP tools |
-| `remote.tcp-tools.edit` | TCP tools | Edit a client's remote TCP tools |
-| `remote.tcp-tools.delete` | TCP tools | Delete a client's remote TCP tools |
-| `remote.tcp-tools.import` | TCP tools | Import a client's remote TCP tools |
-| `remote.tcp-tools.export` | TCP tools | Export a client's remote TCP tools |
-| `remote.rci.create` | RCI | Create a client's remote resource sets |
-| `remote.rci.edit` | RCI | Edit a client's remote resource sets |
-| `remote.rci.delete` | RCI | Delete a client's remote resource sets |
-| `remote.rci.import` | RCI | Import a client's remote resource sets |
-| `remote.rci.export` | RCI | Export a client's remote resource sets |
+| `client.read` | Clients | Read connected clients, their workflows and resources |
+| `client.workflows.create` | Workflows | Create client workflows |
+| `client.workflows.steps.add` | Workflows | Add steps to client workflows |
+| `client.workflows.steps.edit` | Workflows | Edit steps on client workflows |
+| `client.workflows.manage` | Workflows | Delete client workflows, set conversation context and choose run selection |
+| `client.workflows.execute` | Workflows | Start, pause, resume and restart client workflows; run, abort or continue steps |
+| `client.templates.create` | Templates | Create a client's templates |
+| `client.templates.edit` | Templates | Edit a client's templates |
+| `client.templates.delete` | Templates | Delete a client's templates |
+| `client.templates.import` | Templates | Import a client's templates |
+| `client.templates.export` | Templates | Export a client's templates |
+| `client.tcp-tools.create` | TCP tools | Create a client's TCP tools |
+| `client.tcp-tools.edit` | TCP tools | Edit a client's TCP tools |
+| `client.tcp-tools.delete` | TCP tools | Delete a client's TCP tools |
+| `client.tcp-tools.import` | TCP tools | Import a client's TCP tools |
+| `client.tcp-tools.export` | TCP tools | Export a client's TCP tools |
+| `client.rci.create` | RCI | Create a client's resource sets |
+| `client.rci.edit` | RCI | Edit a client's resource sets |
+| `client.rci.delete` | RCI | Delete a client's resource sets |
+| `client.rci.import` | RCI | Import a client's resource sets |
+| `client.rci.export` | RCI | Export a client's resource sets |
 
 ### Additive migration
 
 Opening an older database remaps retired IDs without a separate upgrade step:
 
-1. `remote.templates.manage` / `remote.tcp-tools.manage` / `remote.rci.manage`
-   rows expand to that domain's five children, then the old rows are deleted.
-2. Any role that already has `remote.workflows.manage` also receives
-   `remote.workflows.create`, `remote.workflows.steps.add` and
-   `remote.workflows.steps.edit`.
-3. The system `admin` role is seeded with every current catalogue ID; unknown
+1. Live client IDs stored with the pre-rename `remote.` prefix are remapped
+   one-to-one onto `client.` (for example `remote.read` → `client.read`,
+   `remote.workflows.create` → `client.workflows.create`,
+   `remote.templates.export` → `client.templates.export`). No `remote.*` row
+   survives the open.
+2. Retired `remote.templates.manage` / `remote.tcp-tools.manage` /
+   `remote.rci.manage` rows expand to that domain's five `client.*` children,
+   then the old rows are deleted.
+3. Any role that already has workflow manage (`client.workflows.manage`, or
+   `remote.workflows.manage` before the rename) also receives
+   `client.workflows.create`, `client.workflows.steps.add` and
+   `client.workflows.steps.edit`.
+4. The system `admin` role is seeded with every current catalogue ID; unknown
    admin rows are dropped.
-4. The SQLite `CHECK` on `auth_role_permissions.permission` is rebuilt so it
-   accepts the new IDs and rejects the retired `*.manage` strings.
+5. The SQLite `CHECK` on `auth_role_permissions.permission` is rebuilt so it
+   accepts the new IDs and rejects the retired `*.manage` and `remote.*`
+   strings.
 
 The migration is additive and repeatable. Role create/update still rejects
 unknown IDs.
@@ -123,7 +133,7 @@ Role create/update payload:
 ```json
 {
   "name": "Fleet operator",
-  "permissions": ["activity.read", "remote.read"]
+  "permissions": ["activity.read", "client.read"]
 }
 ```
 

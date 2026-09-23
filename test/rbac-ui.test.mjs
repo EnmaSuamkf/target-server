@@ -17,13 +17,14 @@ test("remote workflow actions are independently gated", () => {
 	const app = read("../ui/src/App.tsx");
 	assert.match(app, /activity\.read/);
 	assert.match(app, /users\.manage/);
-	assert.match(app, /remote\.read/);
+	assert.match(app, /client\.read/);
 	assert.match(app, /devices\.manage/);
-	assert.match(app, /remote\.workflows\.create/);
-	assert.match(app, /remote\.workflows\.steps\.add/);
-	assert.match(app, /remote\.workflows\.steps\.edit/);
-	assert.match(app, /remote\.workflows\.execute/);
+	assert.match(app, /client\.workflows\.create/);
+	assert.match(app, /client\.workflows\.steps\.add/);
+	assert.match(app, /client\.workflows\.steps\.edit/);
+	assert.match(app, /client\.workflows\.execute/);
 	assert.doesNotMatch(app, /remote\.templates\.manage/);
+	assert.doesNotMatch(app, /"remote\.(read|workflows|templates|tcp-tools|rci)/);
 
 	const workflows = read("../ui/src/components/RemoteWorkflowsPanel.tsx");
 	assert.match(workflows, /permissions\.create/);
