@@ -969,33 +969,33 @@ const RESOURCE_DOMAINS = {
 		capability: "templates",
 		command: "template",
 		permissions: {
-			create: "remote.templates.create",
-			edit: "remote.templates.edit",
-			delete: "remote.templates.delete",
-			import: "remote.templates.import",
-			export: "remote.templates.export",
+			create: "client.templates.create",
+			edit: "client.templates.edit",
+			delete: "client.templates.delete",
+			import: "client.templates.import",
+			export: "client.templates.export",
 		},
 	},
 	"tcp-tools": {
 		capability: "tcp_tools",
 		command: "tcp-tool",
 		permissions: {
-			create: "remote.tcp-tools.create",
-			edit: "remote.tcp-tools.edit",
-			delete: "remote.tcp-tools.delete",
-			import: "remote.tcp-tools.import",
-			export: "remote.tcp-tools.export",
+			create: "client.tcp-tools.create",
+			edit: "client.tcp-tools.edit",
+			delete: "client.tcp-tools.delete",
+			import: "client.tcp-tools.import",
+			export: "client.tcp-tools.export",
 		},
 	},
 	"resource-sets": {
 		capability: "resource_sets",
 		command: "resource-set",
 		permissions: {
-			create: "remote.rci.create",
-			edit: "remote.rci.edit",
-			delete: "remote.rci.delete",
-			import: "remote.rci.import",
-			export: "remote.rci.export",
+			create: "client.rci.create",
+			edit: "client.rci.edit",
+			delete: "client.rci.delete",
+			import: "client.rci.import",
+			export: "client.rci.export",
 		},
 	},
 };
@@ -1014,10 +1014,10 @@ function resourcePermissionForMethod(info, method) {
 }
 
 function workflowCommandPermission(type) {
-	if (type === "step.add") return "remote.workflows.steps.add";
-	if (type === "step.edit") return "remote.workflows.steps.edit";
-	if (RUN_WORKFLOW_COMMANDS.has(type) || EXECUTE_STEP_COMMANDS.has(type)) return "remote.workflows.execute";
-	return "remote.workflows.manage";
+	if (type === "step.add") return "client.workflows.steps.add";
+	if (type === "step.edit") return "client.workflows.steps.edit";
+	if (RUN_WORKFLOW_COMMANDS.has(type) || EXECUTE_STEP_COMMANDS.has(type)) return "client.workflows.execute";
+	return "client.workflows.manage";
 }
 
 function clientSupportsResourceDomain(client, info) {
@@ -1397,7 +1397,7 @@ async function handleOperatorSyncRoute(req, res, pathname, url) {
 		const client = getClientById(clientId);
 		if (!client) return sendJson(res, 404, { error: "client_not_found" });
 		if (req.method === "GET" && !resourceId) {
-			if (!(await requireCapability(req, res, "remote.read"))) return true;
+			if (!(await requireCapability(req, res, "client.read"))) return true;
 			return sendJson(res, 200, {
 				contract_version: "sync/v2",
 				resources: listRemoteResources(clientId, info.capability),
@@ -1450,12 +1450,12 @@ async function handleOperatorSyncRoute(req, res, pathname, url) {
 	}
 
 	if (req.method === "GET" && pathname === "/api/sync/clients") {
-		if (!(await requireCapability(req, res, "remote.read"))) return true;
+		if (!(await requireCapability(req, res, "client.read"))) return true;
 		return sendJson(res, 200, { clients: listOnlineClients().map(syncClientToApi) });
 	}
 
 	if (req.method === "GET" && pathname === "/api/sync/events") {
-		if (!(await requireCapability(req, res, "remote.read"))) return true;
+		if (!(await requireCapability(req, res, "client.read"))) return true;
 		const clientId = url.searchParams.get("client_id") || null;
 		const remoteId = url.searchParams.get("remote_id") || null;
 		let limit = Number.parseInt(url.searchParams.get("limit") ?? "50", 10);
@@ -1465,7 +1465,7 @@ async function handleOperatorSyncRoute(req, res, pathname, url) {
 	}
 
 	if (req.method === "GET" && pathname === "/api/sync/remote-workflows") {
-		if (!(await requireCapability(req, res, "remote.read"))) return true;
+		if (!(await requireCapability(req, res, "client.read"))) return true;
 		const clientId = url.searchParams.get("client_id") || null;
 		const workflows = listRemoteWorkflows({ clientId }).map(remoteWorkflowToApi);
 		return sendJson(res, 200, { remote_workflows: workflows });
@@ -1473,7 +1473,7 @@ async function handleOperatorSyncRoute(req, res, pathname, url) {
 
 	const remoteDetailMatch = pathname.match(/^\/api\/sync\/remote-workflows\/([^/]+)$/);
 	if (req.method === "GET" && remoteDetailMatch) {
-		if (!(await requireCapability(req, res, "remote.read"))) return true;
+		if (!(await requireCapability(req, res, "client.read"))) return true;
 		const detail = getRemoteWorkflowDetail(remoteDetailMatch[1]);
 		if (!detail) return sendJson(res, 404, { error: "remote_workflow_not_found" });
 		return sendJson(res, 200, {
@@ -1484,7 +1484,7 @@ async function handleOperatorSyncRoute(req, res, pathname, url) {
 	}
 
 	if (req.method === "PATCH" && remoteDetailMatch) {
-		if (!(await requireCapability(req, res, "remote.workflows.manage"))) return true;
+		if (!(await requireCapability(req, res, "client.workflows.manage"))) return true;
 		const body = await readJson(req, res);
 		if (!body) return true;
 		const remoteWorkflow = getRemoteWorkflowById(remoteDetailMatch[1]);
@@ -1517,7 +1517,7 @@ async function handleOperatorSyncRoute(req, res, pathname, url) {
 	}
 
 	if (req.method === "POST" && pathname === "/api/sync/remote-workflows") {
-		if (!(await requireCapability(req, res, "remote.workflows.create"))) return true;
+		if (!(await requireCapability(req, res, "client.workflows.create"))) return true;
 		const body = await readJson(req, res);
 		if (!body) return true;
 		const v = validate("sync.remote_workflow.create", body);
@@ -1571,7 +1571,7 @@ async function handleOperatorSyncRoute(req, res, pathname, url) {
 
 	const runSelectionMatch = pathname.match(/^\/api\/sync\/remote-workflows\/([^/]+)\/run-selection$/);
 	if (req.method === "PATCH" && runSelectionMatch) {
-		if (!(await requireCapability(req, res, "remote.workflows.manage"))) return true;
+		if (!(await requireCapability(req, res, "client.workflows.manage"))) return true;
 		const body = await readJson(req, res);
 		if (!body) return true;
 		const v = validate("sync.remote_workflow.run_selection", body);
@@ -1624,7 +1624,7 @@ async function handleOperatorSyncRoute(req, res, pathname, url) {
 
 	const deleteMatch = pathname.match(/^\/api\/sync\/remote-workflows\/([^/]+)$/);
 	if (req.method === "DELETE" && deleteMatch) {
-		if (!(await requireCapability(req, res, "remote.workflows.manage"))) return true;
+		if (!(await requireCapability(req, res, "client.workflows.manage"))) return true;
 		const remoteWorkflow = getRemoteWorkflowById(deleteMatch[1]);
 		if (!remoteWorkflow) return sendJson(res, 404, { error: "remote_workflow_not_found" });
 		let body = {};

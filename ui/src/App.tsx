@@ -174,22 +174,22 @@ export function App({ user, catalog = null, onSignOut }: { user: AuthUser; catal
 	const can = (permission: string) => hasPermission(user, permission);
 	const canActivity = can("activity.read");
 	const canUsers = can("users.manage");
-	const canRemote = can("remote.read");
-	const canCreateRemote = can("remote.workflows.create");
-	const canAddRemoteStep = can("remote.workflows.steps.add");
-	const canEditRemoteStep = can("remote.workflows.steps.edit");
-	const canManageRemote = can("remote.workflows.manage");
-	const canExecuteRemote = can("remote.workflows.execute");
-	const resourceActions = (prefix: "remote.templates" | "remote.tcp-tools" | "remote.rci"): RemoteResourceActions => ({
+	const canRemote = can("client.read");
+	const canCreateRemote = can("client.workflows.create");
+	const canAddRemoteStep = can("client.workflows.steps.add");
+	const canEditRemoteStep = can("client.workflows.steps.edit");
+	const canManageRemote = can("client.workflows.manage");
+	const canExecuteRemote = can("client.workflows.execute");
+	const resourceActions = (prefix: "client.templates" | "client.tcp-tools" | "client.rci"): RemoteResourceActions => ({
 		create: can(`${prefix}.create`),
 		edit: can(`${prefix}.edit`),
 		delete: can(`${prefix}.delete`),
 		import: can(`${prefix}.import`),
 		export: can(`${prefix}.export`),
 	});
-	const templateActions = resourceActions("remote.templates");
-	const tcpActions = resourceActions("remote.tcp-tools");
-	const rciActions = resourceActions("remote.rci");
+	const templateActions = resourceActions("client.templates");
+	const tcpActions = resourceActions("client.tcp-tools");
+	const rciActions = resourceActions("client.rci");
 	const canManageDevices = can("devices.manage");
 	const canSeeRemoteArea = canRemote || canManageDevices;
 	const canLibrary = can("templates.read") || can("tcp-tools.read") || can("rci.read");
