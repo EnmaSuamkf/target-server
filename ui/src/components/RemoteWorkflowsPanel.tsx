@@ -28,6 +28,8 @@ import type {
 import { useApi } from "../hooks/useApi.ts";
 import { sameResourceSelections } from "../lib/rciSelection.ts";
 import { sameTcpSelections } from "../lib/tcpSelection.ts";
+import { Field } from "./Field.tsx";
+import { Modal } from "./Modal.tsx";
 import { ResourceSelectionEditor } from "./ResourceSelectionEditor.tsx";
 import { TcpSelectionEditor } from "./TcpSelectionEditor.tsx";
 import { shortId, timeAgo } from "../lib/format.ts";
@@ -46,6 +48,7 @@ import { WorkflowCanvas } from "./WorkflowCanvas.tsx";
 function fieldErrors(errors: FieldError[], field: string) {
 	return errors.filter((e) => e.field === field || e.field.startsWith(`${field}.`));
 }
+
 
 /** Next `step-N` key that does not collide after removals (N = max existing suffix + 1). */
 function nextRemoteStepKey(existingKeys: string[]): string {
@@ -264,6 +267,7 @@ export function RemoteWorkflowsPanel({
 	const [editingKey, setEditingKey] = useState<string | null>(null);
 	const [selectedStepKeys, setSelectedStepKeys] = useState<Set<string>>(new Set());
 	const [templateId, setTemplateId] = useState("");
+	const [createOpen, setCreateOpen] = useState(false);
 	const [appendTemplateId, setAppendTemplateId] = useState("");
 	const [tcpDraft, setTcpDraft] = useState<TcpSelection[]>([]);
 	const [rciDraft, setRciDraft] = useState<ResourceSelection[]>([]);
@@ -382,6 +386,7 @@ export function RemoteWorkflowsPanel({
 				setCreateContext("");
 				setAgent("");
 				setTemplateId("");
+				setCreateOpen(false);
 				onSelect(res.data.remote_workflow.id);
 				onRefresh();
 			} finally {
@@ -581,119 +586,185 @@ export function RemoteWorkflowsPanel({
 		pendingRunCommand ||
 		selectedStepKeys.size === 0 ||
 		steps.length === 0;
+	const agentTitle = !clientId
+		? "Pick a client first"
+		: installedRunners.length === 0
+			? "Waiting for the client to report installed agents (next heartbeat)"
+			: "Agent CLI that will run this workflow on the client";
+	const clientError = fieldErrors(errors, "client_id")[0]?.message;
+	const agentError = fieldErrors(errors, "agent")[0]?.message;
+	const nameError = fieldErrors(errors, "name")[0]?.message;
+	const templateError = fieldErrors(errors, "template_id")[0]?.message;
+	const formError = fieldErrors(errors, "_")[0]?.message;
 
 	return (
 		<div className="sync-remote">
-			{permissions.create ? <form className="sync-create sync-create--stacked" onSubmit={(e) => void onCreate(e)}>
-				<div className="sync-create-row">
-					<select
-						className="select"
-						required
-						value={clientId}
-						onChange={(e) => {
-							const nextClientId = e.target.value;
-							setClientId(nextClientId);
-							const nextClient = activeClients.find((c) => c.id === nextClientId);
-							const nextRunners = (nextClient?.capabilities?.runners ?? []).filter((r) => r.installed);
-							setAgent(nextRunners[0]?.id ?? "");
-						}}
-					>
-						<option value="">Select client…</option>
-						{activeClients.map((c) => (
-							<option key={c.id} value={c.id}>
-								{c.name || shortId(c.id)}
-								{c.availability ? ` · ${c.availability}` : ""}
-							</option>
-						))}
-					</select>
-					<select
-						className="select"
-						required={installedRunners.length > 0}
-						disabled={!clientId || installedRunners.length === 0}
-						value={agent}
-						onChange={(e) => setAgent(e.target.value)}
-						title={
-							!clientId
-								? "Pick a client first"
-								: installedRunners.length === 0
-									? "Waiting for the client to report installed agents (next heartbeat)"
-									: "Agent CLI that will run this workflow on the client"
-						}
-					>
-						<option value="">
-							{!clientId
-								? "Agent…"
-								: installedRunners.length === 0
-									? "No agents reported yet"
-									: "Select agent…"}
-						</option>
-						{installedRunners.map((r) => (
-							<option key={r.id} value={r.id}>
-								{RUNNER_LABELS[r.id] ?? r.id}
-							</option>
-						))}
-					</select>
-					<input
-						className="input"
-						required
-						placeholder="Workflow name"
-						value={name}
-						onChange={(e) => setName(e.target.value)}
-					/>
-					<button
-						type="submit"
-						className="btn btn--on"
-						disabled={
-							busy ||
-							activeClients.length === 0 ||
-							(installedRunners.length > 0 && !agent)
-						}
-					>
-						Create remote workflow
+			{permissions.create ? (
+				<div className="sync-remote-toolbar">
+					<button type="button" className="btn btn--on" onClick={() => setCreateOpen(true)}>
+						+ New remote workflow
 					</button>
 				</div>
-				<p className="hint sync-create-hint">
-					Remote workflows always run in the <strong>docker</strong> sandbox on the client. The agent list
-					comes from the client heartbeat — only installed CLIs are selectable.
-				</p>
-				{permissions.templatesRead ? (
-					<label className="field sync-context-field">
-						<span className="label">Start from template</span>
-						<select
-							className="select"
-							value={templateId}
-							onChange={(e) => setTemplateId(e.target.value)}
+			) : null}
+			<Modal
+				open={createOpen && permissions.create}
+				title="New remote workflow"
+				description="Creates a remote workflow on the chosen client. Its steps then run in order on that machine."
+				onClose={() => setCreateOpen(false)}
+				footer={
+					<>
+						<button type="button" className="btn" onClick={() => setCreateOpen(false)} disabled={busy}>
+							Cancel
+						</button>
+						<button
+							type="submit"
+							form="create-remote-workflow"
+							className="btn btn--on"
+							disabled={
+								busy ||
+								activeClients.length === 0 ||
+								(installedRunners.length > 0 && !agent)
+							}
 						>
-							<option value="">No template — start empty</option>
-							{templates.map((template) => (
-								<option key={template.id} value={template.id}>
-									{template.name} ({template.steps.length} step{template.steps.length === 1 ? "" : "s"})
-								</option>
-							))}
-						</select>
-					</label>
-				) : null}
-				<label className="field sync-context-field">
-					<span className="label">Conversation context (optional)</span>
-					<textarea
-						className="input sync-context-input"
-						rows={3}
-						placeholder="Background that applies to every step of this workflow…"
-						value={createContext}
-						onChange={(e) => setCreateContext(e.target.value)}
-					/>
-				</label>
-			</form> : null}
-			{fieldErrors(errors, "client_id")
-				.concat(fieldErrors(errors, "name"))
-				.concat(fieldErrors(errors, "agent"))
-				.concat(fieldErrors(errors, "template_id"))
-				.concat(fieldErrors(errors, "_"))
-				.map((err) => (
-					<div key={`${err.field}-${err.code}`} className="field-err">
-						{err.message}
-					</div>
-				))}
+							Create remote workflow
+						</button>
+					</>
+				}
+			>
+				<form id="create-remote-workflow" className="sync-create" onSubmit={(e) => void onCreate(e)}>
+					<fieldset className="sync-create-group">
+						<legend>Where it runs</legend>
+						<Field
+							label="Client"
+							required
+							hint="The Target hub that will own this workflow."
+							{...(clientError ? { error: clientError } : {})}
+						>
+							{(props) => (
+								<select
+									{...props}
+									className="select"
+									required
+									value={clientId}
+									onChange={(e) => {
+										const nextClientId = e.target.value;
+										setClientId(nextClientId);
+										const nextClient = activeClients.find((c) => c.id === nextClientId);
+										const nextRunners = (nextClient?.capabilities?.runners ?? []).filter((r) => r.installed);
+										setAgent(nextRunners[0]?.id ?? "");
+									}}
+								>
+									<option value="">Select client…</option>
+									{activeClients.map((c) => (
+										<option key={c.id} value={c.id}>
+											{c.name || shortId(c.id)}
+											{c.availability ? ` · ${c.availability}` : ""}
+										</option>
+									))}
+								</select>
+							)}
+						</Field>
+						<Field
+							label="Agent"
+							required={installedRunners.length > 0}
+							hint={agentTitle}
+							{...(agentError ? { error: agentError } : {})}
+						>
+							{(props) => (
+								<select
+									{...props}
+									className="select"
+									required={installedRunners.length > 0}
+									disabled={!clientId || installedRunners.length === 0}
+									value={agent}
+									onChange={(e) => setAgent(e.target.value)}
+									title={agentTitle}
+								>
+									<option value="">
+										{!clientId
+											? "Agent…"
+											: installedRunners.length === 0
+												? "No agents reported yet"
+												: "Select agent…"}
+									</option>
+									{installedRunners.map((r) => (
+										<option key={r.id} value={r.id}>
+											{RUNNER_LABELS[r.id] ?? r.id}
+										</option>
+									))}
+								</select>
+							)}
+						</Field>
+						<p className="hint">
+							Remote workflows always run in the <strong>docker</strong> sandbox on the client. The agent list
+							comes from the client heartbeat — only installed CLIs are selectable.
+						</p>
+					</fieldset>
+					<fieldset className="sync-create-group">
+						<legend>What it does</legend>
+						<Field
+							label="Name"
+							required
+							hint="Shown in this list and on the client. Pick something an operator can recognise later."
+							{...(nameError ? { error: nameError } : {})}
+						>
+							{(props) => (
+								<input
+									{...props}
+									className="input"
+									required
+									placeholder="e.g. release-notes"
+									value={name}
+									onChange={(e) => setName(e.target.value)}
+								/>
+							)}
+						</Field>
+						{permissions.templatesRead ? (
+							<Field
+								label="Start from template"
+								hint="Optional — seeds the workflow with the template's steps and merged TCP/RCI selections."
+								{...(templateError ? { error: templateError } : {})}
+							>
+								{(props) => (
+									<select
+										{...props}
+										className="select"
+										value={templateId}
+										onChange={(e) => setTemplateId(e.target.value)}
+									>
+										<option value="">No template — start empty</option>
+										{templates.map((template) => (
+											<option key={template.id} value={template.id}>
+												{template.name} ({template.steps.length} step{template.steps.length === 1 ? "" : "s"})
+											</option>
+										))}
+									</select>
+								)}
+							</Field>
+						) : null}
+						<Field
+							label="Conversation context"
+							hint="Optional. Delivered before every step on the client — same as a Target hub conversation context."
+						>
+							{(props) => (
+								<textarea
+									{...props}
+									className="input sync-context-input"
+									rows={3}
+									placeholder="Background that applies to every step of this workflow…"
+									value={createContext}
+									onChange={(e) => setCreateContext(e.target.value)}
+								/>
+							)}
+						</Field>
+					</fieldset>
+					{formError ? (
+						<p className="msg msg--error" role="alert">
+							{formError}
+						</p>
+					) : null}
+				</form>
+			</Modal>
 			{notice ? <div className="panel-note">{notice}</div> : null}
 			{permissions.create && activeClients.length === 0 && clients ? (
 				<div className="empty">Register a sync client before creating remote workflows.</div>
@@ -841,24 +912,28 @@ export function RemoteWorkflowsPanel({
 
 					{permissions.addStep && permissions.templatesRead ? (
 						<section className="sync-section">
-							<div className="sync-section-head">
-								<h4>Append a template's steps</h4>
-							</div>
-							<p className="hint">Adds every step from a server catalog template. TCP and RCI selections are merged into this workflow.</p>
 							<div className="sync-create-row">
-								<select
-									className="select"
-									value={appendTemplateId}
-									onChange={(e) => setAppendTemplateId(e.target.value)}
-									disabled={busy}
+								<Field
+									label="Append a template's steps"
+									hint="Adds every step from a server catalog template. TCP and RCI selections are merged into this workflow."
 								>
-									<option value="">Select a template…</option>
-									{templates.map((template) => (
-										<option key={template.id} value={template.id}>
-											{template.name} ({template.steps.length} step{template.steps.length === 1 ? "" : "s"})
-										</option>
-									))}
-								</select>
+									{(props) => (
+										<select
+											{...props}
+											className="select"
+											value={appendTemplateId}
+											onChange={(e) => setAppendTemplateId(e.target.value)}
+											disabled={busy}
+										>
+											<option value="">Select a template…</option>
+											{templates.map((template) => (
+												<option key={template.id} value={template.id}>
+													{template.name} ({template.steps.length} step{template.steps.length === 1 ? "" : "s"})
+												</option>
+											))}
+										</select>
+									)}
+								</Field>
 								<button
 									type="button"
 									className="btn btn--sm btn--on"
@@ -1211,67 +1286,100 @@ function StepEditorForm({
 }) {
 	return (
 		<form className="sync-step-form" onSubmit={onSubmit}>
-			<label className="field">
-				<span className="label">Task description</span>
-				<textarea
-					className="input"
-					required
-					rows={3}
-					value={form.description}
-					onChange={(e) => setForm({ ...form, description: e.target.value })}
-					placeholder="What the agent should do in this step…"
-				/>
-			</label>
-			<label className="field">
-				<span className="label">Acceptance criteria</span>
-				<textarea
-					className="input"
-					rows={2}
-					value={form.acceptanceCriteria}
-					onChange={(e) => setForm({ ...form, acceptanceCriteria: e.target.value })}
-					placeholder="Optional — what a good result must satisfy."
-				/>
-			</label>
-			<div className="sync-step-form__toggles">
-				<label className="sync-toggle">
-					<input
-						type="checkbox"
-						checked={form.manualReview}
-						onChange={(e) => setForm({ ...form, manualReview: e.target.checked })}
+			<Field
+				label="Task description"
+				required
+				hint="What the agent should do in this step."
+			>
+				{(props) => (
+					<textarea
+						{...props}
+						className="input"
+						required
+						rows={3}
+						value={form.description}
+						onChange={(e) => setForm({ ...form, description: e.target.value })}
+						placeholder="What the agent should do in this step…"
 					/>
-					Manual review
-				</label>
-				<label className="sync-toggle">
-					<input
-						type="checkbox"
-						checked={form.useSubagent}
-						onChange={(e) => setForm({ ...form, useSubagent: e.target.checked })}
+				)}
+			</Field>
+			<Field
+				label="Acceptance criteria"
+				hint="If set, the agent self-evaluates its result after running and re-runs the step on a reject, up to the retry budget."
+			>
+				{(props) => (
+					<textarea
+						{...props}
+						className="input"
+						rows={2}
+						value={form.acceptanceCriteria}
+						onChange={(e) => setForm({ ...form, acceptanceCriteria: e.target.value })}
+						placeholder="Optional — what a good result must satisfy."
 					/>
-					Use subagent
-				</label>
-			</div>
+				)}
+			</Field>
+			<Field
+				label="Manual review"
+				hint="The workflow stops after this step and waits for you. No further step runs until you continue it."
+			>
+				{(props) => (
+					<label className="sync-toggle">
+						<input
+							{...props}
+							type="checkbox"
+							checked={form.manualReview}
+							onChange={(e) => setForm({ ...form, manualReview: e.target.checked })}
+						/>
+						Stop after this step for a human continue
+					</label>
+				)}
+			</Field>
+			<Field
+				label="Use subagent"
+				hint="On: the agent delegates this step to a subagent, so the shared session only keeps its summary. Off: it solves the step itself."
+			>
+				{(props) => (
+					<label className="sync-toggle">
+						<input
+							{...props}
+							type="checkbox"
+							checked={form.useSubagent}
+							onChange={(e) => setForm({ ...form, useSubagent: e.target.checked })}
+						/>
+						Delegate this step to a subagent
+					</label>
+				)}
+			</Field>
 			<div className="sync-step-form__grid">
-				<label className="field">
-					<span className="label">Max retries</span>
-					<input
-						type="number"
-						className="input"
-						min={0}
-						value={form.maxRetries}
-						onChange={(e) => setForm({ ...form, maxRetries: e.target.value })}
-					/>
-				</label>
-				<label className="field">
-					<span className="label">Interval (s)</span>
-					<input
-						type="number"
-						className="input"
-						min={0}
-						disabled={!intervalEnabled}
-						value={intervalEnabled ? form.retryInterval : "0"}
-						onChange={(e) => setForm({ ...form, retryInterval: e.target.value })}
-					/>
-				</label>
+				<Field label="Max retries" hint="How many times the step may re-run after a rejected result.">
+					{(props) => (
+						<input
+							{...props}
+							type="number"
+							className="input"
+							min={0}
+							value={form.maxRetries}
+							onChange={(e) => setForm({ ...form, maxRetries: e.target.value })}
+						/>
+					)}
+				</Field>
+				<Field
+					label="Interval (s)"
+					hint="Seconds to wait before each re-run after a judge reject. Only editable with more than one retry."
+				>
+					{(props) => (
+						<input
+							{...props}
+							type="number"
+							className="input"
+							min={0}
+							disabled={!intervalEnabled}
+							value={intervalEnabled ? form.retryInterval : "0"}
+							onChange={(e) => setForm({ ...form, retryInterval: e.target.value })}
+							title="Seconds to wait before each re-run after a judge reject. Only editable with more than one retry."
+						/>
+					)}
+				</Field>
 			</div>
 			<div className="sync-step-form__actions">
 				<button type="submit" className="btn btn--sm btn--on" disabled={busy || !form.description.trim()}>
