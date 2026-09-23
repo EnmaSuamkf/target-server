@@ -30,7 +30,7 @@ export const PERMISSION_GROUPS = Object.freeze([
 	{ id: "server.templates", scope: "server", label: "Templates", description: "Manage workflow templates stored on this dashboard server" },
 	{ id: "server.tcp", scope: "server", label: "TCP tools", description: "Manage TCP packs stored on this dashboard server" },
 	{ id: "server.rci", scope: "server", label: "RCI", description: "Manage RCI resource sets stored on this dashboard server" },
-	{ id: "client.remote", scope: "client", label: "Remote Control", description: "View connected Target hubs and their remote state" },
+	{ id: "client.remote", scope: "client", label: "Clients", description: "View connected Target hubs and their client state" },
 	{ id: "client.workflows", scope: "client", label: "Workflows", description: "Create, edit and run workflows on a connected Target hub" },
 	{ id: "client.templates", scope: "client", label: "Templates", description: "Manage templates on a connected Target hub" },
 	{ id: "client.tcp", scope: "client", label: "TCP tools", description: "Manage TCP tools on a connected Target hub" },
@@ -66,27 +66,27 @@ export const PERMISSION_CATALOG = Object.freeze([
 	{ id: "rci.delete", label: "Delete RCI resources", description: "Delete RCI resource sets stored on this server", scope: "server", group: "server.rci" },
 	{ id: "rci.import", label: "Import RCI resources", description: "Import RCI resource sets stored on this server", scope: "server", group: "server.rci" },
 	{ id: "rci.export", label: "Export RCI resources", description: "Export RCI resource sets stored on this server", scope: "server", group: "server.rci" },
-	{ id: "remote.read", label: "View Remote Control", description: "View Remote Control clients and state", scope: "client", group: "client.remote" },
-	{ id: "remote.workflows.create", label: "Create workflows", description: "Create remote workflows", scope: "client", group: "client.workflows" },
-	{ id: "remote.workflows.steps.add", label: "Add workflow steps", description: "Add steps to remote workflows", scope: "client", group: "client.workflows" },
-	{ id: "remote.workflows.steps.edit", label: "Edit workflow steps", description: "Edit steps on remote workflows", scope: "client", group: "client.workflows" },
-	{ id: "remote.workflows.manage", label: "Manage remote workflows", description: "Delete remote workflows, set conversation context and choose run selection", scope: "client", group: "client.workflows" },
-	{ id: "remote.workflows.execute", label: "Execute remote workflows", description: "Start, pause, resume and restart remote workflows", scope: "client", group: "client.workflows" },
-	{ id: "remote.templates.create", label: "Create templates", description: "Create remote workflow templates", scope: "client", group: "client.templates" },
-	{ id: "remote.templates.edit", label: "Edit templates", description: "Edit remote workflow templates", scope: "client", group: "client.templates" },
-	{ id: "remote.templates.delete", label: "Delete templates", description: "Delete remote workflow templates", scope: "client", group: "client.templates" },
-	{ id: "remote.templates.import", label: "Import templates", description: "Import remote workflow templates", scope: "client", group: "client.templates" },
-	{ id: "remote.templates.export", label: "Export templates", description: "Export remote workflow templates", scope: "client", group: "client.templates" },
-	{ id: "remote.tcp-tools.create", label: "Create TCP tools", description: "Create remote TCP tools", scope: "client", group: "client.tcp" },
-	{ id: "remote.tcp-tools.edit", label: "Edit TCP tools", description: "Edit remote TCP tools", scope: "client", group: "client.tcp" },
-	{ id: "remote.tcp-tools.delete", label: "Delete TCP tools", description: "Delete remote TCP tools", scope: "client", group: "client.tcp" },
-	{ id: "remote.tcp-tools.import", label: "Import TCP tools", description: "Import remote TCP tools", scope: "client", group: "client.tcp" },
-	{ id: "remote.tcp-tools.export", label: "Export TCP tools", description: "Export remote TCP tools", scope: "client", group: "client.tcp" },
-	{ id: "remote.rci.create", label: "Create RCI resources", description: "Create remote RCI resources", scope: "client", group: "client.rci" },
-	{ id: "remote.rci.edit", label: "Edit RCI resources", description: "Edit remote RCI resources", scope: "client", group: "client.rci" },
-	{ id: "remote.rci.delete", label: "Delete RCI resources", description: "Delete remote RCI resources", scope: "client", group: "client.rci" },
-	{ id: "remote.rci.import", label: "Import RCI resources", description: "Import remote RCI resources", scope: "client", group: "client.rci" },
-	{ id: "remote.rci.export", label: "Export RCI resources", description: "Export remote RCI resources", scope: "client", group: "client.rci" },
+	{ id: "client.read", label: "View clients", description: "View connected clients and their state", scope: "client", group: "client.remote" },
+	{ id: "client.workflows.create", label: "Create workflows", description: "Create client workflows", scope: "client", group: "client.workflows" },
+	{ id: "client.workflows.steps.add", label: "Add workflow steps", description: "Add steps to client workflows", scope: "client", group: "client.workflows" },
+	{ id: "client.workflows.steps.edit", label: "Edit workflow steps", description: "Edit steps on client workflows", scope: "client", group: "client.workflows" },
+	{ id: "client.workflows.manage", label: "Manage client workflows", description: "Delete client workflows, set conversation context and choose run selection", scope: "client", group: "client.workflows" },
+	{ id: "client.workflows.execute", label: "Execute client workflows", description: "Start, pause, resume and restart client workflows", scope: "client", group: "client.workflows" },
+	{ id: "client.templates.create", label: "Create templates", description: "Create client workflow templates", scope: "client", group: "client.templates" },
+	{ id: "client.templates.edit", label: "Edit templates", description: "Edit client workflow templates", scope: "client", group: "client.templates" },
+	{ id: "client.templates.delete", label: "Delete templates", description: "Delete client workflow templates", scope: "client", group: "client.templates" },
+	{ id: "client.templates.import", label: "Import templates", description: "Import client workflow templates", scope: "client", group: "client.templates" },
+	{ id: "client.templates.export", label: "Export templates", description: "Export client workflow templates", scope: "client", group: "client.templates" },
+	{ id: "client.tcp-tools.create", label: "Create TCP tools", description: "Create client TCP tools", scope: "client", group: "client.tcp" },
+	{ id: "client.tcp-tools.edit", label: "Edit TCP tools", description: "Edit client TCP tools", scope: "client", group: "client.tcp" },
+	{ id: "client.tcp-tools.delete", label: "Delete TCP tools", description: "Delete client TCP tools", scope: "client", group: "client.tcp" },
+	{ id: "client.tcp-tools.import", label: "Import TCP tools", description: "Import client TCP tools", scope: "client", group: "client.tcp" },
+	{ id: "client.tcp-tools.export", label: "Export TCP tools", description: "Export client TCP tools", scope: "client", group: "client.tcp" },
+	{ id: "client.rci.create", label: "Create RCI resources", description: "Create client RCI resources", scope: "client", group: "client.rci" },
+	{ id: "client.rci.edit", label: "Edit RCI resources", description: "Edit client RCI resources", scope: "client", group: "client.rci" },
+	{ id: "client.rci.delete", label: "Delete RCI resources", description: "Delete client RCI resources", scope: "client", group: "client.rci" },
+	{ id: "client.rci.import", label: "Import RCI resources", description: "Import client RCI resources", scope: "client", group: "client.rci" },
+	{ id: "client.rci.export", label: "Export RCI resources", description: "Export client RCI resources", scope: "client", group: "client.rci" },
 ]);
 export const PERMISSIONS = Object.freeze(PERMISSION_CATALOG.map(({ id }) => id));
 export const ADMIN_ROLE_ID = "admin";
@@ -95,32 +95,44 @@ const PERMISSION_SET = new Set(PERMISSIONS);
 /** Retired resource-level IDs expanded into per-action children on open. */
 const LEGACY_RESOURCE_PERMISSIONS = Object.freeze({
 	"remote.templates.manage": [
-		"remote.templates.create",
-		"remote.templates.edit",
-		"remote.templates.delete",
-		"remote.templates.import",
-		"remote.templates.export",
+		"client.templates.create",
+		"client.templates.edit",
+		"client.templates.delete",
+		"client.templates.import",
+		"client.templates.export",
 	],
 	"remote.tcp-tools.manage": [
-		"remote.tcp-tools.create",
-		"remote.tcp-tools.edit",
-		"remote.tcp-tools.delete",
-		"remote.tcp-tools.import",
-		"remote.tcp-tools.export",
+		"client.tcp-tools.create",
+		"client.tcp-tools.edit",
+		"client.tcp-tools.delete",
+		"client.tcp-tools.import",
+		"client.tcp-tools.export",
 	],
 	"remote.rci.manage": [
-		"remote.rci.create",
-		"remote.rci.edit",
-		"remote.rci.delete",
-		"remote.rci.import",
-		"remote.rci.export",
+		"client.rci.create",
+		"client.rci.edit",
+		"client.rci.delete",
+		"client.rci.import",
+		"client.rci.export",
 	],
 });
-const REMOVED_PERMISSIONS = Object.freeze(Object.keys(LEGACY_RESOURCE_PERMISSIONS));
+/** Pre-rename client IDs (`remote.*`) remapped one-to-one to `client.*` on open. */
+const RENAMED_CLIENT_PERMISSIONS = Object.freeze(
+	Object.fromEntries(
+		PERMISSION_CATALOG.filter(({ scope }) => scope === "client").map(({ id }) => [
+			id.replace(/^client\./, "remote."),
+			id,
+		]),
+	),
+);
+const REMOVED_PERMISSIONS = Object.freeze([
+	...Object.keys(LEGACY_RESOURCE_PERMISSIONS),
+	...Object.keys(RENAMED_CLIENT_PERMISSIONS),
+]);
 const WORKFLOW_MANAGE_GRANTS = Object.freeze([
-	"remote.workflows.create",
-	"remote.workflows.steps.add",
-	"remote.workflows.steps.edit",
+	"client.workflows.create",
+	"client.workflows.steps.add",
+	"client.workflows.steps.edit",
 ]);
 
 const PERMISSION_CATALOG_VIEW = Object.freeze({
@@ -154,8 +166,9 @@ function permissionCheckValues() {
 	return PERMISSIONS.map((permission) => `'${permission}'`).join(", ");
 }
 
-function expandStoredPermission(permission) {
+export function expandStoredPermission(permission) {
 	if (Object.hasOwn(LEGACY_RESOURCE_PERMISSIONS, permission)) return LEGACY_RESOURCE_PERMISSIONS[permission];
+	if (Object.hasOwn(RENAMED_CLIENT_PERMISSIONS, permission)) return [RENAMED_CLIENT_PERMISSIONS[permission]];
 	return PERMISSION_SET.has(permission) ? [permission] : [];
 }
 
@@ -459,9 +472,9 @@ function migrateRbacSchema(database) {
 /**
  * SQLite cannot widen a CHECK constraint in place. Rebuild the small
  * relation whenever its allowed list does not contain every current
- * PERMISSIONS id (or still lists a retired resource-level id). Existing
- * rows are remapped before the new CHECK is applied so a naive copy of
- * `remote.*.manage` cannot fail the insert.
+ * PERMISSIONS id (or still lists a retired or pre-rename `remote.*` id).
+ * Existing rows are remapped before the new CHECK is applied so a naive
+ * copy of `remote.*` cannot fail the insert.
  */
 function ensureRbacPermissionConstraint(database) {
 	const row = database.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'auth_role_permissions'").get();
@@ -495,7 +508,8 @@ function ensureRbacPermissionConstraint(database) {
 /**
  * Additive data migration: expand retired resource `*.manage` rows into the
  * five action IDs, then grant create/step abilities to roles that already
- * had `remote.workflows.manage`. Safe to repeat.
+ * had workflow manage (`client.workflows.manage`, or the pre-rename
+ * `remote.workflows.manage`). Safe to repeat.
  */
 function migrateLegacyRbacPermissions(database) {
 	const insert = database.prepare(
@@ -512,7 +526,7 @@ function migrateLegacyRbacPermissions(database) {
 		}
 	}
 	const workflowRoles = database
-		.prepare("SELECT role_id FROM auth_role_permissions WHERE permission = 'remote.workflows.manage'")
+		.prepare("SELECT DISTINCT role_id FROM auth_role_permissions WHERE permission IN ('remote.workflows.manage', 'client.workflows.manage')")
 		.all();
 	for (const { role_id } of workflowRoles) {
 		for (const child of WORKFLOW_MANAGE_GRANTS) insert.run(role_id, child);
