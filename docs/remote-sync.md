@@ -41,19 +41,19 @@ Linked register / heartbeat:
   "server_time": "2026-09-21T21:00:05.000Z",
   "owner": {
     "id": "user-id",
-    "permissions": ["remote.read", "remote.workflows.create"],
+    "permissions": ["client.read", "client.workflows.create"],
     "catalog": {
       "groups": [
         {
           "id": "client.remote",
           "scope": "client",
-          "label": "Remote Control",
-          "description": "View connected Target hubs and their remote state",
+          "label": "Clients",
+          "description": "View connected Target hubs and their client state",
           "permissions": [
             {
-              "id": "remote.read",
-              "label": "View Remote Control",
-              "description": "View Remote Control clients and state"
+              "id": "client.read",
+              "label": "View clients",
+              "description": "View connected clients and their state"
             }
           ]
         }
@@ -160,24 +160,24 @@ All resource paths are scoped to one client; resources are never global.
 
 | Method | Path | Permission |
 | --- | --- | --- |
-| GET | `/api/sync/clients/:clientId/templates` | `remote.read` |
-| POST | `/api/sync/clients/:clientId/templates` | `remote.templates.create` |
-| PATCH | `/api/sync/clients/:clientId/templates/:resourceId` | `remote.templates.edit` |
-| DELETE | `/api/sync/clients/:clientId/templates/:resourceId` | `remote.templates.delete` |
-| GET | `/api/sync/clients/:clientId/templates/export` | `remote.templates.export` |
-| POST | `/api/sync/clients/:clientId/templates/import` | `remote.templates.import` |
-| GET | `/api/sync/clients/:clientId/tcp-tools` | `remote.read` |
-| POST | `/api/sync/clients/:clientId/tcp-tools` | `remote.tcp-tools.create` |
-| PATCH | `/api/sync/clients/:clientId/tcp-tools/:resourceId` | `remote.tcp-tools.edit` |
-| DELETE | `/api/sync/clients/:clientId/tcp-tools/:resourceId` | `remote.tcp-tools.delete` |
-| GET | `/api/sync/clients/:clientId/tcp-tools/export` | `remote.tcp-tools.export` |
-| POST | `/api/sync/clients/:clientId/tcp-tools/import` | `remote.tcp-tools.import` |
-| GET | `/api/sync/clients/:clientId/resource-sets` | `remote.read` |
-| POST | `/api/sync/clients/:clientId/resource-sets` | `remote.rci.create` |
-| PATCH | `/api/sync/clients/:clientId/resource-sets/:resourceId` | `remote.rci.edit` |
-| DELETE | `/api/sync/clients/:clientId/resource-sets/:resourceId` | `remote.rci.delete` |
-| GET | `/api/sync/clients/:clientId/resource-sets/export` | `remote.rci.export` |
-| POST | `/api/sync/clients/:clientId/resource-sets/import` | `remote.rci.import` |
+| GET | `/api/sync/clients/:clientId/templates` | `client.read` |
+| POST | `/api/sync/clients/:clientId/templates` | `client.templates.create` |
+| PATCH | `/api/sync/clients/:clientId/templates/:resourceId` | `client.templates.edit` |
+| DELETE | `/api/sync/clients/:clientId/templates/:resourceId` | `client.templates.delete` |
+| GET | `/api/sync/clients/:clientId/templates/export` | `client.templates.export` |
+| POST | `/api/sync/clients/:clientId/templates/import` | `client.templates.import` |
+| GET | `/api/sync/clients/:clientId/tcp-tools` | `client.read` |
+| POST | `/api/sync/clients/:clientId/tcp-tools` | `client.tcp-tools.create` |
+| PATCH | `/api/sync/clients/:clientId/tcp-tools/:resourceId` | `client.tcp-tools.edit` |
+| DELETE | `/api/sync/clients/:clientId/tcp-tools/:resourceId` | `client.tcp-tools.delete` |
+| GET | `/api/sync/clients/:clientId/tcp-tools/export` | `client.tcp-tools.export` |
+| POST | `/api/sync/clients/:clientId/tcp-tools/import` | `client.tcp-tools.import` |
+| GET | `/api/sync/clients/:clientId/resource-sets` | `client.read` |
+| POST | `/api/sync/clients/:clientId/resource-sets` | `client.rci.create` |
+| PATCH | `/api/sync/clients/:clientId/resource-sets/:resourceId` | `client.rci.edit` |
+| DELETE | `/api/sync/clients/:clientId/resource-sets/:resourceId` | `client.rci.delete` |
+| GET | `/api/sync/clients/:clientId/resource-sets/export` | `client.rci.export` |
+| POST | `/api/sync/clients/:clientId/resource-sets/import` | `client.rci.import` |
 
 `POST` and `PATCH` use the resource payload above. For `PATCH`, the
 `resource.id` must equal `:resourceId`. `DELETE` needs no request body.
@@ -260,14 +260,14 @@ reported but do not increment the mirrored resource revision.
 
 Workflow controls remain under:
 
-- `GET /api/sync/clients` (`remote.read`)
-- `GET /api/sync/events` (`remote.read`)
-- `GET /api/sync/remote-workflows` and `/:remoteId` (`remote.read`)
-- `POST /api/sync/remote-workflows` (`remote.workflows.create`)
-- enqueue `step.add` / `step.edit` (`remote.workflows.steps.add` / `.steps.edit`)
+- `GET /api/sync/clients` (`client.read`)
+- `GET /api/sync/events` (`client.read`)
+- `GET /api/sync/remote-workflows` and `/:remoteId` (`client.read`)
+- `POST /api/sync/remote-workflows` (`client.workflows.create`)
+- enqueue `step.add` / `step.edit` (`client.workflows.steps.add` / `.steps.edit`)
 - delete, set context, run-selection, pause and leftover plan mutations
-  (`remote.workflows.manage`)
-- start/resume/restart and step run/abort/continue (`remote.workflows.execute`)
+  (`client.workflows.manage`)
+- start/resume/restart and step run/abort/continue (`client.workflows.execute`)
 
 Clients report supported workflow commands through `capabilities.commands`.
 Resource support is additional; it does not imply workflow support.

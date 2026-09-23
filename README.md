@@ -94,9 +94,11 @@ Roles are dynamic and permissions are enforced by the backend. The protected
 administrator, and deleting/changing your own account are blocked. See
 [`docs/rbac.md`](docs/rbac.md) for the permission catalogue (grouped by server
 vs client scope), `{ user, catalog }` session payload, 401/403 semantics,
-role API and invitation flow. Resource domains use `create` / `edit` /
-`delete` / `import` / `export` — not `remote.templates.manage`,
-`remote.tcp-tools.manage` or `remote.rci.manage`.
+role API and invitation flow. Client-scoped IDs use the `client.` prefix
+(for example `client.read`, `client.workflows.create`); older `remote.*` rows
+are remapped when the database is opened. Resource domains use `create` /
+`edit` / `delete` / `import` / `export` — not the retired
+`remote.templates.manage`, `remote.tcp-tools.manage` or `remote.rci.manage`.
 
 First run on a fresh database seeds `admin@admin.com`. Invite additional
 operators from the **Users** panel. Local/CI defaults write `.mail-outbox/*.eml`

@@ -77,7 +77,7 @@ test("RBAC endpoints deny insufficient permissions and revoke sessions on role c
 
 	const changed = await fetch(
 		`${base}/api/auth/roles/${role.id}`,
-		json("PATCH", { name: "Activity viewer", permissions: ["activity.read", "remote.read"] }, admin),
+		json("PATCH", { name: "Activity viewer", permissions: ["activity.read", "client.read"] }, admin),
 	);
 	assert.equal(changed.status, 200);
 	assert.equal((await fetch(`${base}/api/auth/me`, { headers: { cookie: viewer } })).status, 401);

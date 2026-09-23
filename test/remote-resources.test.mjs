@@ -72,7 +72,7 @@ test("remote resource operations require a declared sync/v2 capability and are i
 	const roleResponse = await fetch(`${base}/api/auth/roles`, {
 		method: "POST",
 		headers: { "content-type": "application/json", cookie: admin },
-		body: JSON.stringify({ name: "TCP operator", permissions: ["remote.read", "remote.tcp-tools.create"] }),
+		body: JSON.stringify({ name: "TCP operator", permissions: ["client.read", "client.tcp-tools.create"] }),
 	});
 	const role = (await roleResponse.json()).role;
 	const inviteResponse = await fetch(`${base}/api/auth/users`, {
@@ -94,7 +94,7 @@ test("remote resource operations require a declared sync/v2 capability and are i
 		body: JSON.stringify(body),
 	});
 	assert.equal(deniedTemplate.status, 403);
-	assert.deepEqual(await deniedTemplate.json(), { error: "forbidden", permission: "remote.templates.create" });
+	assert.deepEqual(await deniedTemplate.json(), { error: "forbidden", permission: "client.templates.create" });
 	const tcpPath = `${base}/api/sync/clients/${compatible.client_id}/tcp-tools`;
 	const tcpBody = { resource: { id: "tcp-1", name: "Browser", data: { command: "browser.open" } } };
 	assert.equal(
@@ -107,10 +107,10 @@ test("remote resource operations require a declared sync/v2 capability and are i
 		body: JSON.stringify(tcpBody),
 	});
 	assert.equal(deniedTcpEdit.status, 403);
-	assert.deepEqual(await deniedTcpEdit.json(), { error: "forbidden", permission: "remote.tcp-tools.edit" });
+	assert.deepEqual(await deniedTcpEdit.json(), { error: "forbidden", permission: "client.tcp-tools.edit" });
 	const deniedTcpDelete = await fetch(`${tcpPath}/tcp-1`, { method: "DELETE", headers: { cookie: tcpOperator } });
 	assert.equal(deniedTcpDelete.status, 403);
-	assert.deepEqual(await deniedTcpDelete.json(), { error: "forbidden", permission: "remote.tcp-tools.delete" });
+	assert.deepEqual(await deniedTcpDelete.json(), { error: "forbidden", permission: "client.tcp-tools.delete" });
 	const rciPath = `${base}/api/sync/clients/${compatible.client_id}/resource-sets`;
 	const rciBody = { resource: { id: "rci-1", name: "Project files", data: { paths: ["/tmp/project"] } } };
 	const deniedRci = await fetch(rciPath, {
@@ -119,7 +119,7 @@ test("remote resource operations require a declared sync/v2 capability and are i
 		body: JSON.stringify(rciBody),
 	});
 	assert.equal(deniedRci.status, 403);
-	assert.deepEqual(await deniedRci.json(), { error: "forbidden", permission: "remote.rci.create" });
+	assert.deepEqual(await deniedRci.json(), { error: "forbidden", permission: "client.rci.create" });
 	assert.equal(
 		(await fetch(rciPath, { method: "POST", headers: { "content-type": "application/json", cookie: admin }, body: JSON.stringify(rciBody) })).status,
 		201,
@@ -156,14 +156,14 @@ test("remote resource operations require a declared sync/v2 capability and are i
 
 	const deniedExport = await fetch(`${resourcePath}/export`, { headers: { cookie: tcpOperator } });
 	assert.equal(deniedExport.status, 403);
-	assert.deepEqual(await deniedExport.json(), { error: "forbidden", permission: "remote.templates.export" });
+	assert.deepEqual(await deniedExport.json(), { error: "forbidden", permission: "client.templates.export" });
 	const deniedImport = await fetch(`${resourcePath}/import`, {
 		method: "POST",
 		headers: { "content-type": "application/json", cookie: tcpOperator },
 		body: JSON.stringify({ resources: [body.resource] }),
 	});
 	assert.equal(deniedImport.status, 403);
-	assert.deepEqual(await deniedImport.json(), { error: "forbidden", permission: "remote.templates.import" });
+	assert.deepEqual(await deniedImport.json(), { error: "forbidden", permission: "client.templates.import" });
 
 	const exported = await fetch(`${resourcePath}/export`, { headers: { cookie: admin } });
 	assert.equal(exported.status, 200);

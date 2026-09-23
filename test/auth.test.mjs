@@ -43,8 +43,8 @@ test("login success sets cookie and me works", async () => {
 		}
 	}
 	const catalogIds = body.catalog.groups.flatMap((group) => group.permissions.map((permission) => permission.id));
-	assert.ok(catalogIds.includes("remote.workflows.create"));
-	assert.ok(catalogIds.includes("remote.templates.export"));
+	assert.ok(catalogIds.includes("client.workflows.create"));
+	assert.ok(catalogIds.includes("client.templates.export"));
 	assert.ok(body.user.permissions.every((id) => catalogIds.includes(id)));
 });
 
