@@ -34,6 +34,17 @@ test("remote workflow actions are independently gated", () => {
 	assert.match(workflows, /permissions\.manage/);
 	assert.match(workflows, /Create remote workflow/);
 	assert.match(workflows, /\+ Add step/);
+	assert.match(workflows, /Start from template/);
+	assert.match(workflows, /No template — start empty/);
+	assert.match(workflows, /Append a template's steps/);
+	assert.match(workflows, /appendRemoteTemplate/);
+	assert.match(workflows, /setRemoteWorkflowTcps/);
+	assert.match(workflows, /setRemoteWorkflowResourceSets/);
+	assert.match(workflows, /<h4>TCP<\/h4>/);
+	assert.match(workflows, /<h4>RCI<\/h4>/);
+	assert.match(app, /templatesRead: can\("templates\.read"\)/);
+	assert.match(app, /tcpRead: can\("tcp-tools\.read"\)/);
+	assert.match(app, /rciRead: can\("rci\.read"\)/);
 });
 
 test("Agent Resources tab is gated on server catalog read permissions", () => {

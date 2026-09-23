@@ -1250,6 +1250,10 @@ tbody tr.wf-row--selected, tbody tr.wf-row--selected:hover { background: var(--a
 .catalog-block-head { display: flex; justify-content: space-between; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
 .catalog-picker { display: grid; gap: var(--space-2); }
 .catalog-picker-tools { display: grid; gap: var(--space-1); padding-left: var(--space-4); }
+.sync-catalog-list { list-style: none; margin: 0; padding: 0; }
+.sync-catalog-row { display: grid; gap: var(--space-2); }
+.sync-catalog-row__main { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2); }
+.sync-catalog-row__actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
 @media (max-width: 800px) {
 	.catalog-layout { grid-template-columns: 1fr; }
 }

@@ -1,23 +1,35 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import {
+	appendRemoteTemplate,
 	createRemoteWorkflow,
 	deleteRemoteWorkflow,
 	enqueueRemoteCommand,
+	setRemoteWorkflowResourceSets,
+	setRemoteWorkflowTcps,
 	updateRemoteWorkflowContext,
 	updateRemoteStepRunSelection,
 } from "../api/sync.ts";
 import type {
 	FieldError,
+	ResourceSelection,
+	ResourceSetsResponse,
 	SyncClientRow,
 	SyncCommand,
 	SyncEventRow,
 	SyncRemoteStepRow,
 	SyncRemoteWorkflowDetailResponse,
 	SyncRemoteWorkflowRow,
+	TcpSelection,
+	TcpsResponse,
+	TemplatesResponse,
 	WorkflowDetailResponse,
 	WorkflowStep,
 } from "../api/types.ts";
 import { useApi } from "../hooks/useApi.ts";
+import { sameResourceSelections } from "../lib/rciSelection.ts";
+import { sameTcpSelections } from "../lib/tcpSelection.ts";
+import { ResourceSelectionEditor } from "./ResourceSelectionEditor.tsx";
+import { TcpSelectionEditor } from "./TcpSelectionEditor.tsx";
 import { shortId, timeAgo } from "../lib/format.ts";
 import { WorkflowDetail } from "./WorkflowDetail.tsx";
 import {
@@ -209,6 +221,9 @@ interface WorkflowPermissions {
 	editStep: boolean;
 	manage: boolean;
 	execute: boolean;
+	templatesRead: boolean;
+	tcpRead: boolean;
+	rciRead: boolean;
 }
 
 interface Props {
@@ -248,6 +263,11 @@ export function RemoteWorkflowsPanel({
 	const [addOpen, setAddOpen] = useState(false);
 	const [editingKey, setEditingKey] = useState<string | null>(null);
 	const [selectedStepKeys, setSelectedStepKeys] = useState<Set<string>>(new Set());
+	const [templateId, setTemplateId] = useState("");
+	const [appendTemplateId, setAppendTemplateId] = useState("");
+	const [tcpDraft, setTcpDraft] = useState<TcpSelection[]>([]);
+	const [rciDraft, setRciDraft] = useState<ResourceSelection[]>([]);
+	const [catalogError, setCatalogError] = useState<string | null>(null);
 
 	const activeClients = (clients ?? []).filter((c) => c.status === "active");
 	const createClient = activeClients.find((c) => c.id === clientId) ?? null;
@@ -260,6 +280,18 @@ export function RemoteWorkflowsPanel({
 		selected?.local_id ? `/api/workflows/${encodeURIComponent(selected.local_id)}` : null,
 		POLL_MS,
 	);
+	const { data: templatesData } = useApi<TemplatesResponse>(
+		permissions.templatesRead ? "/api/templates" : null,
+	);
+	const { data: tcpsData } = useApi<TcpsResponse>(permissions.tcpRead ? "/api/tcps" : null);
+	const { data: resourceSetsData } = useApi<ResourceSetsResponse>(
+		permissions.rciRead ? "/api/resource-sets" : null,
+	);
+	const templates = templatesData?.templates ?? [];
+	const tcps = tcpsData?.tcps ?? [];
+	const resourceSets = resourceSetsData?.resourceSets ?? [];
+	const canSaveTcps = permissions.manage && permissions.tcpRead;
+	const canSaveRci = permissions.manage && permissions.rciRead;
 	const canvasSteps = useMemo(
 		() => remoteStepsToCanvas(steps, selected?.conversation_context ?? null),
 		[steps, selected?.conversation_context],
@@ -275,6 +307,13 @@ export function RemoteWorkflowsPanel({
 			new Set(steps.filter((s) => s.run_selected !== false).map((s) => s.step_key)),
 		);
 	}, [selectedId, stepPlanSignature]);
+
+	useEffect(() => {
+		setTcpDraft(selected?.tcp_selections ?? []);
+		setRciDraft(selected?.resource_selections ?? []);
+		setAppendTemplateId("");
+		setCatalogError(null);
+	}, [selectedId]);
 
 	const selectedStepKeysList = useMemo(() => [...selectedStepKeys], [selectedStepKeys]);
 	const allStepsSelected = steps.length > 0 && selectedStepKeys.size === steps.length;
@@ -313,32 +352,43 @@ export function RemoteWorkflowsPanel({
 			setErrors([]);
 			setNotice(null);
 			try {
-				const body: { client_id: string; name: string; conversation_context?: string; agent?: string } = {
+				const body: {
+					client_id: string;
+					name: string;
+					conversation_context?: string;
+					agent?: string;
+					template_id?: string;
+				} = {
 					client_id: clientId,
 					name,
 				};
 				const ctx = createContext.trim();
 				if (ctx) body.conversation_context = ctx;
 				if (agent) body.agent = agent;
+				if (templateId) body.template_id = templateId;
 				const res = await createRemoteWorkflow(body);
 				if (!res.ok) {
 					setErrors(res.errors);
 					return;
 				}
 				const agentLabel = res.data.remote_workflow.agent ?? agent ?? "client default";
+				const fromTemplate = templateId
+					? ` from template “${templates.find((t) => t.id === templateId)?.name ?? templateId}”`
+					: "";
 				setNotice(
-					`Created “${res.data.remote_workflow.name}” (${agentLabel}, docker) — workflow.create queued.`,
+					`Created “${res.data.remote_workflow.name}” (${agentLabel}, docker)${fromTemplate} — workflow.create queued.`,
 				);
 				setName("");
 				setCreateContext("");
 				setAgent("");
+				setTemplateId("");
 				onSelect(res.data.remote_workflow.id);
 				onRefresh();
 			} finally {
 				setBusy(false);
 			}
 		},
-		[clientId, name, agent, createContext, onRefresh, onSelect],
+		[clientId, name, agent, createContext, templateId, templates, onRefresh, onSelect],
 	);
 
 	const runCommand = useCallback(
@@ -390,6 +440,68 @@ export function RemoteWorkflowsPanel({
 			setBusy(false);
 		}
 	}, [selected, onRefresh, onSelect]);
+
+	const onAppendTemplate = useCallback(async () => {
+		if (!selected || !appendTemplateId) return;
+		setBusy(true);
+		setNotice(null);
+		setErrors([]);
+		setCatalogError(null);
+		try {
+			const res = await appendRemoteTemplate(selected.id, appendTemplateId);
+			if (!res.ok) {
+				setErrors(res.errors);
+				setCatalogError(res.errors[0]?.message ?? "Could not append template.");
+				return;
+			}
+			const label = templates.find((t) => t.id === appendTemplateId)?.name ?? appendTemplateId;
+			setNotice(`Appended steps from “${label}” — step.add queued.`);
+			setAppendTemplateId("");
+			setTcpDraft(res.data.remote_workflow.tcp_selections ?? []);
+			setRciDraft(res.data.remote_workflow.resource_selections ?? []);
+			onRefresh();
+		} finally {
+			setBusy(false);
+		}
+	}, [selected, appendTemplateId, templates, onRefresh]);
+
+	const onSaveTcps = useCallback(async () => {
+		if (!selected) return;
+		setBusy(true);
+		setCatalogError(null);
+		setNotice(null);
+		try {
+			const res = await setRemoteWorkflowTcps(selected.id, tcpDraft);
+			if (!res.ok) {
+				setCatalogError(res.error);
+				return;
+			}
+			setTcpDraft(res.remote_workflow.tcp_selections ?? tcpDraft);
+			setNotice("TCP selection saved and queued for the client.");
+			onRefresh();
+		} finally {
+			setBusy(false);
+		}
+	}, [selected, tcpDraft, onRefresh]);
+
+	const onSaveRci = useCallback(async () => {
+		if (!selected) return;
+		setBusy(true);
+		setCatalogError(null);
+		setNotice(null);
+		try {
+			const res = await setRemoteWorkflowResourceSets(selected.id, rciDraft);
+			if (!res.ok) {
+				setCatalogError(res.error);
+				return;
+			}
+			setRciDraft(res.remote_workflow.resource_selections ?? rciDraft);
+			setNotice("RCI selection saved and queued for the client.");
+			onRefresh();
+		} finally {
+			setBusy(false);
+		}
+	}, [selected, rciDraft, onRefresh]);
 
 	const saveContext = useCallback(async () => {
 		if (!selected) return;
@@ -544,6 +656,23 @@ export function RemoteWorkflowsPanel({
 					Remote workflows always run in the <strong>docker</strong> sandbox on the client. The agent list
 					comes from the client heartbeat — only installed CLIs are selectable.
 				</p>
+				{permissions.templatesRead ? (
+					<label className="field sync-context-field">
+						<span className="label">Start from template</span>
+						<select
+							className="select"
+							value={templateId}
+							onChange={(e) => setTemplateId(e.target.value)}
+						>
+							<option value="">No template — start empty</option>
+							{templates.map((template) => (
+								<option key={template.id} value={template.id}>
+									{template.name} ({template.steps.length} step{template.steps.length === 1 ? "" : "s"})
+								</option>
+							))}
+						</select>
+					</label>
+				) : null}
 				<label className="field sync-context-field">
 					<span className="label">Conversation context (optional)</span>
 					<textarea
@@ -558,6 +687,8 @@ export function RemoteWorkflowsPanel({
 			{fieldErrors(errors, "client_id")
 				.concat(fieldErrors(errors, "name"))
 				.concat(fieldErrors(errors, "agent"))
+				.concat(fieldErrors(errors, "template_id"))
+				.concat(fieldErrors(errors, "_"))
 				.map((err) => (
 					<div key={`${err.field}-${err.code}`} className="field-err">
 						{err.message}
@@ -707,6 +838,108 @@ export function RemoteWorkflowsPanel({
 							</button>
 						) : null}
 					</div>
+
+					{permissions.addStep && permissions.templatesRead ? (
+						<section className="sync-section">
+							<div className="sync-section-head">
+								<h4>Append a template's steps</h4>
+							</div>
+							<p className="hint">Adds every step from a server catalog template. TCP and RCI selections are merged into this workflow.</p>
+							<div className="sync-create-row">
+								<select
+									className="select"
+									value={appendTemplateId}
+									onChange={(e) => setAppendTemplateId(e.target.value)}
+									disabled={busy}
+								>
+									<option value="">Select a template…</option>
+									{templates.map((template) => (
+										<option key={template.id} value={template.id}>
+											{template.name} ({template.steps.length} step{template.steps.length === 1 ? "" : "s"})
+										</option>
+									))}
+								</select>
+								<button
+									type="button"
+									className="btn btn--sm btn--on"
+									disabled={busy || !appendTemplateId}
+									onClick={() => void onAppendTemplate()}
+								>
+									Append template
+								</button>
+							</div>
+						</section>
+					) : null}
+
+					<section className="sync-section">
+						<div className="sync-section-head">
+							<h4>TCP</h4>
+							{canSaveTcps ? (
+								<button
+									type="button"
+									className="btn btn--sm btn--on"
+									disabled={
+										busy || sameTcpSelections(tcpDraft, selected.tcp_selections ?? [])
+									}
+									onClick={() => void onSaveTcps()}
+								>
+									Save TCP selection
+								</button>
+							) : null}
+						</div>
+						<p className="hint">
+							Attach server catalog TCP packs. Whole packs or individual tools are pushed to the client.
+						</p>
+						{permissions.tcpRead ? (
+							<TcpSelectionEditor
+								tcps={tcps}
+								selections={tcpDraft}
+								disabled={!canSaveTcps || busy}
+								onChange={setTcpDraft}
+							/>
+						) : (
+							<p className="hint">Needs tcp-tools.read to list server TCP packs.</p>
+						)}
+						{!canSaveTcps && permissions.tcpRead ? (
+							<p className="hint">Saving TCP selections needs client.workflows.manage.</p>
+						) : null}
+					</section>
+
+					<section className="sync-section">
+						<div className="sync-section-head">
+							<h4>RCI</h4>
+							{canSaveRci ? (
+								<button
+									type="button"
+									className="btn btn--sm btn--on"
+									disabled={
+										busy || sameResourceSelections(rciDraft, selected.resource_selections ?? [])
+									}
+									onClick={() => void onSaveRci()}
+								>
+									Save RCI selection
+								</button>
+							) : null}
+						</div>
+						<p className="hint">
+							Attach server catalog resource sets. Whole sets or individual resources are pushed to the client.
+						</p>
+						{permissions.rciRead ? (
+							<ResourceSelectionEditor
+								resourceSets={resourceSets}
+								selections={rciDraft}
+								disabled={!canSaveRci || busy}
+								onChange={setRciDraft}
+							/>
+						) : (
+							<p className="hint">Needs rci.read to list server resource sets.</p>
+						)}
+						{!canSaveRci && permissions.rciRead ? (
+							<p className="hint">Saving RCI selections needs client.workflows.manage.</p>
+						) : null}
+					</section>
+
+					{catalogError ? <div className="err">{catalogError}</div> : null}
 
 					<section className="sync-section">
 						<h4>Conversation context</h4>
