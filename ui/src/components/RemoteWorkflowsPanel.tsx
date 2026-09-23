@@ -35,6 +35,16 @@ function fieldErrors(errors: FieldError[], field: string) {
 	return errors.filter((e) => e.field === field || e.field.startsWith(`${field}.`));
 }
 
+/** Next `step-N` key that does not collide after removals (N = max existing suffix + 1). */
+function nextRemoteStepKey(existingKeys: string[]): string {
+	let max = 0;
+	for (const key of existingKeys) {
+		const match = /^step-(\d+)$/.exec(key);
+		if (match) max = Math.max(max, Number(match[1]));
+	}
+	return `step-${max + 1}`;
+}
+
 /** Plan-preview steps only — run state lives in Client activity (ingest), not the sync mirror. */
 function remoteStepsToCanvas(steps: SyncRemoteStepRow[], context: string | null): WorkflowStep[] {
 	const out: WorkflowStep[] = [];
@@ -418,12 +428,12 @@ export function RemoteWorkflowsPanel({
 		async (e: FormEvent) => {
 			e.preventDefault();
 			if (!selected || !stepForm.description.trim()) return;
-			const stepKey = `step-${steps.length + 1}`;
+			const stepKey = nextRemoteStepKey(steps.map((s) => s.step_key));
 			await runCommand("step.add", buildStepPayload(stepKey, stepForm));
 			setStepForm(EMPTY_STEP);
 			setAddOpen(false);
 		},
-		[runCommand, selected, stepForm, steps.length],
+		[runCommand, selected, stepForm, steps],
 	);
 
 	const onSaveStepEdit = useCallback(

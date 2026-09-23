@@ -89,8 +89,10 @@ import {
 	listOnlineClients,
 	getClientById,
 	listRemoteWorkflows,
+	listRemoteSteps,
 	getRemoteWorkflowById,
 	getRemoteWorkflowDetail,
+	nextRemoteStepKey,
 	getRunSelectedStepKeys,
 	updateRemoteStepRunSelection,
 	createRemoteWorkflow,
@@ -1112,6 +1114,47 @@ function remoteStepToApi(step) {
 	};
 }
 
+function templateStepToAddPayload(step, stepKey) {
+	const payload = {
+		step_key: stepKey,
+		description: step.description,
+		manual_review: step.manualReview === true,
+		use_subagent: step.useSubagent !== false,
+		max_retries: step.maxRetries ?? 0,
+		retry_interval_seconds: step.retryIntervalSeconds ?? 0,
+	};
+	if (typeof step.acceptanceCriteria === "string" && step.acceptanceCriteria.trim()) {
+		payload.acceptance_criteria = step.acceptanceCriteria.trim();
+	}
+	if (Array.isArray(step.notes) && step.notes.length > 0) {
+		payload.notes = step.notes.map((note) => ({
+			...(typeof note.id === "string" && note.id ? { id: note.id } : {}),
+			content: note.content,
+			...(note.theme ? { theme: note.theme } : {}),
+		}));
+	}
+	return payload;
+}
+
+function enqueueTemplateStepsOnRemote({ clientId, remoteId, template }) {
+	const usedKeys = listRemoteSteps(remoteId).map((s) => s.stepKey);
+	const commands = [];
+	for (const step of template.steps ?? []) {
+		const stepKey = nextRemoteStepKey(usedKeys);
+		usedKeys.push(stepKey);
+		const payload = templateStepToAddPayload(step, stepKey);
+		const command = enqueueCommand({
+			clientId,
+			remoteId,
+			type: "step.add",
+			payload,
+		});
+		mirrorCommandToPlan({ remoteId, type: "step.add", payload });
+		commands.push(command);
+	}
+	return commands;
+}
+
 const RUN_WORKFLOW_COMMANDS = new Set(["workflow.start", "workflow.resume", "workflow.restart"]);
 
 function resolveRunCommandPayload(remoteId, type, payload = {}) {
@@ -1134,6 +1177,7 @@ function isOperatorSyncPath(pathname, method) {
 	if (method === "PATCH" && /^\/api\/sync\/remote-workflows\/[^/]+$/.test(pathname)) return true;
 	if (method === "PATCH" && /^\/api\/sync\/remote-workflows\/[^/]+\/run-selection$/.test(pathname)) return true;
 	if (method === "POST" && /^\/api\/sync\/remote-workflows\/[^/]+\/commands$/.test(pathname)) return true;
+	if (method === "POST" && /^\/api\/sync\/remote-workflows\/[^/]+\/steps\/from-template$/.test(pathname)) return true;
 	if (method === "DELETE" && /^\/api\/sync\/remote-workflows\/[^/]+$/.test(pathname)) return true;
 	if (/^\/api\/sync\/clients\/[^/]+\/(templates|tcp-tools|resource-sets)(\/[^/]+)?$/.test(pathname)) return true;
 	return false;
@@ -1522,6 +1566,12 @@ async function handleOperatorSyncRoute(req, res, pathname, url) {
 		if (!body) return true;
 		const v = validate("sync.remote_workflow.create", body);
 		if (!v.ok) return sendJson(res, 400, { errors: v.errors });
+		let template = null;
+		if (v.value.template_id) {
+			if (!(await requireCapability(req, res, "templates.read"))) return true;
+			template = getTemplate(v.value.template_id);
+			if (!template) return sendJson(res, 404, { error: "unknown_template" });
+		}
 		const client = getClientById(v.value.client_id);
 		if (!client || client.status !== "active") {
 			return sendJson(res, 404, { error: "client_not_found" });
@@ -1530,7 +1580,7 @@ async function handleOperatorSyncRoute(req, res, pathname, url) {
 		if (agentError) return sendJson(res, 422, { errors: [agentError] });
 		const remoteId = randomUUID();
 		const conversationContext = v.value.conversation_context?.trim() || null;
-		const remoteWorkflow = createRemoteWorkflow({
+		createRemoteWorkflow({
 			id: remoteId,
 			clientId: client.id,
 			name: v.value.name,
@@ -1543,6 +1593,7 @@ async function handleOperatorSyncRoute(req, res, pathname, url) {
 		if (v.value.agent) payload.agent = v.value.agent;
 		let command;
 		let contextCommand = null;
+		let stepCommands = [];
 		try {
 			command = enqueueCommand({
 				clientId: client.id,
@@ -1558,14 +1609,23 @@ async function handleOperatorSyncRoute(req, res, pathname, url) {
 					payload: { conversation_context: conversationContext },
 				});
 			}
+			if (template) {
+				stepCommands = enqueueTemplateStepsOnRemote({
+					clientId: client.id,
+					remoteId,
+					template,
+				});
+			}
 		} catch (err) {
 			if (err.statusCode === 400) return sendJson(res, 400, { errors: err.errors });
 			throw err;
 		}
+		const detail = getRemoteWorkflowDetail(remoteId);
 		return sendJson(res, 201, {
-			remote_workflow: remoteWorkflowToApi(remoteWorkflow),
+			remote_workflow: remoteWorkflowToApi(detail.workflow),
 			command: syncCommandToApi(command),
 			context_command: contextCommand ? syncCommandToApi(contextCommand) : null,
+			step_commands: stepCommands.map(syncCommandToApi),
 		});
 	}
 
@@ -1620,6 +1680,37 @@ async function handleOperatorSyncRoute(req, res, pathname, url) {
 			throw err;
 		}
 		return sendJson(res, 201, { command: syncCommandToApi(command) });
+	}
+
+	const fromTemplateMatch = pathname.match(/^\/api\/sync\/remote-workflows\/([^/]+)\/steps\/from-template$/);
+	if (req.method === "POST" && fromTemplateMatch) {
+		if (!(await requireCapability(req, res, "client.workflows.steps.add"))) return true;
+		if (!(await requireCapability(req, res, "templates.read"))) return true;
+		const body = await readJson(req, res);
+		if (!body) return true;
+		const v = validate("sync.remote_workflow.steps_from_template", body);
+		if (!v.ok) return sendJson(res, 400, { errors: v.errors });
+		const remoteWorkflow = getRemoteWorkflowById(fromTemplateMatch[1]);
+		if (!remoteWorkflow) return sendJson(res, 404, { error: "remote_workflow_not_found" });
+		const template = getTemplate(v.value.template_id);
+		if (!template) return sendJson(res, 404, { error: "unknown_template" });
+		let stepCommands;
+		try {
+			stepCommands = enqueueTemplateStepsOnRemote({
+				clientId: remoteWorkflow.clientId,
+				remoteId: remoteWorkflow.id,
+				template,
+			});
+		} catch (err) {
+			if (err.statusCode === 400) return sendJson(res, 400, { errors: err.errors });
+			throw err;
+		}
+		const detail = getRemoteWorkflowDetail(remoteWorkflow.id);
+		return sendJson(res, 201, {
+			remote_workflow: remoteWorkflowToApi(detail.workflow),
+			steps: detail.steps.map(remoteStepToApi),
+			commands: stepCommands.map(syncCommandToApi),
+		});
 	}
 
 	const deleteMatch = pathname.match(/^\/api\/sync\/remote-workflows\/([^/]+)$/);

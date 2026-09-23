@@ -79,6 +79,40 @@ test("command payload: step.add requires step_key and description", () => {
 	assert.ok(bad.errors.some((e) => e.field === "description"));
 });
 
+test("command payload: step.add accepts optional notes", () => {
+	const ok = validateCommand("step.add", {
+		step_key: "s1",
+		description: "Do work",
+		notes: [{ id: "n1", content: "Check logs", theme: "warning" }],
+	});
+	assert.equal(ok.ok, true);
+	assert.deepEqual(ok.value.notes, [{ id: "n1", content: "Check logs", theme: "warning" }]);
+	const badTheme = validateCommand("step.add", {
+		step_key: "s1",
+		description: "Do work",
+		notes: [{ content: "x", theme: "urgent" }],
+	});
+	assert.equal(badTheme.ok, false);
+});
+
+test("remote workflow create accepts optional template_id", () => {
+	const ok = validate("sync.remote_workflow.create", {
+		client_id: "cli-1",
+		name: "From template",
+		template_id: "tpl-1",
+	});
+	assert.equal(ok.ok, true);
+	assert.equal(ok.value.template_id, "tpl-1");
+});
+
+test("steps from template requires template_id", () => {
+	const ok = validate("sync.remote_workflow.steps_from_template", { template_id: "tpl-1" });
+	assert.equal(ok.ok, true);
+	const bad = validate("sync.remote_workflow.steps_from_template", {});
+	assert.equal(bad.ok, false);
+	assert.ok(bad.errors.some((e) => e.field === "template_id"));
+});
+
 test("command payload: workflow.start accepts empty payload", () => {
 	const r = validateCommand("workflow.start", {});
 	assert.equal(r.ok, true);

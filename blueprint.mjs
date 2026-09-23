@@ -31,6 +31,12 @@ const DEVICE_PUBLIC_KEY = Joi.object({
 	value: Joi.string().trim().min(32).max(1000).required(),
 });
 
+const TEMPLATE_STEP_NOTE = Joi.object({
+	id: OPTIONAL_STRING.optional(),
+	content: STRING.required(),
+	theme: Joi.string().valid("warning", "success", "neutral").optional(),
+});
+
 const STEP_DEF = Joi.object({
 	step_key: STEP_KEY.required(),
 	description: STRING.required(),
@@ -146,6 +152,7 @@ const COMMAND_PAYLOADS = {
 		max_retries: Joi.number().integer().min(0).optional(),
 		retry_interval_seconds: Joi.number().integer().min(0).optional(),
 		order_index: Joi.number().integer().min(0).optional(),
+		notes: Joi.array().items(TEMPLATE_STEP_NOTE).optional(),
 	}),
 	"command.step.edit": Joi.object({
 		step_key: STEP_KEY.required(),
@@ -263,11 +270,6 @@ const SYNC_EVENT_ITEM = Joi.object({
 });
 
 const TAGS = Joi.array().items(Joi.string().trim().allow(""));
-const TEMPLATE_STEP_NOTE = Joi.object({
-	id: OPTIONAL_STRING.optional(),
-	content: STRING.required(),
-	theme: Joi.string().valid("warning", "success", "neutral").optional(),
-});
 const TEMPLATE_STEP = Joi.object({
 	description: STRING.required(),
 	acceptanceCriteria: OPTIONAL_STRING.allow(null).optional(),
@@ -448,6 +450,10 @@ export const BLUEPRINTS = {
 		name: STRING.required(),
 		conversation_context: OPTIONAL_STRING.optional(),
 		agent: Joi.string().valid("claude", "free-code", "cursor").optional(),
+		template_id: STRING.optional(),
+	}),
+	"sync.remote_workflow.steps_from_template": Joi.object({
+		template_id: STRING.required(),
 	}),
 	"sync.remote_workflow.enqueue_command": Joi.object({
 		type: Joi.string()

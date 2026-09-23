@@ -3056,6 +3056,19 @@ export function listRemoteSteps(remoteId) {
 		.map(rowToRemoteStep);
 }
 
+/**
+ * Next step_key that does not collide with existing keys.
+ * Reuses the `step-N` convention: N is one more than the highest numeric suffix.
+ */
+export function nextRemoteStepKey(existingKeys = []) {
+	let max = 0;
+	for (const key of existingKeys) {
+		const match = /^step-(\d+)$/.exec(String(key ?? ""));
+		if (match) max = Math.max(max, Number(match[1]));
+	}
+	return `step-${max + 1}`;
+}
+
 /** Insert or replace a planned step row (operator plan mirror). */
 export function upsertRemoteStep({
 	remoteId,
