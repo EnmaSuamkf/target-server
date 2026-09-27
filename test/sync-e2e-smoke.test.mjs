@@ -84,8 +84,15 @@ test(
 		const cookie = await login(base);
 
 		await runSyncTick({ hubConfig: hubCfg, config: syncCfg() });
-		const { clientId } = getSyncCredentials();
+		const { clientId, token } = getSyncCredentials();
 		assert.ok(clientId);
+		assert.equal((await fetch(`${base}/api/sync/catalog`)).status, 401);
+		assert.ok(token);
+		const catalogLegacy = await fetch(`${base}/api/sync/catalog`, {
+			headers: { authorization: `Bearer ${token}` },
+		});
+		assert.equal(catalogLegacy.status, 403);
+		assert.deepEqual(await catalogLegacy.json(), { error: "owner_required" });
 
 		const createRes = await fetch(`${base}/api/sync/remote-workflows`, {
 			method: "POST",
