@@ -167,6 +167,27 @@ test("opening a pre-rename DB remaps live remote.* rows onto client.*", () => {
 	assert.deepEqual(rbac.expandStoredPermission("remote.unknown"), []);
 });
 
+test("opening an existing database rebuilds CHECK and grants catalog sync ids to admin", () => {
+	const admin = rbac.getRoleById(rbac.ADMIN_ROLE_ID);
+	for (const id of ["client.templates.sync", "client.tcp-tools.sync", "client.rci.sync"]) {
+		assert.ok(admin.permissions.includes(id), `admin missing ${id}`);
+	}
+	const syncRole = rbac.createRole({
+		name: "Catalog syncer",
+		permissions: ["client.templates.sync", "client.tcp-tools.sync", "client.rci.sync"],
+	});
+	assert.deepEqual(syncRole.permissions, [
+		"client.rci.sync",
+		"client.tcp-tools.sync",
+		"client.templates.sync",
+	]);
+	const sql = rbac.open().prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'auth_role_permissions'").get().sql;
+	for (const id of ["client.templates.sync", "client.tcp-tools.sync", "client.rci.sync"]) {
+		assert.ok(sql.includes(`'${id}'`), `CHECK missing ${id}`);
+	}
+	assert.equal(rbac.deleteRole(syncRole.id), true);
+});
+
 test("role functions reject unknown permissions and protect the system admin role", () => {
 	assert.ok(rbac.PERMISSIONS.every((permission) => rbac.isValidPermission(permission)));
 	assert.equal(rbac.isValidPermission("role.escalate"), false);

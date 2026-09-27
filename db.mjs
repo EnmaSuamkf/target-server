@@ -77,16 +77,19 @@ export const PERMISSION_CATALOG = Object.freeze([
 	{ id: "client.templates.delete", label: "Delete templates", description: "Delete client workflow templates", scope: "client", group: "client.templates" },
 	{ id: "client.templates.import", label: "Import templates", description: "Import client workflow templates", scope: "client", group: "client.templates" },
 	{ id: "client.templates.export", label: "Export templates", description: "Export client workflow templates", scope: "client", group: "client.templates" },
+	{ id: "client.templates.sync", label: "Sync templates", description: "Pull server catalog templates onto a linked hub", scope: "client", group: "client.templates" },
 	{ id: "client.tcp-tools.create", label: "Create TCP tools", description: "Create client TCP tools", scope: "client", group: "client.tcp" },
 	{ id: "client.tcp-tools.edit", label: "Edit TCP tools", description: "Edit client TCP tools", scope: "client", group: "client.tcp" },
 	{ id: "client.tcp-tools.delete", label: "Delete TCP tools", description: "Delete client TCP tools", scope: "client", group: "client.tcp" },
 	{ id: "client.tcp-tools.import", label: "Import TCP tools", description: "Import client TCP tools", scope: "client", group: "client.tcp" },
 	{ id: "client.tcp-tools.export", label: "Export TCP tools", description: "Export client TCP tools", scope: "client", group: "client.tcp" },
+	{ id: "client.tcp-tools.sync", label: "Sync TCP tools", description: "Pull server catalog TCP tools onto a linked hub", scope: "client", group: "client.tcp" },
 	{ id: "client.rci.create", label: "Create RCI resources", description: "Create client RCI resources", scope: "client", group: "client.rci" },
 	{ id: "client.rci.edit", label: "Edit RCI resources", description: "Edit client RCI resources", scope: "client", group: "client.rci" },
 	{ id: "client.rci.delete", label: "Delete RCI resources", description: "Delete client RCI resources", scope: "client", group: "client.rci" },
 	{ id: "client.rci.import", label: "Import RCI resources", description: "Import client RCI resources", scope: "client", group: "client.rci" },
 	{ id: "client.rci.export", label: "Export RCI resources", description: "Export client RCI resources", scope: "client", group: "client.rci" },
+	{ id: "client.rci.sync", label: "Sync RCI resources", description: "Pull server catalog RCI resources onto a linked hub", scope: "client", group: "client.rci" },
 ]);
 export const PERMISSIONS = Object.freeze(PERMISSION_CATALOG.map(({ id }) => id));
 export const ADMIN_ROLE_ID = "admin";
