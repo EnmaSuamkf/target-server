@@ -385,6 +385,14 @@ function migrateCatalogSchema(database) {
 			created_at  TEXT NOT NULL,
 			updated_at  TEXT NOT NULL
 		);
+		CREATE TABLE IF NOT EXISTS catalog_sync_roles (
+			domain      TEXT NOT NULL CHECK (domain IN ('templates', 'tcps', 'resource_sets')),
+			resource_id TEXT NOT NULL,
+			role_id     TEXT NOT NULL,
+			PRIMARY KEY (domain, resource_id, role_id)
+		);
+		CREATE INDEX IF NOT EXISTS idx_catalog_sync_roles_role
+			ON catalog_sync_roles(role_id);
 	`);
 }
 
@@ -796,6 +804,7 @@ export function deleteRole(id, { actorUserId = null } = {}) {
 	database.exec("BEGIN IMMEDIATE");
 	try {
 		database.prepare("DELETE FROM auth_role_permissions WHERE role_id = ?").run(id);
+		database.prepare("DELETE FROM catalog_sync_roles WHERE role_id = ?").run(id);
 		database.prepare("DELETE FROM auth_roles WHERE id = ?").run(id);
 		writeRoleAudit({ roleId: id, action: "role.deleted", actorUserId, before: role });
 		database.exec("COMMIT");
@@ -3642,6 +3651,53 @@ function resolveCatalogTemplateSelections(input, existing = null) {
 	return { tcpIds, tcpSelections, resourceSelections };
 }
 
+const CATALOG_SYNC_PERMISSIONS = Object.freeze({
+	templates: "client.templates.sync",
+	tcps: "client.tcp-tools.sync",
+	resource_sets: "client.rci.sync",
+});
+
+function unknownRoleError(roleId) {
+	const err = unknownCatalogError("unknown_role");
+	err.roleId = roleId;
+	return err;
+}
+
+function listCatalogSyncRoleIds(domain, resourceId) {
+	return open()
+		.prepare("SELECT role_id FROM catalog_sync_roles WHERE domain = ? AND resource_id = ? ORDER BY role_id")
+		.all(domain, resourceId)
+		.map((row) => row.role_id);
+}
+
+function normalizeCatalogSyncRoleIds(raw) {
+	if (!Array.isArray(raw)) return [];
+	return [...new Set(raw.map((id) => String(id).trim()).filter((id) => id !== ""))].sort();
+}
+
+function resolveCatalogSyncRoleIds(raw) {
+	if (raw === undefined) return undefined;
+	const roleIds = normalizeCatalogSyncRoleIds(raw);
+	for (const roleId of roleIds) {
+		if (!getRoleById(roleId)) throw unknownRoleError(roleId);
+	}
+	return roleIds;
+}
+
+function writeCatalogSyncRoles(domain, resourceId, roleIds) {
+	const database = open();
+	database.prepare("DELETE FROM catalog_sync_roles WHERE domain = ? AND resource_id = ?").run(domain, resourceId);
+	const insert = database.prepare(
+		"INSERT INTO catalog_sync_roles (domain, resource_id, role_id) VALUES (?, ?, ?)",
+	);
+	for (const roleId of roleIds) insert.run(domain, resourceId, roleId);
+	return roleIds;
+}
+
+function deleteCatalogSyncRolesForResource(domain, resourceId) {
+	open().prepare("DELETE FROM catalog_sync_roles WHERE domain = ? AND resource_id = ?").run(domain, resourceId);
+}
+
 function rowToCatalogTemplate(row) {
 	const tags = Array.isArray(parseCatalogJson(row.tags, [])) ? parseCatalogJson(row.tags, []).map((tag) => String(tag)) : [];
 	const payload = parseCatalogJson(row.payload, {}) ?? {};
@@ -3660,6 +3716,7 @@ function rowToCatalogTemplate(row) {
 		tcpIds: tcpSelections.map((selection) => selection.tcpId),
 		tcpSelections,
 		resourceSelections,
+		syncRoleIds: listCatalogSyncRoleIds("templates", row.id),
 		createdAt: row.created_at,
 		updatedAt: row.updated_at,
 	};
@@ -3687,6 +3744,7 @@ export function getTemplate(id) {
 }
 
 export function createTemplate(input = {}) {
+	const syncRoleIds = resolveCatalogSyncRoleIds(input.syncRoleIds) ?? [];
 	const now = new Date().toISOString();
 	const selections = resolveCatalogTemplateSelections(input);
 	const template = {
@@ -3695,18 +3753,21 @@ export function createTemplate(input = {}) {
 		tags: normalizeCatalogTags(input.tags),
 		steps: normalizeCatalogTemplateSteps(input.steps),
 		...selections,
+		syncRoleIds,
 		createdAt: now,
 		updatedAt: now,
 	};
 	open()
 		.prepare("INSERT INTO templates (id, name, tags, payload, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)")
 		.run(template.id, template.name, JSON.stringify(template.tags), writeCatalogTemplatePayload(template), template.createdAt, template.updatedAt);
+	writeCatalogSyncRoles("templates", template.id, syncRoleIds);
 	return template;
 }
 
 export function updateTemplate(id, input = {}) {
 	const existing = getTemplate(id);
 	if (!existing) return null;
+	const incomingSyncRoleIds = resolveCatalogSyncRoleIds(input.syncRoleIds);
 	const selections = resolveCatalogTemplateSelections(input, existing);
 	const template = {
 		...existing,
@@ -3714,16 +3775,20 @@ export function updateTemplate(id, input = {}) {
 		tags: input.tags !== undefined ? normalizeCatalogTags(input.tags) : existing.tags,
 		steps: input.steps !== undefined ? normalizeCatalogTemplateSteps(input.steps) : existing.steps,
 		...selections,
+		syncRoleIds: incomingSyncRoleIds ?? existing.syncRoleIds,
 		updatedAt: new Date().toISOString(),
 	};
 	open()
 		.prepare("UPDATE templates SET name = ?, tags = ?, payload = ?, updated_at = ? WHERE id = ?")
 		.run(template.name, JSON.stringify(template.tags), writeCatalogTemplatePayload(template), template.updatedAt, id);
+	if (incomingSyncRoleIds !== undefined) writeCatalogSyncRoles("templates", id, incomingSyncRoleIds);
 	return template;
 }
 
 export function deleteTemplate(id) {
-	return open().prepare("DELETE FROM templates WHERE id = ?").run(id).changes > 0;
+	const deleted = open().prepare("DELETE FROM templates WHERE id = ?").run(id).changes > 0;
+	if (deleted) deleteCatalogSyncRolesForResource("templates", id);
+	return deleted;
 }
 
 function normalizeCatalogToolInputs(inputs) {
@@ -3784,6 +3849,7 @@ function rowToCatalogTcp(row) {
 		name: row.name,
 		tags,
 		tools: normalizeCatalogTcpTools(payload.tools),
+		syncRoleIds: listCatalogSyncRoleIds("tcps", row.id),
 		createdAt: row.created_at,
 		updatedAt: row.updated_at,
 	};
@@ -3802,39 +3868,47 @@ export function getTcp(id) {
 }
 
 export function createTcp(input = {}) {
+	const syncRoleIds = resolveCatalogSyncRoleIds(input.syncRoleIds) ?? [];
 	const now = new Date().toISOString();
 	const tcp = {
 		id: randomUUID(),
 		name: normalizeCatalogName(input.name),
 		tags: normalizeCatalogTags(input.tags),
 		tools: normalizeCatalogTcpTools(input.tools),
+		syncRoleIds,
 		createdAt: now,
 		updatedAt: now,
 	};
 	open()
 		.prepare("INSERT INTO tcps (id, name, tags, payload, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)")
 		.run(tcp.id, tcp.name, JSON.stringify(tcp.tags), JSON.stringify({ tools: tcp.tools }), tcp.createdAt, tcp.updatedAt);
+	writeCatalogSyncRoles("tcps", tcp.id, syncRoleIds);
 	return tcp;
 }
 
 export function updateTcp(id, input = {}) {
 	const existing = getTcp(id);
 	if (!existing) return null;
+	const incomingSyncRoleIds = resolveCatalogSyncRoleIds(input.syncRoleIds);
 	const tcp = {
 		...existing,
 		name: input.name !== undefined ? normalizeCatalogName(input.name) : existing.name,
 		tags: input.tags !== undefined ? normalizeCatalogTags(input.tags) : existing.tags,
 		tools: input.tools !== undefined ? normalizeCatalogTcpTools(input.tools) : existing.tools,
+		syncRoleIds: incomingSyncRoleIds ?? existing.syncRoleIds,
 		updatedAt: new Date().toISOString(),
 	};
 	open()
 		.prepare("UPDATE tcps SET name = ?, tags = ?, payload = ?, updated_at = ? WHERE id = ?")
 		.run(tcp.name, JSON.stringify(tcp.tags), JSON.stringify({ tools: tcp.tools }), tcp.updatedAt, id);
+	if (incomingSyncRoleIds !== undefined) writeCatalogSyncRoles("tcps", id, incomingSyncRoleIds);
 	return tcp;
 }
 
 export function deleteTcp(id) {
-	return open().prepare("DELETE FROM tcps WHERE id = ?").run(id).changes > 0;
+	const deleted = open().prepare("DELETE FROM tcps WHERE id = ?").run(id).changes > 0;
+	if (deleted) deleteCatalogSyncRolesForResource("tcps", id);
+	return deleted;
 }
 
 /** Keeps a bundled file path inside its resource folder; `..` segments empty the path. */
@@ -3920,6 +3994,7 @@ function rowToCatalogResourceSet(row) {
 		name: row.name,
 		tags,
 		resources: normalizeCatalogResources(payload.resources),
+		syncRoleIds: listCatalogSyncRoleIds("resource_sets", row.id),
 		createdAt: row.created_at,
 		updatedAt: row.updated_at,
 	};
@@ -3938,39 +4013,70 @@ export function getResourceSet(id) {
 }
 
 export function createResourceSet(input = {}) {
+	const syncRoleIds = resolveCatalogSyncRoleIds(input.syncRoleIds) ?? [];
 	const now = new Date().toISOString();
 	const set = {
 		id: randomUUID(),
 		name: normalizeCatalogName(input.name),
 		tags: normalizeCatalogTags(input.tags),
 		resources: normalizeCatalogResources(input.resources),
+		syncRoleIds,
 		createdAt: now,
 		updatedAt: now,
 	};
 	open()
 		.prepare("INSERT INTO resource_sets (id, name, tags, payload, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)")
 		.run(set.id, set.name, JSON.stringify(set.tags), JSON.stringify({ resources: set.resources }), set.createdAt, set.updatedAt);
+	writeCatalogSyncRoles("resource_sets", set.id, syncRoleIds);
 	return set;
 }
 
 export function updateResourceSet(id, input = {}) {
 	const existing = getResourceSet(id);
 	if (!existing) return null;
+	const incomingSyncRoleIds = resolveCatalogSyncRoleIds(input.syncRoleIds);
 	const set = {
 		...existing,
 		name: input.name !== undefined ? normalizeCatalogName(input.name) : existing.name,
 		tags: input.tags !== undefined ? normalizeCatalogTags(input.tags) : existing.tags,
 		resources: input.resources !== undefined ? normalizeCatalogResources(input.resources) : existing.resources,
+		syncRoleIds: incomingSyncRoleIds ?? existing.syncRoleIds,
 		updatedAt: new Date().toISOString(),
 	};
 	open()
 		.prepare("UPDATE resource_sets SET name = ?, tags = ?, payload = ?, updated_at = ? WHERE id = ?")
 		.run(set.name, JSON.stringify(set.tags), JSON.stringify({ resources: set.resources }), set.updatedAt, id);
+	if (incomingSyncRoleIds !== undefined) writeCatalogSyncRoles("resource_sets", id, incomingSyncRoleIds);
 	return set;
 }
 
 export function deleteResourceSet(id) {
-	return open().prepare("DELETE FROM resource_sets WHERE id = ?").run(id).changes > 0;
+	const deleted = open().prepare("DELETE FROM resource_sets WHERE id = ?").run(id).changes > 0;
+	if (deleted) deleteCatalogSyncRolesForResource("resource_sets", id);
+	return deleted;
+}
+
+/**
+ * Resources a linked-hub owner may pull, per domain. Requires
+ * `client.<domain>.sync` and (admin role or a listing on the resource).
+ * An empty allowlist means nobody except admin.
+ */
+export function listSyncableCatalog(ownerUserId) {
+	const empty = { templates: [], tcps: [], resourceSets: [] };
+	const user = getAuthUserById(ownerUserId);
+	if (!user) return empty;
+	const permissions = getAuthUserPermissions(user);
+	const isAdmin = user.role === ADMIN_ROLE_ID;
+	const allow = (domain, items) => {
+		if (!permissions.includes(CATALOG_SYNC_PERMISSIONS[domain])) return [];
+		if (isAdmin) return items;
+		return items.filter((item) => item.syncRoleIds.includes(user.role));
+	};
+	return {
+		templates: allow("templates", listTemplates()),
+		tcps: allow("tcps", listTcps()),
+		resourceSets: allow("resource_sets", listResourceSets()),
+	};
 }
 
 export const TEMPLATE_BUNDLE_KIND = "target.templates";

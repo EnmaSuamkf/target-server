@@ -231,6 +231,17 @@ async function requireCapability(req, res, permission) {
 	return requirePermission(req, res, permission);
 }
 
+async function requireAnyCapability(req, res, permissions) {
+	if (AUTH_DISABLED) return { id: "auth-disabled", permissions: ["*"] };
+	const user = await requireAuth(req, res);
+	if (!user) return null;
+	if (!permissions.some((permission) => user.permissions.includes(permission))) {
+		sendJson(res, 403, { error: "forbidden", permission: permissions[0] });
+		return null;
+	}
+	return user;
+}
+
 function readBody(req) {
 	return new Promise((resolve, reject) => {
 		let size = 0;
@@ -2318,6 +2329,22 @@ function catalogAttachment(filename) {
 	return { "content-disposition": `attachment; filename="${filename}"` };
 }
 
+function sendCatalogMutationError(res, err) {
+	if (err.statusCode === 422) {
+		sendJson(res, 422, { error: err.code, ...(err.roleId ? { roleId: err.roleId } : {}) });
+		return true;
+	}
+	return false;
+}
+
+async function handleCatalogSyncRolesRoute(req, res) {
+	if (req.method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
+	if (!(await requireAnyCapability(req, res, ["templates.edit", "tcp-tools.edit", "rci.edit"]))) return true;
+	return sendJson(res, 200, {
+		roles: listRoles().map((role) => ({ id: role.id, name: role.name })),
+	});
+}
+
 async function handleCatalogRoute(req, res, pathname) {
 	const match = pathname.match(/^\/api\/(templates|tcps|resource-sets)(?:\/([^/]+))?(?:\/([^/]+))?$/);
 	if (!match) return false;
@@ -2364,9 +2391,14 @@ async function handleCatalogRoute(req, res, pathname) {
 			if (!body) return true;
 			const v = validate(spec.validateUpdate, body);
 			if (!v.ok) return sendJson(res, 422, { errors: v.errors });
-			const item = spec.update(part, v.value);
-			if (!item) return sendJson(res, 404, { error: "not_found" });
-			return sendJson(res, 200, { [spec.itemKey]: item });
+			try {
+				const item = spec.update(part, v.value);
+				if (!item) return sendJson(res, 404, { error: "not_found" });
+				return sendJson(res, 200, { [spec.itemKey]: item });
+			} catch (err) {
+				if (sendCatalogMutationError(res, err)) return true;
+				throw err;
+			}
 		}
 		if (req.method === "DELETE") {
 			if (!(await requireCapability(req, res, spec.permissions.delete))) return true;
@@ -2387,7 +2419,12 @@ async function handleCatalogRoute(req, res, pathname) {
 			if (!body) return true;
 			const v = validate(spec.validateCreate, body);
 			if (!v.ok) return sendJson(res, 422, { errors: v.errors });
-			return sendJson(res, 201, { [spec.itemKey]: spec.create(v.value) });
+			try {
+				return sendJson(res, 201, { [spec.itemKey]: spec.create(v.value) });
+			} catch (err) {
+				if (sendCatalogMutationError(res, err)) return true;
+				throw err;
+			}
 		}
 		return sendJson(res, 405, { error: "method not allowed" });
 	}
@@ -2425,6 +2462,11 @@ const server = createServer(async (req, res) => {
 
 		if (pathname.startsWith("/api/sync/")) {
 			const handled = await handleOperatorSyncRoute(req, res, pathname, url);
+			if (handled !== false) return;
+		}
+
+		if (pathname === "/api/catalog/sync-roles") {
+			const handled = await handleCatalogSyncRolesRoute(req, res);
 			if (handled !== false) return;
 		}
 
