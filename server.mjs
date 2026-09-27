@@ -144,6 +144,7 @@ import {
 	getDeviceDisconnectAuthentication,
 	consumeDeviceRequestNonce,
 	getPermissionCatalog,
+	listSyncableCatalog,
 } from "./db.mjs";
 import { initMailer, isDeliveringTransport, mailTransportName, sendMail } from "./mailer.mjs";
 import { inviteMail, resetMail, withToken } from "./mail-templates.mjs";
@@ -1283,6 +1284,8 @@ function resolveRunCommandPayload(remoteId, type, payload = {}) {
 }
 
 function isOperatorSyncPath(pathname, method) {
+	// Device-authenticated catalog pull stays on handleSyncRoute.
+	if (pathname === "/api/sync/catalog") return false;
 	if (method === "GET" && pathname === "/api/sync/clients") return true;
 	if (method === "GET" && pathname === "/api/sync/events") return true;
 	if (pathname === "/api/sync/remote-workflows" && (method === "GET" || method === "POST")) return true;
@@ -1367,6 +1370,50 @@ async function handleSyncRoute(req, res, pathname, url) {
 
 	const client = await requireSyncClient(req, res);
 	if (!client) return true;
+
+	if (req.method === "GET" && pathname === "/api/sync/catalog") {
+		if (!client.ownerUserId) return sendJson(res, 403, { error: "owner_required" });
+		const owner = getAuthUserById(client.ownerUserId);
+		const permissions = owner ? getAuthUserPermissions(owner) : [];
+		const syncable = listSyncableCatalog(client.ownerUserId);
+		const tcpIds = new Set(syncable.tcps.map((item) => item.id));
+		const resourceSetIds = new Set(syncable.resourceSets.map((item) => item.id));
+		return sendJson(res, 200, {
+			contract_version: "catalog-sync/v1",
+			server_time: new Date().toISOString(),
+			owner_id: client.ownerUserId,
+			allowed: {
+				templates: permissions.includes("client.templates.sync"),
+				tcp_tools: permissions.includes("client.tcp-tools.sync"),
+				resource_sets: permissions.includes("client.rci.sync"),
+			},
+			templates: syncable.templates.map((template) => ({
+				id: template.id,
+				name: template.name,
+				updatedAt: template.updatedAt,
+				data: {
+					tags: template.tags,
+					steps: template.steps,
+					tcpSelections: (template.tcpSelections ?? []).filter((selection) => tcpIds.has(selection.tcpId)),
+					resourceSelections: (template.resourceSelections ?? []).filter((selection) =>
+						resourceSetIds.has(selection.resourceSetId),
+					),
+				},
+			})),
+			tcp_tools: syncable.tcps.map((tcp) => ({
+				id: tcp.id,
+				name: tcp.name,
+				updatedAt: tcp.updatedAt,
+				data: { tags: tcp.tags, tools: tcp.tools },
+			})),
+			resource_sets: syncable.resourceSets.map((set) => ({
+				id: set.id,
+				name: set.name,
+				updatedAt: set.updatedAt,
+				data: { tags: set.tags, resources: set.resources },
+			})),
+		});
+	}
 
 	if (req.method === "POST" && pathname === "/api/sync/heartbeat") {
 		const body = await readJson(req, res);
