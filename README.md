@@ -99,6 +99,8 @@ role API and invitation flow. Client-scoped IDs use the `client.` prefix
 are remapped when the database is opened. Resource domains use `create` /
 `edit` / `delete` / `import` / `export` — not the retired
 `remote.templates.manage`, `remote.tcp-tools.manage` or `remote.rci.manage`.
+Linked hubs pull a role-filtered catalog through `GET /api/sync/catalog`
+(`catalog-sync/v1`); see [Catalog pull](docs/remote-sync.md#catalog-pull-catalog-syncv1).
 
 First run on a fresh database seeds `admin@admin.com`. Invite additional
 operators from the **Users** panel. Local/CI defaults write `.mail-outbox/*.eml`

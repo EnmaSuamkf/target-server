@@ -36,16 +36,19 @@ export const PERMISSION_CATALOG = [
 	{ id: "client.templates.delete", label: "Delete templates", description: "Delete client workflow templates." },
 	{ id: "client.templates.import", label: "Import templates", description: "Import client workflow templates." },
 	{ id: "client.templates.export", label: "Export templates", description: "Export client workflow templates." },
+	{ id: "client.templates.sync", label: "Sync templates", description: "Pull server catalog templates onto a linked hub." },
 	{ id: "client.tcp-tools.create", label: "Create TCP tools", description: "Create client TCP tools." },
 	{ id: "client.tcp-tools.edit", label: "Edit TCP tools", description: "Edit client TCP tools." },
 	{ id: "client.tcp-tools.delete", label: "Delete TCP tools", description: "Delete client TCP tools." },
 	{ id: "client.tcp-tools.import", label: "Import TCP tools", description: "Import client TCP tools." },
 	{ id: "client.tcp-tools.export", label: "Export TCP tools", description: "Export client TCP tools." },
+	{ id: "client.tcp-tools.sync", label: "Sync TCP tools", description: "Pull server catalog TCP tools onto a linked hub." },
 	{ id: "client.rci.create", label: "Create RCI resources", description: "Create client RCI resources." },
 	{ id: "client.rci.edit", label: "Edit RCI resources", description: "Edit client RCI resources." },
 	{ id: "client.rci.delete", label: "Delete RCI resources", description: "Delete client RCI resources." },
 	{ id: "client.rci.import", label: "Import RCI resources", description: "Import client RCI resources." },
 	{ id: "client.rci.export", label: "Export RCI resources", description: "Export client RCI resources." },
+	{ id: "client.rci.sync", label: "Sync RCI resources", description: "Pull server catalog RCI resources onto a linked hub." },
 ] as const;
 
 /** Prefer the session/roles catalogue; fall back to the static list only if it is missing. */

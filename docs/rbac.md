@@ -59,16 +59,39 @@ These `templates.*` / `tcp-tools.*` / `rci.*` IDs are server-owned Agent Resourc
 | `client.templates.delete` | Templates | Delete a client's templates |
 | `client.templates.import` | Templates | Import a client's templates |
 | `client.templates.export` | Templates | Export a client's templates |
+| `client.templates.sync` | Templates | Pull server catalog templates onto a linked hub |
 | `client.tcp-tools.create` | TCP tools | Create a client's TCP tools |
 | `client.tcp-tools.edit` | TCP tools | Edit a client's TCP tools |
 | `client.tcp-tools.delete` | TCP tools | Delete a client's TCP tools |
 | `client.tcp-tools.import` | TCP tools | Import a client's TCP tools |
 | `client.tcp-tools.export` | TCP tools | Export a client's TCP tools |
+| `client.tcp-tools.sync` | TCP tools | Pull server catalog TCP packs onto a linked hub |
 | `client.rci.create` | RCI | Create a client's resource sets |
 | `client.rci.edit` | RCI | Edit a client's resource sets |
 | `client.rci.delete` | RCI | Delete a client's resource sets |
 | `client.rci.import` | RCI | Import a client's resource sets |
 | `client.rci.export` | RCI | Export a client's resource sets |
+| `client.rci.sync` | RCI | Pull server catalog resource sets onto a linked hub |
+
+### Catalog sync allowlists
+
+Each Agent Resources item (template, TCP pack, resource set) has a per-resource
+sync role allowlist (`catalog_sync_roles`). A linked-hub owner can pull a
+resource only when **both** are true:
+
+1. their role includes the matching `client.*.sync` permission, and
+2. their role id is on that resource's allowlist.
+
+The protected `admin` role always receives every item in domains it can sync
+(it still needs the `client.*.sync` IDs, which admin is seeded with). An empty
+allowlist means nobody except admin. The allowlist is never included on
+`GET /api/sync/catalog` or on catalog export bundles.
+
+Operators pick roles in the Agent Resources editor. `GET /api/catalog/sync-roles`
+returns `{ "roles": [{ "id", "name" }] }` for any of `templates.edit`,
+`tcp-tools.edit`, or `rci.edit`.
+
+See [Catalog pull (catalog-sync/v1)](remote-sync.md#catalog-pull-catalog-syncv1).
 
 ### Additive migration
 

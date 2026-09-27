@@ -10,7 +10,7 @@ authentication mechanisms:
 | Caller | Credential | Routes |
 | --- | --- | --- |
 | Dashboard operator | Signed-in session cookie or JWT Bearer token | Operator routes described below |
-| Target client | `Authorization: Bearer <client_token>` | `/api/sync/heartbeat`, `/commands`, `/events` |
+| Target client | `Authorization: Bearer <client_token>` or `Target-Device v1` | `/api/sync/heartbeat`, `/commands`, `/events`, `/api/sync/catalog` |
 
 `POST /api/sync/register` is the first-contact exception: it creates a
 `client_id` and returns the client token. It is not an operator route.
@@ -349,13 +349,89 @@ See `test/remote-workflow-templates.test.mjs`,
 `test/remote-workflow-selections.test.mjs`, and
 `test/sync-e2e-smoke.test.mjs`.
 
+## Catalog pull (`catalog-sync/v1`)
+
+On-demand pull of the **server-owned** Agent Resources catalog onto a linked
+hub. This is not the per-client remote-resource mirror (`sync/v2`) and is not
+an operator dashboard route. `isOperatorSyncPath` returns false for
+`/api/sync/catalog` so the request stays on `requireSyncClient`.
+
+### `GET /api/sync/catalog`
+
+**Auth.** Same as heartbeat / commands / events: `Target-Device v1` with
+`sync:write`, or `Authorization: Bearer <client_token>` when linking mode is
+not `required`. No session cookie. `401` when the credential is missing or
+invalid (`unauthorized`, `device_not_registered_for_sync`,
+`device_link_required`). `403 { "error": "owner_required" }` when the client
+has no linked owner (legacy token clients, unlinked devices). `403 { "error":
+"scope_forbidden" }` when the device lacks `sync:write`.
+
+An old server that does not implement this route answers `404`; hubs map that
+to `catalog_sync_unsupported`.
+
+**Who can pull what.** `listSyncableCatalog(ownerUserId)`: the owner needs
+`client.templates.sync` / `client.tcp-tools.sync` / `client.rci.sync` **and**
+their role on the resource allowlist. Admin bypasses the allowlist. Empty
+allowlist = admins only. See [rbac.md](rbac.md#catalog-sync-allowlists).
+
+**Response.**
+
+```json
+{
+  "contract_version": "catalog-sync/v1",
+  "server_time": "2026-09-27T17:00:00.000Z",
+  "owner_id": "user-id",
+  "allowed": {
+    "templates": true,
+    "tcp_tools": true,
+    "resource_sets": false
+  },
+  "templates": [{
+    "id": "tpl-id",
+    "name": "Release checklist",
+    "updatedAt": "2026-09-27T16:00:00.000Z",
+    "data": {
+      "tags": ["release"],
+      "steps": [{ "description": "Ship it" }],
+      "tcpSelections": [{ "tcpId": "tcp-id", "toolNames": null }],
+      "resourceSelections": [{ "resourceSetId": "rci-id", "resourceNames": null }]
+    }
+  }],
+  "tcp_tools": [{
+    "id": "tcp-id",
+    "name": "Git",
+    "updatedAt": "2026-09-27T16:00:00.000Z",
+    "data": { "tags": [], "tools": [{ "name": "status", "tokens": { "TOKEN": "…" } }] }
+  }],
+  "resource_sets": []
+}
+```
+
+`allowed` is the owner's three `client.*.sync` flags (true/false even when the
+arrays are empty). Template `tcpSelections` / `resourceSelections` are
+filtered to TCP and RCI ids that appear in the **same** response. TCP `tokens`
+use the same shape as a workflow attach / `catalogTcpToResource` upsert — they
+are not redacted the way dashboard export bundles are. `syncRoleIds` is never
+included.
+
+Hubs upsert the rows with `origin = "server"` and `sync_source` including
+`catalog`. See `test/catalog-sync.test.mjs`.
+
+### `GET /api/catalog/sync-roles`
+
+Operator session route (cookie or JWT), not device-authenticated. Any of
+`templates.edit`, `tcp-tools.edit`, or `rci.edit`. Returns
+`{ "roles": [{ "id", "name" }] }` so the Agent Resources picker can assign
+allowlists. `401` without a session; `403` without one of those edit
+permissions.
+
 ## Errors
 
 | Status | Meaning |
 | --- | --- |
 | `401` | Missing or invalid session/client token |
-| `403` | Authenticated operator lacks the required permission |
-| `404` | Client or remote workflow does not exist |
+| `403` | Authenticated operator lacks the required permission, or a catalog pull has no linked owner (`owner_required`) |
+| `404` | Client or remote workflow does not exist; an old server also 404s `GET /api/sync/catalog` |
 | `409` | Capability unavailable, state conflict, or reused incompatible idempotency key |
 | `422` | Joi validation failed; response includes `errors` |
 

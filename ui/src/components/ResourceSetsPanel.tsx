@@ -2,6 +2,7 @@ import { useRef, useState, type FormEvent } from "react";
 import { createResourceSet, deleteResourceSet, exportCatalog, importCatalog, splitTags, updateResourceSet } from "../api/catalog.ts";
 import type { CatalogActions, Resource, ResourceFile, ResourceKind, ResourceSet, ResourceSetsResponse } from "../api/types.ts";
 import { useApi } from "../hooks/useApi.ts";
+import { SyncRolesPicker, syncRolesCardMeta } from "./SyncRolesPicker.tsx";
 
 const RESOURCE_KINDS: ResourceKind[] = ["skill", "agent", "doc"];
 const KIND_LABELS: Record<ResourceKind, string> = { skill: "Skill", agent: "Agent", doc: "Document" };
@@ -99,6 +100,7 @@ export function ResourceSetsPanel({ actions }: { actions: CatalogActions }) {
 							<span className="catalog-card-meta">
 								{item.resources.length} resource{item.resources.length === 1 ? "" : "s"}
 								{item.tags.length ? ` · ${item.tags.join(", ")}` : ""}
+								{` · ${syncRolesCardMeta(item.syncRoleIds)}`}
 							</span>
 						</button>
 					))}
@@ -182,6 +184,7 @@ function ResourceSetEditor({
 	const [name, setName] = useState(resourceSet?.name ?? "");
 	const [tags, setTags] = useState(resourceSet?.tags.join(", ") ?? "");
 	const [resources, setResources] = useState<Resource[]>(resourceSet?.resources.length ? resourceSet.resources : [emptyResource()]);
+	const [syncRoleIds, setSyncRoleIds] = useState<string[]>(resourceSet?.syncRoleIds ?? []);
 	const [busy, setBusy] = useState(false);
 	const canWrite = resourceSet ? actions.edit : actions.create;
 
@@ -204,6 +207,7 @@ function ResourceSetEditor({
 					files: resource.files.filter((file) => file.path.trim() !== ""),
 				}))
 				.filter((resource) => resource.name !== ""),
+			syncRoleIds,
 		};
 		const result = resourceSet ? await updateResourceSet(resourceSet.id, input) : await createResourceSet(input);
 		setBusy(false);
@@ -233,6 +237,12 @@ function ResourceSetEditor({
 				<span>Tags</span>
 				<input className="input" value={tags} onChange={(event) => setTags(event.target.value)} placeholder="docs, skills" />
 			</label>
+			<SyncRolesPicker
+				selectedIds={syncRoleIds}
+				onChange={setSyncRoleIds}
+				disabled={!canWrite}
+				permissionHint="A listed role can sync this resource only if it also has the client.rci.sync permission."
+			/>
 			<div className="catalog-block-head">
 				<span className="catalog-field-label">Resources</span>
 				<button type="button" className="btn btn--sm" onClick={() => setResources((current) => [...current, emptyResource()])}>

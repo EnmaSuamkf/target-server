@@ -108,3 +108,33 @@ test("RBAC endpoints deny insufficient permissions and revoke sessions on role c
 	);
 	assert.equal((await fetch(`${base}/api/auth/users/${adminMe.user.id}`, { method: "DELETE", headers: { cookie: admin } })).status, 409);
 });
+
+test("role API accepts the three client catalog sync permissions", async () => {
+	const admin = await login(base);
+	const created = await fetch(
+		`${base}/api/auth/roles`,
+		json(
+			"POST",
+			{
+				name: "Catalog syncer",
+				permissions: ["client.templates.sync", "client.tcp-tools.sync", "client.rci.sync"],
+			},
+			admin,
+		),
+	);
+	assert.equal(created.status, 201);
+	const role = (await created.json()).role;
+	assert.deepEqual(role.permissions, [
+		"client.rci.sync",
+		"client.tcp-tools.sync",
+		"client.templates.sync",
+	]);
+	const adminMe = await (await fetch(`${base}/api/auth/me`, { headers: { cookie: admin } })).json();
+	for (const id of ["client.templates.sync", "client.tcp-tools.sync", "client.rci.sync"]) {
+		assert.ok(adminMe.user.permissions.includes(id), `admin missing ${id}`);
+		assert.ok(
+			adminMe.catalog.groups.some((group) => group.permissions.some((permission) => permission.id === id)),
+			`catalog missing ${id}`,
+		);
+	}
+});

@@ -281,6 +281,7 @@ const SYNC_EVENT_ITEM = Joi.object({
 });
 
 const TAGS = Joi.array().items(Joi.string().trim().allow(""));
+const SYNC_ROLE_IDS = Joi.array().items(Joi.string().trim().min(1)).optional();
 const TEMPLATE_STEP = Joi.object({
 	description: STRING.required(),
 	acceptanceCriteria: OPTIONAL_STRING.allow(null).optional(),
@@ -297,6 +298,7 @@ const TEMPLATE_CREATE = Joi.object({
 	tcpIds: Joi.array().items(STRING).optional(),
 	tcpSelections: Joi.array().items(TCP_SELECTION).optional(),
 	resourceSelections: Joi.array().items(RESOURCE_SELECTION).optional(),
+	syncRoleIds: SYNC_ROLE_IDS,
 });
 const TEMPLATE_UPDATE = Joi.object({
 	name: STRING.optional(),
@@ -305,6 +307,7 @@ const TEMPLATE_UPDATE = Joi.object({
 	tcpIds: Joi.array().items(STRING).optional(),
 	tcpSelections: Joi.array().items(TCP_SELECTION).optional(),
 	resourceSelections: Joi.array().items(RESOURCE_SELECTION).optional(),
+	syncRoleIds: SYNC_ROLE_IDS,
 });
 const TEMPLATE_IMPORT = Joi.alternatives()
 	.try(
@@ -336,11 +339,13 @@ const TCP_CREATE = Joi.object({
 	name: STRING.required(),
 	tags: TAGS.optional(),
 	tools: Joi.array().items(TCP_TOOL).optional(),
+	syncRoleIds: SYNC_ROLE_IDS,
 });
 const TCP_UPDATE = Joi.object({
 	name: STRING.optional(),
 	tags: TAGS.optional(),
 	tools: Joi.array().items(TCP_TOOL).optional(),
+	syncRoleIds: SYNC_ROLE_IDS,
 });
 const TCP_IMPORT = Joi.alternatives()
 	.try(
@@ -375,11 +380,13 @@ const RESOURCE_SET_CREATE = Joi.object({
 	name: STRING.required(),
 	tags: TAGS.optional(),
 	resources: Joi.array().items(RESOURCE).optional(),
+	syncRoleIds: SYNC_ROLE_IDS,
 });
 const RESOURCE_SET_UPDATE = Joi.object({
 	name: STRING.optional(),
 	tags: TAGS.optional(),
 	resources: Joi.array().items(RESOURCE).optional(),
+	syncRoleIds: SYNC_ROLE_IDS,
 });
 const RESOURCE_SET_IMPORT = Joi.alternatives()
 	.try(

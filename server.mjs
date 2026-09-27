@@ -144,6 +144,7 @@ import {
 	getDeviceDisconnectAuthentication,
 	consumeDeviceRequestNonce,
 	getPermissionCatalog,
+	listSyncableCatalog,
 } from "./db.mjs";
 import { initMailer, isDeliveringTransport, mailTransportName, sendMail } from "./mailer.mjs";
 import { inviteMail, resetMail, withToken } from "./mail-templates.mjs";
@@ -229,6 +230,17 @@ async function requireCapability(req, res, permission) {
 	// behaviour; deployed servers always evaluate the DB-backed guard.
 	if (AUTH_DISABLED) return { id: "auth-disabled", permissions: ["*"] };
 	return requirePermission(req, res, permission);
+}
+
+async function requireAnyCapability(req, res, permissions) {
+	if (AUTH_DISABLED) return { id: "auth-disabled", permissions: ["*"] };
+	const user = await requireAuth(req, res);
+	if (!user) return null;
+	if (!permissions.some((permission) => user.permissions.includes(permission))) {
+		sendJson(res, 403, { error: "forbidden", permission: permissions[0] });
+		return null;
+	}
+	return user;
 }
 
 function readBody(req) {
@@ -1272,6 +1284,8 @@ function resolveRunCommandPayload(remoteId, type, payload = {}) {
 }
 
 function isOperatorSyncPath(pathname, method) {
+	// Device-authenticated catalog pull stays on handleSyncRoute.
+	if (pathname === "/api/sync/catalog") return false;
 	if (method === "GET" && pathname === "/api/sync/clients") return true;
 	if (method === "GET" && pathname === "/api/sync/events") return true;
 	if (pathname === "/api/sync/remote-workflows" && (method === "GET" || method === "POST")) return true;
@@ -1356,6 +1370,50 @@ async function handleSyncRoute(req, res, pathname, url) {
 
 	const client = await requireSyncClient(req, res);
 	if (!client) return true;
+
+	if (req.method === "GET" && pathname === "/api/sync/catalog") {
+		if (!client.ownerUserId) return sendJson(res, 403, { error: "owner_required" });
+		const owner = getAuthUserById(client.ownerUserId);
+		const permissions = owner ? getAuthUserPermissions(owner) : [];
+		const syncable = listSyncableCatalog(client.ownerUserId);
+		const tcpIds = new Set(syncable.tcps.map((item) => item.id));
+		const resourceSetIds = new Set(syncable.resourceSets.map((item) => item.id));
+		return sendJson(res, 200, {
+			contract_version: "catalog-sync/v1",
+			server_time: new Date().toISOString(),
+			owner_id: client.ownerUserId,
+			allowed: {
+				templates: permissions.includes("client.templates.sync"),
+				tcp_tools: permissions.includes("client.tcp-tools.sync"),
+				resource_sets: permissions.includes("client.rci.sync"),
+			},
+			templates: syncable.templates.map((template) => ({
+				id: template.id,
+				name: template.name,
+				updatedAt: template.updatedAt,
+				data: {
+					tags: template.tags,
+					steps: template.steps,
+					tcpSelections: (template.tcpSelections ?? []).filter((selection) => tcpIds.has(selection.tcpId)),
+					resourceSelections: (template.resourceSelections ?? []).filter((selection) =>
+						resourceSetIds.has(selection.resourceSetId),
+					),
+				},
+			})),
+			tcp_tools: syncable.tcps.map((tcp) => ({
+				id: tcp.id,
+				name: tcp.name,
+				updatedAt: tcp.updatedAt,
+				data: { tags: tcp.tags, tools: tcp.tools },
+			})),
+			resource_sets: syncable.resourceSets.map((set) => ({
+				id: set.id,
+				name: set.name,
+				updatedAt: set.updatedAt,
+				data: { tags: set.tags, resources: set.resources },
+			})),
+		});
+	}
 
 	if (req.method === "POST" && pathname === "/api/sync/heartbeat") {
 		const body = await readJson(req, res);
@@ -2318,6 +2376,22 @@ function catalogAttachment(filename) {
 	return { "content-disposition": `attachment; filename="${filename}"` };
 }
 
+function sendCatalogMutationError(res, err) {
+	if (err.statusCode === 422) {
+		sendJson(res, 422, { error: err.code, ...(err.roleId ? { roleId: err.roleId } : {}) });
+		return true;
+	}
+	return false;
+}
+
+async function handleCatalogSyncRolesRoute(req, res) {
+	if (req.method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
+	if (!(await requireAnyCapability(req, res, ["templates.edit", "tcp-tools.edit", "rci.edit"]))) return true;
+	return sendJson(res, 200, {
+		roles: listRoles().map((role) => ({ id: role.id, name: role.name })),
+	});
+}
+
 async function handleCatalogRoute(req, res, pathname) {
 	const match = pathname.match(/^\/api\/(templates|tcps|resource-sets)(?:\/([^/]+))?(?:\/([^/]+))?$/);
 	if (!match) return false;
@@ -2364,9 +2438,14 @@ async function handleCatalogRoute(req, res, pathname) {
 			if (!body) return true;
 			const v = validate(spec.validateUpdate, body);
 			if (!v.ok) return sendJson(res, 422, { errors: v.errors });
-			const item = spec.update(part, v.value);
-			if (!item) return sendJson(res, 404, { error: "not_found" });
-			return sendJson(res, 200, { [spec.itemKey]: item });
+			try {
+				const item = spec.update(part, v.value);
+				if (!item) return sendJson(res, 404, { error: "not_found" });
+				return sendJson(res, 200, { [spec.itemKey]: item });
+			} catch (err) {
+				if (sendCatalogMutationError(res, err)) return true;
+				throw err;
+			}
 		}
 		if (req.method === "DELETE") {
 			if (!(await requireCapability(req, res, spec.permissions.delete))) return true;
@@ -2387,7 +2466,12 @@ async function handleCatalogRoute(req, res, pathname) {
 			if (!body) return true;
 			const v = validate(spec.validateCreate, body);
 			if (!v.ok) return sendJson(res, 422, { errors: v.errors });
-			return sendJson(res, 201, { [spec.itemKey]: spec.create(v.value) });
+			try {
+				return sendJson(res, 201, { [spec.itemKey]: spec.create(v.value) });
+			} catch (err) {
+				if (sendCatalogMutationError(res, err)) return true;
+				throw err;
+			}
 		}
 		return sendJson(res, 405, { error: "method not allowed" });
 	}
@@ -2425,6 +2509,11 @@ const server = createServer(async (req, res) => {
 
 		if (pathname.startsWith("/api/sync/")) {
 			const handled = await handleOperatorSyncRoute(req, res, pathname, url);
+			if (handled !== false) return;
+		}
+
+		if (pathname === "/api/catalog/sync-roles") {
+			const handled = await handleCatalogSyncRolesRoute(req, res);
 			if (handled !== false) return;
 		}
 

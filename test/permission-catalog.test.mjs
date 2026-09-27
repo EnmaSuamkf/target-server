@@ -21,8 +21,11 @@ test("every catalogue entry carries a closed id, scope and group", () => {
 	assert.ok(PERMISSIONS.includes("client.workflows.steps.add"));
 	assert.ok(PERMISSIONS.includes("client.workflows.steps.edit"));
 	assert.ok(PERMISSIONS.includes("client.templates.create"));
+	assert.ok(PERMISSIONS.includes("client.templates.sync"));
 	assert.ok(PERMISSIONS.includes("client.tcp-tools.export"));
+	assert.ok(PERMISSIONS.includes("client.tcp-tools.sync"));
 	assert.ok(PERMISSIONS.includes("client.rci.import"));
+	assert.ok(PERMISSIONS.includes("client.rci.sync"));
 	const serverCatalogIds = [
 		"templates.read",
 		"templates.create",
@@ -100,4 +103,47 @@ test("role editor exposes every closed backend permission with readable device l
 	assert.deepEqual(ids.sort(), [...PERMISSIONS].sort());
 	assert.match(source, /Approve or deny device-link requests/);
 	assert.match(source, /Manage linked devices/);
+	assert.match(source, /client\.templates\.sync/);
+	assert.match(source, /client\.tcp-tools\.sync/);
+	assert.match(source, /client\.rci\.sync/);
+});
+
+const CATALOG_SYNC_PERMISSIONS = [
+	{
+		id: "client.templates.sync",
+		group: "client.templates",
+		label: "Sync templates",
+		description: "Pull server catalog templates onto a linked hub",
+	},
+	{
+		id: "client.tcp-tools.sync",
+		group: "client.tcp",
+		label: "Sync TCP tools",
+		description: "Pull server catalog TCP tools onto a linked hub",
+	},
+	{
+		id: "client.rci.sync",
+		group: "client.rci",
+		label: "Sync RCI resources",
+		description: "Pull server catalog RCI resources onto a linked hub",
+	},
+];
+
+test("catalog includes client sync permissions in the matching resource groups", () => {
+	const catalog = getPermissionCatalog();
+	for (const expected of CATALOG_SYNC_PERMISSIONS) {
+		const entry = PERMISSION_CATALOG.find((item) => item.id === expected.id);
+		assert.ok(entry, `missing ${expected.id}`);
+		assert.equal(entry.scope, "client");
+		assert.equal(entry.group, expected.group);
+		assert.equal(entry.label, expected.label);
+		assert.equal(entry.description, expected.description);
+		const group = catalog.groups.find((item) => item.id === expected.group);
+		assert.ok(group, `missing group ${expected.group}`);
+		assert.equal(group.scope, "client");
+		const listed = group.permissions.find((permission) => permission.id === expected.id);
+		assert.ok(listed, `${expected.id} missing from ${expected.group}`);
+		assert.equal(listed.label, expected.label);
+		assert.equal(listed.description, expected.description);
+	}
 });

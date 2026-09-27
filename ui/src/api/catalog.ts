@@ -1,5 +1,14 @@
 import { downloadJson } from "./sync.ts";
-import type { FieldError, ResourceSet, ResourceSetInput, Tcp, TcpInput, Template, TemplateInput } from "./types.ts";
+import type {
+	CatalogSyncRolesResponse,
+	FieldError,
+	ResourceSet,
+	ResourceSetInput,
+	Tcp,
+	TcpInput,
+	Template,
+	TemplateInput,
+} from "./types.ts";
 
 type Fail = { ok: false; error: string; errors?: FieldError[]; permission?: string };
 
@@ -81,4 +90,11 @@ export function splitTags(value: string): string[] {
 		.split(",")
 		.map((tag) => tag.trim())
 		.filter(Boolean);
+}
+
+/** Roles that can be stored on a catalog resource as `syncRoleIds`. */
+export async function listCatalogSyncRoles() {
+	const res = await fetch("/api/catalog/sync-roles", { credentials: "same-origin" });
+	if (!res.ok) return readError(res);
+	return { ok: true as const, data: (await res.json()) as CatalogSyncRolesResponse };
 }
