@@ -486,6 +486,7 @@ export interface Template {
 	tcpIds: string[];
 	tcpSelections: TcpSelection[];
 	resourceSelections: ResourceSelection[];
+	syncRoleIds?: string[];
 	createdAt: string;
 	updatedAt: string;
 }
@@ -497,6 +498,7 @@ export interface TemplateInput {
 	tcpIds?: string[];
 	tcpSelections?: TcpSelection[];
 	resourceSelections?: ResourceSelection[];
+	syncRoleIds?: string[];
 }
 
 export interface TemplatesResponse {
@@ -527,6 +529,7 @@ export interface Tcp {
 	name: string;
 	tags: string[];
 	tools: TcpTool[];
+	syncRoleIds?: string[];
 	createdAt: string;
 	updatedAt: string;
 }
@@ -535,6 +538,7 @@ export interface TcpInput {
 	name: string;
 	tags: string[];
 	tools: TcpTool[];
+	syncRoleIds?: string[];
 }
 
 export interface TcpsResponse {
@@ -566,6 +570,7 @@ export interface ResourceSet {
 	name: string;
 	tags: string[];
 	resources: Resource[];
+	syncRoleIds?: string[];
 	createdAt: string;
 	updatedAt: string;
 }
@@ -574,6 +579,7 @@ export interface ResourceSetInput {
 	name: string;
 	tags: string[];
 	resources: Resource[];
+	syncRoleIds?: string[];
 }
 
 export interface ResourceSetsResponse {
@@ -591,4 +597,14 @@ export interface CatalogActions {
 	delete: boolean;
 	import: boolean;
 	export: boolean;
+}
+
+/** One row from GET /api/catalog/sync-roles. */
+export interface CatalogSyncRole {
+	id: string;
+	name: string;
+}
+
+export interface CatalogSyncRolesResponse {
+	roles: CatalogSyncRole[];
 }

@@ -1,5 +1,6 @@
 import { useRef, useState, type FormEvent } from "react";
 import { createTemplate, deleteTemplate, exportCatalog, importCatalog, splitTags, updateTemplate } from "../api/catalog.ts";
+import { SyncRolesPicker, syncRolesCardMeta } from "./SyncRolesPicker.tsx";
 import type {
 	CatalogActions,
 	ResourceSelection,
@@ -105,6 +106,7 @@ export function TemplatesPanel({
 							<span className="catalog-card-meta">
 								{item.steps.length} step{item.steps.length === 1 ? "" : "s"}
 								{item.tags.length ? ` · ${item.tags.join(", ")}` : ""}
+								{` · ${syncRolesCardMeta(item.syncRoleIds)}`}
 							</span>
 						</button>
 					))}
@@ -197,6 +199,7 @@ function TemplateEditor({
 	const [steps, setSteps] = useState<TemplateStep[]>(template?.steps.length ? template.steps : [emptyStep()]);
 	const [tcpSelections, setTcpSelections] = useState<TcpSelection[]>(template?.tcpSelections ?? []);
 	const [resourceSelections, setResourceSelections] = useState<ResourceSelection[]>(template?.resourceSelections ?? []);
+	const [syncRoleIds, setSyncRoleIds] = useState<string[]>(template?.syncRoleIds ?? []);
 	const [busy, setBusy] = useState(false);
 	const canWrite = template ? actions.edit : actions.create;
 
@@ -216,6 +219,7 @@ function TemplateEditor({
 				.filter((step) => step.description !== ""),
 			tcpSelections,
 			resourceSelections,
+			syncRoleIds,
 		};
 		const result = template ? await updateTemplate(template.id, input) : await createTemplate(input);
 		setBusy(false);
@@ -245,6 +249,12 @@ function TemplateEditor({
 				<span>Tags</span>
 				<input className="input" value={tags} onChange={(event) => setTags(event.target.value)} placeholder="release, qa" />
 			</label>
+			<SyncRolesPicker
+				selectedIds={syncRoleIds}
+				onChange={setSyncRoleIds}
+				disabled={!canWrite}
+				permissionHint="A listed role can sync this resource only if it also has the client.templates.sync permission."
+			/>
 			<div className="catalog-block">
 				<span className="catalog-field-label">TCP packs on this server</span>
 				<div className="catalog-picker">

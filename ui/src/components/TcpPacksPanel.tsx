@@ -2,6 +2,7 @@ import { useRef, useState, type FormEvent } from "react";
 import { createTcp, deleteTcp, exportCatalog, importCatalog, splitTags, updateTcp } from "../api/catalog.ts";
 import type { CatalogActions, Tcp, TcpTool, TcpToolInput, TcpsResponse } from "../api/types.ts";
 import { useApi } from "../hooks/useApi.ts";
+import { SyncRolesPicker, syncRolesCardMeta } from "./SyncRolesPicker.tsx";
 
 const emptyTool = (): TcpTool => ({ name: "", description: "", requestTemplate: "", inputs: [], tokens: {} });
 const emptyInput = (): TcpToolInput => ({ name: "", placeholder: "", description: "", required: true });
@@ -78,6 +79,7 @@ export function TcpPacksPanel({ actions }: { actions: CatalogActions }) {
 							<span className="catalog-card-meta">
 								{item.tools.length} tool{item.tools.length === 1 ? "" : "s"}
 								{item.tags.length ? ` · ${item.tags.join(", ")}` : ""}
+								{` · ${syncRolesCardMeta(item.syncRoleIds)}`}
 							</span>
 						</button>
 					))}
@@ -161,6 +163,7 @@ function TcpEditor({
 	const [name, setName] = useState(tcp?.name ?? "");
 	const [tags, setTags] = useState(tcp?.tags.join(", ") ?? "");
 	const [tools, setTools] = useState<TcpTool[]>(tcp?.tools.length ? tcp.tools : [emptyTool()]);
+	const [syncRoleIds, setSyncRoleIds] = useState<string[]>(tcp?.syncRoleIds ?? []);
 	const [busy, setBusy] = useState(false);
 	const canWrite = tcp ? actions.edit : actions.create;
 
@@ -184,6 +187,7 @@ function TcpEditor({
 					inputs: tool.inputs.filter((entry) => entry.name.trim() && entry.placeholder.trim()),
 				}))
 				.filter((tool) => tool.name !== "" && tool.requestTemplate !== ""),
+			syncRoleIds,
 		};
 		const result = tcp ? await updateTcp(tcp.id, input) : await createTcp(input);
 		setBusy(false);
@@ -213,6 +217,12 @@ function TcpEditor({
 				<span>Tags</span>
 				<input className="input" value={tags} onChange={(event) => setTags(event.target.value)} placeholder="github, api" />
 			</label>
+			<SyncRolesPicker
+				selectedIds={syncRoleIds}
+				onChange={setSyncRoleIds}
+				disabled={!canWrite}
+				permissionHint="A listed role can sync this resource only if it also has the client.tcp-tools.sync permission."
+			/>
 			<div className="catalog-block-head">
 				<span className="catalog-field-label">Tools</span>
 				<button type="button" className="btn btn--sm" onClick={() => setTools((current) => [...current, emptyTool()])}>

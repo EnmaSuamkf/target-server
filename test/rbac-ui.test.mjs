@@ -82,3 +82,28 @@ test("remote resources expose independent create/edit/delete/import/export actio
 	assert.match(source, />Export</);
 	assert.doesNotMatch(source, /canManageTemplates/);
 });
+
+test("Agent Resources editors pick catalog sync roles", () => {
+	const catalog = read("../ui/src/api/catalog.ts");
+	assert.match(catalog, /\/api\/catalog\/sync-roles/);
+	assert.match(catalog, /syncRoleIds/);
+	assert.match(catalog, /listCatalogSyncRoles/);
+
+	const types = read("../ui/src/api/types.ts");
+	assert.match(types, /syncRoleIds\?: string\[\]/);
+	assert.match(types, /export interface CatalogSyncRole/);
+
+	const picker = read("../ui/src/components/SyncRolesPicker.tsx");
+	assert.match(picker, /Roles that can sync this resource/);
+	assert.match(picker, /Administrators can always sync/);
+	assert.match(picker, /Sync: admins only/);
+	assert.match(picker, /users-check--disabled/);
+
+	for (const file of ["TemplatesPanel.tsx", "TcpPacksPanel.tsx", "ResourceSetsPanel.tsx"]) {
+		const source = read(`../ui/src/components/${file}`);
+		assert.match(source, /syncRoleIds/, file);
+		assert.match(source, /SyncRolesPicker/, file);
+		assert.match(source, /syncRolesCardMeta/, file);
+		assert.match(source, /client\.(templates|tcp-tools|rci)\.sync/, file);
+	}
+});
