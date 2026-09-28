@@ -57,7 +57,12 @@ sets that column from the linked hub's owner (device-link) when the data
 arrives; it is never taken from the ingest body. Events ingested with
 `TARGET_INGEST_TOKEN` (or open ingest) keep `owner_user_id` NULL. Those
 unowned rows are visible only with `activity.read`. An `activity.read.own`
-caller with no linked hubs sees an empty Activity dashboard.
+caller with no linked hubs sees an empty Activity dashboard. Ingest refuses
+to mix a foreign `workflow_id` into another owner's history
+(`rejected` with `reason: "workflow_owner_mismatch"`) and refuses token/open
+ingest that impersonates a linked hub's `instance_id`
+(`403 { "error": "instance_owned_by_device" }`). See
+[`docs/device-linking-v1.md`](device-linking-v1.md).
 
 `GET /api/workflows/:id` for a workflow outside that scope returns
 `404 { "error": "unknown_workflow" }` (not 403), so foreign ids cannot be

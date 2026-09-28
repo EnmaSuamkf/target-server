@@ -68,7 +68,9 @@ import {
 	touchInvitedAt,
 	updateRole,
 	bumpInstanceCount,
+	eventExists,
 	insertEvent,
+	instanceOwnedByDevice,
 	listInstances,
 	listUsers,
 	listWorkflowNames,
@@ -77,6 +79,7 @@ import {
 	stats,
 	upsertInstance,
 	workflowDetail,
+	workflowOwner,
 	upsertClient,
 	getClientByTokenHash,
 	claimPendingCommands,
@@ -326,6 +329,13 @@ function rateLimited(res, retryAfter) {
 	sendJson(res, 429, { error: "too_many_requests" }, { "retry-after": String(retryAfter) });
 }
 
+function ingestWorkflowOwnerAllows(existing, incomingOwner) {
+	if (!existing.exists) return true;
+	if (existing.ownerUserId === incomingOwner) return true;
+	if (existing.ownerUserId == null && incomingOwner != null) return true;
+	return false;
+}
+
 async function handleIngest(req, res) {
 	const device = authenticatedDevice(req);
 	if (DEVICE_LINKING_MODE === "required" && !device) return sendJson(res, 401, { error: "device_link_required" });
@@ -354,20 +364,48 @@ async function handleIngest(req, res) {
 	if (device && batch.instance_id !== device.id) {
 		return sendJson(res, 403, { error: "device_identity_mismatch" });
 	}
+	if (!device && instanceOwnedByDevice(batch.instance_id)) {
+		log(`ingest rejected instance_owned_by_device ${batch.instance_id.slice(0, 8)}`);
+		return sendJson(res, 403, { error: "instance_owned_by_device" });
+	}
 
 	const now = new Date().toISOString();
 	upsertInstance(batch, now, device);
 
+	const incomingOwner = device?.ownerUserId ?? null;
+	const batchOwners = new Map();
 	const accepted = [];
 	const rejected = [];
 	let added = 0;
 	for (const event of batch.events) {
+		if (!event || typeof event.id !== "string" || typeof event.kind !== "string") {
+			rejected.push({ id: event?.id ?? null, reason: "schema", detail: "event needs a string id and kind" });
+			continue;
+		}
+		if (!eventExists(event.id) && typeof event.workflow_id === "string" && event.workflow_id) {
+			const existing = batchOwners.get(event.workflow_id) ?? workflowOwner(event.workflow_id);
+			if (!ingestWorkflowOwnerAllows(existing, incomingOwner)) {
+				rejected.push({
+					id: event.id,
+					reason: "workflow_owner_mismatch",
+					detail: "workflow_id belongs to a different owner",
+				});
+				log(`ingest rejected ${event.id}: workflow_owner_mismatch (${event.workflow_id})`);
+				continue;
+			}
+		}
 		const result = insertEvent(batch.instance_id, batch.version, event, now, device);
 		if (result === "rejected") {
 			rejected.push({ id: event?.id ?? null, reason: "schema", detail: "event needs a string id and kind" });
 		} else {
 			accepted.push(event.id);
-			if (result === "inserted") added++;
+			if (result === "inserted") {
+				added++;
+				if (typeof event.workflow_id === "string" && event.workflow_id && !batchOwners.has(event.workflow_id)) {
+					const stored = workflowOwner(event.workflow_id);
+					batchOwners.set(event.workflow_id, stored.exists ? stored : { exists: true, ownerUserId: incomingOwner });
+				}
+			}
 		}
 	}
 	bumpInstanceCount(batch.instance_id, added);

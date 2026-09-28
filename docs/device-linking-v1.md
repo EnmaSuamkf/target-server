@@ -229,6 +229,23 @@ it rejects a conflicting payload id with `403 device_identity_mismatch`, and
 associates accepted records to the device's server-side owner. The body never
 selects a human owner.
 
+The incoming ingest owner is that device owner, or `NULL` for
+`TARGET_INGEST_TOKEN` / open ingest. A `workflow_id`'s owner is the
+`owner_user_id` of its first stored event (earliest `received_at`, then
+`rowid`). An event that carries a `workflow_id` is accepted when the
+workflow does not exist yet, when the existing owner equals the incoming
+owner (including `NULL == NULL`), or when the existing owner is `NULL` and
+the incoming owner is not (a hub that linked after the workflow started).
+Any other pairing is not inserted: it is listed in the 200 `rejected` array
+with `reason: "workflow_owner_mismatch"` and a detail, and the rest of the
+batch is processed. Events without `workflow_id` are unchanged. A duplicate
+event id is still accepted as a duplicate without an owner check.
+
+On ingest without a device credential, if `instance_id` already belongs to a
+linked hub (`instances.owner_user_id` or `instances.device_id` is not NULL),
+the whole batch is rejected with `403 { "error": "instance_owned_by_device" }`
+and nothing is inserted.
+
 `sync:write` permits only the hub's own current sync client and event/ack
 channels. `ingest:write` permits only its own reporting stream. Device scopes
 never permit user, role, device management, or arbitrary dashboard APIs, and
@@ -298,7 +315,7 @@ timestamp.
 | Status | Stable error/action |
 | --- | --- |
 | `401` | `unauthorized`, `invalid_link_credential`, `invalid_device_credential`, `invalid_device_signature`, `replay_detected`, or `device_revoked`; hub disconnects/relinks without touching local data |
-| `403` | `forbidden` with required human permission, `scope_forbidden`, or `device_identity_mismatch`; do not retry blindly |
+| `403` | `forbidden` with required human permission, `scope_forbidden`, `device_identity_mismatch`, or `instance_owned_by_device`; do not retry blindly |
 | `404` | `link_request_not_found` or `device_not_found`; response reveals no extra identity data |
 | `409` | `idempotency_conflict`, `invalid_link_state`, `already_consumed`, or conflicting approval/rotation |
 | `422` | Joi field errors as `{ "error": "validation_failed", "errors": [{ "field", "code", "message" }] }` |
