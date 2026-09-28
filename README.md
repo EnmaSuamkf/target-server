@@ -423,8 +423,12 @@ All `GET /api/*` routes below require a session unless noted.
 - `POST /api/auth/users/:id/invite` — resend invitation (uses stored activation methods; `invite.setupUrl` / `invite.loginUrl` in response)
 - `GET/POST /api/auth/roles`, `PATCH/DELETE /api/auth/roles/:id` — list and manage dynamic roles (requires `users.manage`)
 
-- `POST /ingest` — receive a batch (optional ingest token; not session auth). Returns `{ accepted: [id...], rejected: [{id,reason,detail}] }`.
-  Idempotent: re-sending the same event ids inserts nothing new but still acks them.
+- `POST /ingest` — receive a batch (optional ingest token or linked-device credential; not session auth).
+  Returns `{ accepted: [id...], rejected: [{id,reason,detail}] }` (`reason` is `schema` or
+  `workflow_owner_mismatch`). Idempotent: re-sending the same event ids inserts nothing new but still
+  acks them. Token/open ingest of an `instance_id` already owned by a linked hub is
+  `403 { "error": "instance_owned_by_device" }`. Workflow ownership rules:
+  [`docs/device-linking-v1.md`](docs/device-linking-v1.md).
 - `GET /api/stats?from=&to=&user=&instance=&workflow=&kind=&agent=&sandbox=` — totals,
   events-by-kind, versions, usage sums, plus `agents`/`sandboxes` (the distinct values ever
   reported, unfiltered, for the filter dropdowns). All filters optional; `from`/`to` are ISO

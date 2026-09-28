@@ -632,6 +632,7 @@ function migrateDeviceLinkSchema(database) {
 		CREATE INDEX IF NOT EXISTS idx_device_request_nonces_expiry ON device_request_nonces(expires_at);
 		CREATE INDEX IF NOT EXISTS idx_instances_device ON instances(device_id);
 		CREATE INDEX IF NOT EXISTS idx_events_device ON events(device_id, received_at);
+		CREATE INDEX IF NOT EXISTS idx_events_workflow_received ON events(workflow_id, received_at);
 		CREATE INDEX IF NOT EXISTS idx_clients_device ON clients(device_id);
 		CREATE INDEX IF NOT EXISTS idx_sync_events_device ON sync_events(device_id, received_at);
 	`);
@@ -1543,6 +1544,39 @@ export async function adminHasDefaultPassword() {
 	if (!user?.passwordHash) return false;
 	const { verifyPassword } = await import("./auth.mjs");
 	return await verifyPassword(DEFAULT_ADMIN_PASSWORD, user.passwordHash);
+}
+
+/**
+ * Owner of a workflow_id is the owner_user_id of its first stored event
+ * (earliest received_at, then rowid). Missing workflows are exists: false.
+ */
+export function workflowOwner(workflowId) {
+	if (typeof workflowId !== "string" || !workflowId) return { exists: false, ownerUserId: null };
+	const row = open()
+		.prepare(
+			`SELECT owner_user_id FROM events
+			 WHERE workflow_id = ?
+			 ORDER BY received_at ASC, rowid ASC
+			 LIMIT 1`,
+		)
+		.get(workflowId);
+	if (!row) return { exists: false, ownerUserId: null };
+	return { exists: true, ownerUserId: row.owner_user_id ?? null };
+}
+
+/** True when this instance_id already belongs to a linked hub. */
+export function instanceOwnedByDevice(instanceId) {
+	if (typeof instanceId !== "string" || !instanceId) return false;
+	const row = open()
+		.prepare("SELECT owner_user_id, device_id FROM instances WHERE instance_id = ?")
+		.get(instanceId);
+	if (!row) return false;
+	return row.owner_user_id != null || row.device_id != null;
+}
+
+export function eventExists(eventId) {
+	if (typeof eventId !== "string" || !eventId) return false;
+	return Boolean(open().prepare("SELECT 1 FROM events WHERE id = ?").get(eventId));
 }
 
 /** Upsert the instance identity carried by a batch envelope. */
