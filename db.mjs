@@ -43,7 +43,8 @@ export const PERMISSION_GROUPS = Object.freeze([
  * capability strings. Every entry carries a server|client scope and a group.
  */
 export const PERMISSION_CATALOG = Object.freeze([
-	{ id: "activity.read", label: "View Activity", description: "View Activity and reporting data", scope: "server", group: "server.activity" },
+	{ id: "activity.read", label: "View all activity", description: "View Activity and reporting data from every hub", scope: "server", group: "server.activity" },
+	{ id: "activity.read.own", label: "View own activity", description: "View Activity and reporting data from your own linked hubs", scope: "server", group: "server.activity" },
 	{ id: "users.read", label: "View users", description: "View users, roles and invitations", scope: "server", group: "server.users" },
 	{ id: "users.manage", label: "Manage users and roles", description: "Manage users, roles and invitations", scope: "server", group: "server.users" },
 	{ id: "devices.link", label: "Approve or deny device-link requests", description: "Approve or deny device-link requests", scope: "server", group: "server.devices" },
@@ -1605,12 +1606,24 @@ export function bumpInstanceCount(instanceId, added) {
 // --- Read side, for the dashboard API -------------------------------------
 
 /**
+ * Extra `AND [alias.]owner_user_id = ?` plus the bind, or nothing when
+ * unrestricted — the unscoped SQL stays identical to the path without an owner.
+ */
+function ownerScope(ownerUserId, alias = "") {
+	if (ownerUserId == null) return { and: "", params: [] };
+	const col = alias ? `${alias}.owner_user_id` : "owner_user_id";
+	return { and: ` AND ${col} = ?`, params: [ownerUserId] };
+}
+
+/**
  * Shared WHERE builder for the dashboard filters. `user` is the instance's
  * display name (what the operator recognises); it resolves to every instance
  * carrying that name, so two machines reporting as the same user filter
  * together. `from`/`to` bound `received_at` (ISO strings compare lexically).
+ * `ownerUserId` scopes rows to that dashboard account; omit it (null) for the
+ * unrestricted query the "view all" permission uses.
  */
-function eventFilterWhere({ kind = null, instanceId = null, workflowId = null, user = null, agent = null, sandbox = null, from = null, to = null } = {}) {
+function eventFilterWhere({ kind = null, instanceId = null, workflowId = null, user = null, agent = null, sandbox = null, from = null, to = null, ownerUserId = null } = {}) {
 	const clauses = [];
 	const params = [];
 	if (kind) {
@@ -1649,27 +1662,35 @@ function eventFilterWhere({ kind = null, instanceId = null, workflowId = null, u
 		clauses.push("received_at <= ?");
 		params.push(to);
 	}
+	if (ownerUserId != null) {
+		clauses.push("owner_user_id = ?");
+		params.push(ownerUserId);
+	}
 	return { where: clauses.length ? `WHERE ${clauses.join(" AND ")}` : "", params };
 }
 
 /** The distinct reporting users (instance display names) for the filter dropdown. */
-export function listUsers() {
+export function listUsers({ ownerUserId } = {}) {
+	const ownWhere = ownerUserId != null ? " WHERE owner_user_id = ?" : "";
+	const ownParams = ownerUserId != null ? [ownerUserId] : [];
 	return open()
 		.prepare(
 			`SELECT COALESCE(NULLIF(display_name, ''), 'anonymous') AS name,
 			        COUNT(*) AS instances,
 			        SUM(events_count) AS events,
 			        MAX(last_seen_at) AS last_seen_at
-			 FROM instances GROUP BY name ORDER BY events DESC`,
+			 FROM instances${ownWhere} GROUP BY name ORDER BY events DESC`,
 		)
-		.all()
+		.all(...ownParams)
 		.map((r) => ({ name: r.name, instances: r.instances, events: r.events ?? 0, lastSeenAt: r.last_seen_at }));
 }
 
-export function listInstances() {
+export function listInstances({ ownerUserId } = {}) {
+	const ownWhere = ownerUserId != null ? " WHERE owner_user_id = ?" : "";
+	const ownParams = ownerUserId != null ? [ownerUserId] : [];
 	return open()
-		.prepare("SELECT * FROM instances ORDER BY last_seen_at DESC")
-		.all()
+		.prepare(`SELECT * FROM instances${ownWhere} ORDER BY last_seen_at DESC`)
+		.all(...ownParams)
 		.map((r) => ({
 			instanceId: r.instance_id,
 			displayName: r.display_name,
@@ -1680,8 +1701,8 @@ export function listInstances() {
 		}));
 }
 
-export function recentEvents({ limit = 100, kind = null, instanceId = null, workflowId = null, user = null, agent = null, sandbox = null, from = null, to = null } = {}) {
-	const { where, params } = eventFilterWhere({ kind, instanceId, workflowId, user, agent, sandbox, from, to });
+export function recentEvents({ limit = 100, kind = null, instanceId = null, workflowId = null, user = null, agent = null, sandbox = null, from = null, to = null, ownerUserId = null } = {}) {
+	const { where, params } = eventFilterWhere({ kind, instanceId, workflowId, user, agent, sandbox, from, to, ownerUserId });
 	const rows = open()
 		.prepare(`SELECT * FROM events ${where} ORDER BY received_at DESC, rowid DESC LIMIT ?`)
 		.all(...params, Math.min(Math.max(1, limit), 1000));
@@ -1715,15 +1736,15 @@ function rowToEvent(r) {
  * user/instance side of them, which is what an operator narrowing to "Ada on
  * machine X last week" expects the fleet panels to answer.
  */
-export function stats({ kind = null, instanceId = null, workflowId = null, user = null, agent = null, sandbox = null, from = null, to = null } = {}) {
+export function stats({ kind = null, instanceId = null, workflowId = null, user = null, agent = null, sandbox = null, from = null, to = null, ownerUserId = null } = {}) {
 	const d = open();
-	const ev = eventFilterWhere({ kind, instanceId, workflowId, user, agent, sandbox, from, to });
+	const ev = eventFilterWhere({ kind, instanceId, workflowId, user, agent, sandbox, from, to, ownerUserId });
 	const and = (extra) => (ev.where ? `${ev.where} AND ${extra}` : `WHERE ${extra}`);
 
 	const totalEvents = d.prepare(`SELECT COUNT(*) AS n FROM events ${ev.where}`).get(...ev.params).n;
 
 	// Instances: filtered by the identity filters only (a date range must not
-	// shrink the fleet list itself).
+	// shrink the fleet list itself). Own-scope also pins instances.owner_user_id.
 	const instClauses = [];
 	const instParams = [];
 	if (instanceId) {
@@ -1733,6 +1754,10 @@ export function stats({ kind = null, instanceId = null, workflowId = null, user 
 	if (user) {
 		instClauses.push("COALESCE(display_name, '') = ?");
 		instParams.push(user);
+	}
+	if (ownerUserId != null) {
+		instClauses.push("owner_user_id = ?");
+		instParams.push(ownerUserId);
 	}
 	const instWhere = instClauses.length ? `WHERE ${instClauses.join(" AND ")}` : "";
 	const totalInstances = d.prepare(`SELECT COUNT(*) AS n FROM instances ${instWhere}`).get(...instParams).n;
@@ -1770,15 +1795,17 @@ export function stats({ kind = null, instanceId = null, workflowId = null, user 
 		.all(...instParams)
 		.map((r) => ({ version: r.version ?? "unknown", count: r.n }));
 	// The distinct agents/sandboxes ever reported, for the filter dropdowns.
-	// Deliberately UNFILTERED: the options must stay put while one of them is
-	// selected (same trick the UI pulls with an unfiltered /api/stats for kinds).
+	// Deliberately unfiltered by the dashboard filters: the options must stay
+	// put while one of them is selected (same trick the UI pulls with an
+	// unfiltered /api/stats for kinds). Own-scope still hides other accounts.
+	const own = ownerScope(ownerUserId);
 	const agents = d
-		.prepare(`SELECT DISTINCT json_extract(data, '$.agent') AS a FROM events WHERE json_extract(data, '$.agent') IS NOT NULL ORDER BY a`)
-		.all()
+		.prepare(`SELECT DISTINCT json_extract(data, '$.agent') AS a FROM events WHERE json_extract(data, '$.agent') IS NOT NULL${own.and} ORDER BY a`)
+		.all(...own.params)
 		.map((r) => r.a);
 	const sandboxes = d
-		.prepare(`SELECT DISTINCT json_extract(data, '$.sandbox') AS s FROM events WHERE json_extract(data, '$.sandbox') IS NOT NULL ORDER BY s`)
-		.all()
+		.prepare(`SELECT DISTINCT json_extract(data, '$.sandbox') AS s FROM events WHERE json_extract(data, '$.sandbox') IS NOT NULL${own.and} ORDER BY s`)
+		.all(...own.params)
 		.map((r) => r.s);
 	// Last snapshot per session, summed — see `latestUsageTotals` for why summing
 	// the snapshots themselves multiplies the real spend.
@@ -1820,16 +1847,17 @@ export function stats({ kind = null, instanceId = null, workflowId = null, user 
  * last write per workflow IS the latest; a snapshot that won't parse is simply
  * not a snapshot, and that workflow falls back to the event fold.
  */
-function latestPlans(workflowIds) {
+function latestPlans(workflowIds, ownerUserId = null) {
 	if (workflowIds.length === 0) return new Map();
+	const own = ownerScope(ownerUserId);
 	const rows = open()
 		.prepare(
 			`SELECT workflow_id AS wf, data, received_at AS at
 			 FROM events
-			 WHERE kind = 'workflow.plan' AND workflow_id IN (${workflowIds.map(() => "?").join(",")})
+			 WHERE kind = 'workflow.plan' AND workflow_id IN (${workflowIds.map(() => "?").join(",")})${own.and}
 			 ORDER BY received_at ASC, rowid ASC`,
 		)
-		.all(...workflowIds);
+		.all(...workflowIds, ...own.params);
 	const out = new Map();
 	for (const r of rows) {
 		try {
@@ -1960,7 +1988,8 @@ function latestUsageTotals(extraWhere, params) {
  * numbers, because the context meter, the turn count and the model belong to a
  * session and cannot be added up across several. Newest session first.
  */
-export function workflowUsage(workflowId) {
+export function workflowUsage(workflowId, ownerUserId = null) {
+	const own = ownerScope(ownerUserId);
 	const rows = open()
 		.prepare(
 			`SELECT t.session_id AS sessionId, t.data AS data, t.received_at AS receivedAt
@@ -1971,12 +2000,12 @@ export function workflowUsage(workflowId) {
 			            ORDER BY received_at DESC, rowid DESC
 			          ) AS rn
 			   FROM events
-			   WHERE kind = 'usage.snapshot' AND workflow_id = ?
+			   WHERE kind = 'usage.snapshot' AND workflow_id = ?${own.and}
 			 ) t
 			 WHERE t.rn = 1
 			 ORDER BY t.received_at DESC`,
 		)
-		.all(workflowId);
+		.all(workflowId, ...own.params);
 	const sessions = rows.map((r) => {
 		let data = {};
 		try {
@@ -1994,8 +2023,9 @@ export function workflowUsage(workflowId) {
 }
 
 /** Per-workflow token totals, same counting rule as `latestUsageTotals`. */
-function usageByWorkflow(workflowIds) {
+function usageByWorkflow(workflowIds, ownerUserId = null) {
 	if (workflowIds.length === 0) return new Map();
+	const own = ownerScope(ownerUserId);
 	const rows = open()
 		.prepare(
 			`SELECT t.workflow_id AS wf,
@@ -2011,12 +2041,12 @@ function usageByWorkflow(workflowIds) {
 			          ) AS rn
 			   FROM events
 			   WHERE kind = 'usage.snapshot'
-			     AND workflow_id IN (${workflowIds.map(() => "?").join(",")})
+			     AND workflow_id IN (${workflowIds.map(() => "?").join(",")})${own.and}
 			 ) t
 			 WHERE t.rn = 1
 			 GROUP BY t.workflow_id`,
 		)
-		.all(...workflowIds);
+		.all(...workflowIds, ...own.params);
 	return new Map(rows.map((r) => [r.wf, { input: r.input, output: r.output }]));
 }
 
@@ -2043,12 +2073,21 @@ function workflowAggregates({
 	from = null,
 	to = null,
 	workflowId = null,
+	ownerUserId = null,
 	limit = null,
 	offset = 0,
 } = {}) {
 	const d = open();
-	const ev = eventFilterWhere({ instanceId, user, agent, sandbox, from, to, workflowId });
+	const ev = eventFilterWhere({ instanceId, user, agent, sandbox, from, to, workflowId, ownerUserId });
 	const and = (extra) => (ev.where ? `${ev.where} AND ${extra}` : `WHERE ${extra}`);
+	const own = ownerScope(ownerUserId);
+	const ownC = ownerScope(ownerUserId, "c");
+	const ownA = ownerScope(ownerUserId, "a");
+	const ownB = ownerScope(ownerUserId, "b");
+	const ownI = ownerScope(ownerUserId, "i");
+	const ownS = ownerScope(ownerUserId, "s");
+	const ownL = ownerScope(ownerUserId, "l");
+	const subOwnParams = [...ownC.params, ...ownA.params, ...ownB.params, ...ownI.params, ...ownS.params, ...ownL.params];
 	// Paging is applied to the GROUP BY above, not to the result — everything
 	// below this query (the plan snapshots, the usage totals, the lifecycle fold)
 	// runs per row, so a page of 25 costs a page of 25 regardless of how many
@@ -2066,23 +2105,23 @@ function workflowAggregates({
 			        MAX(CASE WHEN e.kind LIKE 'step.%' THEN CAST(json_extract(e.data, '$.order_index') AS INTEGER) END) AS maxOrder,
 			        (SELECT json_extract(c.data, '$.name') FROM events c
 			          WHERE c.workflow_id = e.workflow_id AND c.kind IN ('workflow.created', 'workflow.updated')
-			            AND json_extract(c.data, '$.name') IS NOT NULL
+			            AND json_extract(c.data, '$.name') IS NOT NULL${ownC.and}
 			          ORDER BY c.received_at DESC, c.rowid DESC LIMIT 1) AS name,
 			        (SELECT json_extract(a.data, '$.agent') FROM events a
-			          WHERE a.workflow_id = e.workflow_id AND json_extract(a.data, '$.agent') IS NOT NULL
+			          WHERE a.workflow_id = e.workflow_id AND json_extract(a.data, '$.agent') IS NOT NULL${ownA.and}
 			          ORDER BY a.received_at DESC, a.rowid DESC LIMIT 1) AS agent,
 			        (SELECT json_extract(b.data, '$.sandbox') FROM events b
-			          WHERE b.workflow_id = e.workflow_id AND json_extract(b.data, '$.sandbox') IS NOT NULL
+			          WHERE b.workflow_id = e.workflow_id AND json_extract(b.data, '$.sandbox') IS NOT NULL${ownB.and}
 			          ORDER BY b.received_at DESC, b.rowid DESC LIMIT 1) AS sandbox,
 			        (SELECT json_extract(i.data, '$.image') FROM events i
-			          WHERE i.workflow_id = e.workflow_id AND json_extract(i.data, '$.image') IS NOT NULL
+			          WHERE i.workflow_id = e.workflow_id AND json_extract(i.data, '$.image') IS NOT NULL${ownI.and}
 			          ORDER BY i.received_at DESC, i.rowid DESC LIMIT 1) AS image,
 			        (SELECT json_extract(s.data, '$.to') FROM events s
 			          WHERE s.workflow_id = e.workflow_id AND s.kind = 'workflow.status_changed'
-			            AND json_extract(s.data, '$.to') IS NOT NULL
+			            AND json_extract(s.data, '$.to') IS NOT NULL${ownS.and}
 			          ORDER BY s.received_at DESC, s.rowid DESC LIMIT 1) AS statusTo,
 			        (SELECT l.instance_id FROM events l
-			          WHERE l.workflow_id = e.workflow_id
+			          WHERE l.workflow_id = e.workflow_id${ownL.and}
 			          ORDER BY l.received_at DESC, l.rowid DESC LIMIT 1) AS instanceId
 			 FROM events e
 			 ${and("e.workflow_id IS NOT NULL")}
@@ -2090,7 +2129,7 @@ function workflowAggregates({
 			 ORDER BY lastActivityAt DESC, e.workflow_id DESC
 			 ${page}`,
 		)
-		.all(...ev.params);
+		.all(...subOwnParams, ...ev.params);
 
 	// Status: the NEWEST signal wins. An explicit terminal transition
 	// (workflow.status_changed) settles the workflow — unless a step started
@@ -2107,10 +2146,10 @@ function workflowAggregates({
 		const sc = d
 			.prepare(
 				`SELECT workflow_id AS wf, MAX(received_at) AS at
-				 FROM events WHERE kind = 'workflow.status_changed' AND workflow_id IN (${rows.map(() => "?").join(",") || "NULL"})
+				 FROM events WHERE kind = 'workflow.status_changed' AND workflow_id IN (${rows.map(() => "?").join(",") || "NULL"})${own.and}
 				 GROUP BY workflow_id`,
 			)
-			.all(...rows.map((r) => r.workflowId));
+			.all(...rows.map((r) => r.workflowId), ...own.params);
 		for (const r of sc) statusAt.set(r.wf, r.at);
 	}
 	const running = new Set();
@@ -2123,10 +2162,10 @@ function workflowAggregates({
 				`SELECT workflow_id AS wf, COALESCE(json_extract(data, '$.step_id'), id) AS sid, kind, received_at AS at
 				 FROM events
 				 WHERE kind IN ('step.added', 'step.started', 'step.waiting', 'step.done', 'step.failed')
-				   AND workflow_id IN (${rows.map(() => "?").join(",")})
+				   AND workflow_id IN (${rows.map(() => "?").join(",")})${own.and}
 				 ORDER BY received_at ASC, rowid ASC`,
 			)
-			.all(...rows.map((r) => r.workflowId));
+			.all(...rows.map((r) => r.workflowId), ...own.params);
 		for (const r of life) {
 			let perStep = latest.get(r.wf);
 			if (!perStep) latest.set(r.wf, (perStep = new Map()));
@@ -2160,8 +2199,8 @@ function workflowAggregates({
 		}
 	}
 
-	const plans = latestPlans(rows.map((r) => r.workflowId));
-	const usage = usageByWorkflow(rows.map((r) => r.workflowId));
+	const plans = latestPlans(rows.map((r) => r.workflowId), ownerUserId);
+	const usage = usageByWorkflow(rows.map((r) => r.workflowId), ownerUserId);
 
 	return rows.map((r) => {
 		const plan = plans.get(r.workflowId) ?? null;
@@ -2218,8 +2257,8 @@ function workflowAggregates({
 }
 
 /** How many workflows the identity/date filters match, for the pager's "of N". */
-export function countWorkflows({ instanceId = null, user = null, agent = null, sandbox = null, from = null, to = null } = {}) {
-	const ev = eventFilterWhere({ instanceId, user, agent, sandbox, from, to });
+export function countWorkflows({ instanceId = null, user = null, agent = null, sandbox = null, from = null, to = null, ownerUserId = null } = {}) {
+	const ev = eventFilterWhere({ instanceId, user, agent, sandbox, from, to, ownerUserId });
 	const where = ev.where ? `${ev.where} AND workflow_id IS NOT NULL` : "WHERE workflow_id IS NOT NULL";
 	return open()
 		.prepare(`SELECT COUNT(DISTINCT workflow_id) AS total FROM events ${where}`)
@@ -2242,10 +2281,11 @@ export function listWorkflows({
 	sandbox = null,
 	from = null,
 	to = null,
+	ownerUserId = null,
 	limit = null,
 	offset = 0,
 } = {}) {
-	const filters = { instanceId, user, agent, sandbox, from, to };
+	const filters = { instanceId, user, agent, sandbox, from, to, ownerUserId };
 	return {
 		workflows: workflowAggregates({ ...filters, limit, offset }),
 		total: countWorkflows(filters),
@@ -2261,8 +2301,9 @@ export function listWorkflows({
  * so it cannot read from the paged list. This query skips the whole per-row fold
  * (plans, usage, lifecycle) and stays cheap even with thousands of rows.
  */
-export function listWorkflowNames({ instanceId = null, user = null, agent = null, sandbox = null, from = null, to = null, limit = 1000 } = {}) {
-	const ev = eventFilterWhere({ instanceId, user, agent, sandbox, from, to });
+export function listWorkflowNames({ instanceId = null, user = null, agent = null, sandbox = null, from = null, to = null, ownerUserId = null, limit = 1000 } = {}) {
+	const ev = eventFilterWhere({ instanceId, user, agent, sandbox, from, to, ownerUserId });
+	const ownC = ownerScope(ownerUserId, "c");
 	const where = ev.where ? `${ev.where} AND e.workflow_id IS NOT NULL` : "WHERE e.workflow_id IS NOT NULL";
 	return open()
 		.prepare(
@@ -2270,7 +2311,7 @@ export function listWorkflowNames({ instanceId = null, user = null, agent = null
 			        MAX(e.received_at) AS lastActivityAt,
 			        (SELECT json_extract(c.data, '$.name') FROM events c
 			          WHERE c.workflow_id = e.workflow_id AND c.kind IN ('workflow.created', 'workflow.updated')
-			            AND json_extract(c.data, '$.name') IS NOT NULL
+			            AND json_extract(c.data, '$.name') IS NOT NULL${ownC.and}
 			          ORDER BY c.received_at DESC, c.rowid DESC LIMIT 1) AS name
 			 FROM events e
 			 ${where}
@@ -2278,7 +2319,7 @@ export function listWorkflowNames({ instanceId = null, user = null, agent = null
 			 ORDER BY lastActivityAt DESC, e.workflow_id DESC
 			 LIMIT ${Number(limit)}`,
 		)
-		.all(...ev.params)
+		.all(...ownC.params, ...ev.params)
 		.map((r) => ({ workflowId: r.workflowId, name: r.name ?? r.workflowId.slice(0, 8) }));
 }
 
@@ -2301,16 +2342,17 @@ export function listWorkflowNames({ instanceId = null, user = null, agent = null
  * latest lifecycle event carries the run state.
  */
 /** Fold sticky-note events into per-step note lists (latest state wins). */
-function foldStepNotes(workflowId) {
+function foldStepNotes(workflowId, ownerUserId = null) {
+	const own = ownerScope(ownerUserId);
 	const rows = open()
 		.prepare(
 			`SELECT kind, data, created_at AS createdAt
 			 FROM events
 			 WHERE workflow_id = ?
-			   AND kind IN ('step.note.added', 'step.note.modified', 'step.note.deleted')
+			   AND kind IN ('step.note.added', 'step.note.modified', 'step.note.deleted')${own.and}
 			 ORDER BY received_at ASC, rowid ASC`,
 		)
-		.all(workflowId);
+		.all(workflowId, ...own.params);
 	/** stepId → noteId → note */
 	const byStep = new Map();
 	for (const r of rows) {
@@ -2349,19 +2391,20 @@ function foldStepNotes(workflowId) {
 	return out;
 }
 
-export function workflowDetail(workflowId) {
+export function workflowDetail(workflowId, { ownerUserId } = {}) {
 	const d = open();
-	const summary = workflowAggregates({ workflowId })[0];
+	const summary = workflowAggregates({ workflowId, ownerUserId })[0];
 	if (!summary) return null;
+	const own = ownerScope(ownerUserId);
 	const rows = d
 		.prepare(
 			`SELECT kind, data, created_at AS createdAt
 			 FROM events
 			 WHERE workflow_id = ?
-			   AND kind IN ('step.added', 'step.started', 'step.waiting', 'step.done', 'step.failed', 'step.judged')
+			   AND kind IN ('step.added', 'step.started', 'step.waiting', 'step.done', 'step.failed', 'step.judged')${own.and}
 			 ORDER BY received_at ASC, rowid ASC`,
 		)
-		.all(workflowId);
+		.all(workflowId, ...own.params);
 
 	const steps = new Map(); // stepId → accumulator, in first-seen order
 	for (const r of rows) {
@@ -2450,7 +2493,7 @@ export function workflowDetail(workflowId) {
 		.sort((a, b) => (a.orderIndex ?? Number.MAX_SAFE_INTEGER) - (b.orderIndex ?? Number.MAX_SAFE_INTEGER) || a.seq - b.seq)
 		.map(({ seq, ...step }) => step);
 
-	const plan = latestPlans([workflowId]).get(workflowId) ?? null;
+	const plan = latestPlans([workflowId], ownerUserId).get(workflowId) ?? null;
 	const byId = new Map(folded.map((s) => [s.stepId, s]));
 	// Plan for shape and present state; fold for the history a snapshot can't
 	// carry (durations, the judge's verdict, when the status last moved).
@@ -2484,7 +2527,7 @@ export function workflowDetail(workflowId) {
 				.sort((a, b) => (a.orderIndex ?? Number.MAX_SAFE_INTEGER) - (b.orderIndex ?? Number.MAX_SAFE_INTEGER))
 		: folded;
 
-	const notesByStep = foldStepNotes(workflowId);
+	const notesByStep = foldStepNotes(workflowId, ownerUserId);
 	const stepsWithNotes = orderedSteps.map((s) => ({
 		...s,
 		notes: notesByStep.get(s.stepId) ?? [],
@@ -2496,8 +2539,8 @@ export function workflowDetail(workflowId) {
 		// The per-session readout the operator's own client prints. The tokens on
 		// `summary` are the same spend rolled into two numbers; this is what lets
 		// the two be compared line for line.
-		usage: workflowUsage(workflowId),
-		events: recentEvents({ workflowId, limit: 50 }),
+		usage: workflowUsage(workflowId, ownerUserId),
+		events: recentEvents({ workflowId, limit: 50, ownerUserId }),
 	};
 }
 

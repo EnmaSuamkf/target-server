@@ -16,6 +16,7 @@ test("role editor groups catalog by Server and Client with select-all", () => {
 test("remote workflow actions are independently gated", () => {
 	const app = read("../ui/src/App.tsx");
 	assert.match(app, /activity\.read/);
+	assert.match(app, /activity\.read\.own/);
 	assert.match(app, /users\.manage/);
 	assert.match(app, /client\.read/);
 	assert.match(app, /devices\.manage/);

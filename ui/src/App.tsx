@@ -22,6 +22,7 @@ import type {
 } from "./api/types.ts";
 import { EMPTY_FILTERS } from "./api/types.ts";
 import { Bars } from "./components/Bars.tsx";
+import { ActivityScopeBadge } from "./components/Badges.tsx";
 import { EventFeed } from "./components/EventFeed.tsx";
 import { FilterBar, RANGE_MS } from "./components/FilterBar.tsx";
 import { InstancesTable } from "./components/InstancesTable.tsx";
@@ -172,7 +173,8 @@ function ChangePasswordButton() {
  */
 export function App({ user, catalog = null, onSignOut }: { user: AuthUser; catalog?: PermissionCatalog | null; onSignOut: () => void }) {
 	const can = (permission: string) => hasPermission(user, permission);
-	const canActivity = can("activity.read");
+	const canActivity = can("activity.read") || can("activity.read.own");
+	const ownActivityOnly = can("activity.read.own") && !can("activity.read");
 	const canUsers = can("users.manage");
 	const canRemote = can("client.read");
 	const canCreateRemote = can("client.workflows.create");
@@ -310,6 +312,7 @@ export function App({ user, catalog = null, onSignOut }: { user: AuthUser; catal
 	}, [total, pageSize]);
 
 	const kinds = (allStats?.byKind ?? stats?.byKind ?? []).map((r) => r.kind);
+	const ownActivityEmpty = ownActivityOnly && stats != null && stats.totalInstances === 0;
 
 	// The filter-bar workflow options come from the id+name list, NOT the page on
 	// screen — a dropdown that only offered the visible 25 would be a trap. Keep
@@ -391,11 +394,25 @@ export function App({ user, catalog = null, onSignOut }: { user: AuthUser; catal
 					<>
 						<h1 className="page-title">Activity across the fleet</h1>
 						<p className="page-sub">
-							Workflow runs, steps, token usage and errors reported by every Target instance pointed at this server.
+							{ownActivityOnly ? (
+								<>
+									<ActivityScopeBadge />
+									{" — data from hubs linked to your account"}
+								</>
+							) : (
+								"Workflow runs, steps, token usage and errors reported by every Target instance pointed at this server."
+							)}
 						</p>
 
 						{statsErr ? <div className="err">{`API error: ${statsErr}`}</div> : null}
 
+						{ownActivityEmpty ? (
+							<div className="empty">
+								No activity from hubs linked to your account yet. Link a Target hub to this account to see its reporting
+								here; events ingested without a linked hub stay hidden under this permission.
+							</div>
+						) : (
+							<>
 						<FilterBar
 							filters={filters}
 							onChange={setFilters}
@@ -477,6 +494,8 @@ export function App({ user, catalog = null, onSignOut }: { user: AuthUser; catal
 							<h2>Live event feed</h2>
 							<EventFeed events={evs?.events ?? null} />
 						</div>
+							</>
+						)}
 
 					</>
 				) : tab === "users" ? (

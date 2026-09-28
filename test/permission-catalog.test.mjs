@@ -15,6 +15,18 @@ test("every catalogue entry carries a closed id, scope and group", () => {
 		assert.equal(typeof entry.group, "string");
 		assert.ok(entry.group.startsWith(`${entry.scope}.`));
 	}
+	assert.ok(PERMISSIONS.includes("activity.read"));
+	assert.ok(PERMISSIONS.includes("activity.read.own"));
+	const viewAll = PERMISSION_CATALOG.find((item) => item.id === "activity.read");
+	assert.equal(viewAll.label, "View all activity");
+	assert.equal(viewAll.description, "View Activity and reporting data from every hub");
+	assert.equal(viewAll.scope, "server");
+	assert.equal(viewAll.group, "server.activity");
+	const viewOwn = PERMISSION_CATALOG.find((item) => item.id === "activity.read.own");
+	assert.equal(viewOwn.label, "View own activity");
+	assert.equal(viewOwn.description, "View Activity and reporting data from your own linked hubs");
+	assert.equal(viewOwn.scope, "server");
+	assert.equal(viewOwn.group, "server.activity");
 	assert.ok(PERMISSIONS.includes("client.read"));
 	assert.ok(PERMISSIONS.includes("client.workflows.manage"));
 	assert.ok(PERMISSIONS.includes("client.workflows.create"));
@@ -88,6 +100,10 @@ test("getPermissionCatalog groups the closed vocabulary by server and client sco
 			assert.equal(permission.description, entry.description);
 		}
 	}
+	const activity = catalog.groups.find((group) => group.id === "server.activity");
+	assert.equal(activity.label, "Activity");
+	assert.equal(activity.permissions.find((permission) => permission.id === "activity.read").label, "View all activity");
+	assert.equal(activity.permissions.find((permission) => permission.id === "activity.read.own").label, "View own activity");
 	const clients = catalog.groups.find((group) => group.id === "client.remote");
 	assert.equal(clients.label, "Clients");
 	assert.equal(clients.permissions.find((permission) => permission.id === "client.read").label, "View clients");
@@ -101,6 +117,8 @@ test("role editor exposes every closed backend permission with readable device l
 	const source = fs.readFileSync(new URL("../ui/src/api/permissions.ts", import.meta.url), "utf8");
 	const ids = [...source.matchAll(/id:\s*"([^"]+)"/g)].map((match) => match[1]);
 	assert.deepEqual(ids.sort(), [...PERMISSIONS].sort());
+	assert.match(source, /View all activity/);
+	assert.match(source, /activity\.read\.own/);
 	assert.match(source, /Approve or deny device-link requests/);
 	assert.match(source, /Manage linked devices/);
 	assert.match(source, /client\.templates\.sync/);

@@ -10,6 +10,15 @@ export function KindBadge({ kind }: { kind: string }) {
 	);
 }
 
+/** Own-activity scope: the dashboard is restricted to hubs linked to this account. */
+export function ActivityScopeBadge() {
+	return (
+		<span className="badge badge--info" title="Only events and workflows from Target hubs linked to your account">
+			Showing only your activity
+		</span>
+	);
+}
+
 /** Agent badge: the CLI that runs the workflow's steps (free-code, claude…). */
 export function AgentBadge({ agent }: { agent: string | null }) {
 	if (!agent) {
