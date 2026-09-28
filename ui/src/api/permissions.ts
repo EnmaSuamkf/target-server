@@ -2,7 +2,8 @@ import type { AuthUser, PermissionCatalog, PermissionCatalogEntry, PermissionCat
 
 /** Thin fallback of the server's closed RBAC catalogue for readable role editing. */
 export const PERMISSION_CATALOG = [
-	{ id: "activity.read", label: "View Activity", description: "View fleet activity, events and workflows." },
+	{ id: "activity.read", label: "View all activity", description: "View Activity and reporting data from every hub." },
+	{ id: "activity.read.own", label: "View own activity", description: "View Activity and reporting data from your own linked hubs." },
 	{ id: "users.read", label: "View users", description: "View dashboard accounts and invitations." },
 	{ id: "users.manage", label: "Manage users and roles", description: "Invite, change accounts and manage roles." },
 	{ id: "devices.link", label: "Approve or deny device-link requests", description: "Approve or deny linking an authorized Target hub to your account." },

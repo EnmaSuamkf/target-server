@@ -169,7 +169,7 @@ test("opening a pre-rename DB remaps live remote.* rows onto client.*", () => {
 
 test("opening an existing database rebuilds CHECK and grants catalog sync ids to admin", () => {
 	const admin = rbac.getRoleById(rbac.ADMIN_ROLE_ID);
-	for (const id of ["client.templates.sync", "client.tcp-tools.sync", "client.rci.sync"]) {
+	for (const id of ["client.templates.sync", "client.tcp-tools.sync", "client.rci.sync", "activity.read.own"]) {
 		assert.ok(admin.permissions.includes(id), `admin missing ${id}`);
 	}
 	const syncRole = rbac.createRole({
@@ -182,9 +182,12 @@ test("opening an existing database rebuilds CHECK and grants catalog sync ids to
 		"client.templates.sync",
 	]);
 	const sql = rbac.open().prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'auth_role_permissions'").get().sql;
-	for (const id of ["client.templates.sync", "client.tcp-tools.sync", "client.rci.sync"]) {
+	for (const id of ["client.templates.sync", "client.tcp-tools.sync", "client.rci.sync", "activity.read.own"]) {
 		assert.ok(sql.includes(`'${id}'`), `CHECK missing ${id}`);
 	}
+	const ownRole = rbac.createRole({ name: "Own activity", permissions: ["activity.read.own"] });
+	assert.deepEqual(ownRole.permissions, ["activity.read.own"]);
+	assert.equal(rbac.deleteRole(ownRole.id), true);
 	assert.equal(rbac.deleteRole(syncRole.id), true);
 });
 

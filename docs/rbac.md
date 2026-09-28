@@ -18,7 +18,8 @@ retired; they were replaced by create / edit / delete / import / export.
 
 | Permission | Group | Allows |
 | --- | --- | --- |
-| `activity.read` | Activity | Read Activity, events, instances and workflows |
+| `activity.read` | Activity | Read all Activity, events, instances and workflows |
+| `activity.read.own` | Activity | Read Activity, events, instances and workflows from hubs linked to this account |
 | `users.read` | Users | Read dashboard accounts |
 | `users.manage` | Users | Invite users and manage users/roles |
 | `devices.link` | Devices | Approve or deny a device-link request in the browser. This assigns the approved hub to the signed-in authorized human; it is not a dashboard/device credential. |
@@ -43,6 +44,29 @@ retired; they were replaced by create / edit / delete / import / export.
 | `rci.export` | RCI | Export RCI resource sets stored on this server |
 
 These `templates.*` / `tcp-tools.*` / `rci.*` IDs are server-owned Agent Resources catalog permissions. They are distinct from the client-scoped `client.templates.*` / `client.tcp-tools.*` / `client.rci.*` IDs that gate per-client Remote resources.
+
+### Activity scope
+
+`activity.read` ("View all activity") sees every reporting row on this server.
+`activity.read.own` ("View own activity") sees only rows whose `owner_user_id`
+is the signed-in account. If a role has both, **all** wins: the request is
+unrestricted. Missing both is `403 { "error": "forbidden", "permission": "activity.read.own" }`.
+
+Ownership is `events.owner_user_id` / `instances.owner_user_id`. The server
+sets that column from the linked hub's owner (device-link) when the data
+arrives; it is never taken from the ingest body. Events ingested with
+`TARGET_INGEST_TOKEN` (or open ingest) keep `owner_user_id` NULL. Those
+unowned rows are visible only with `activity.read`. An `activity.read.own`
+caller with no linked hubs sees an empty Activity dashboard.
+
+`GET /api/workflows/:id` for a workflow outside that scope returns
+`404 { "error": "unknown_workflow" }` (not 403), so foreign ids cannot be
+enumerated. Queries that look up a workflow's full history by `workflow_id`
+(plans, notes, usage, status) also filter `owner_user_id` in own-scope, so a
+shared id cannot leak another account's payload.
+
+The Activity tab is shown with either permission. Own-only sessions get a
+visible "Showing only your activity" indicator.
 
 ### Client
 
@@ -202,8 +226,13 @@ for UI rendering. The catalog blob is not an authorization decision.
         "permissions": [
           {
             "id": "activity.read",
-            "label": "View Activity",
-            "description": "View Activity and reporting data"
+            "label": "View all activity",
+            "description": "View Activity and reporting data from every hub"
+          },
+          {
+            "id": "activity.read.own",
+            "label": "View own activity",
+            "description": "View Activity and reporting data from your own linked hubs"
           }
         ]
       }
@@ -222,5 +251,6 @@ request, not from a stale JWT claim and not from `catalog`.
 | `409` | A safety invariant blocks the requested change | Do not retry blindly; preserve an administrator/role assignment |
 | `422` | Request or role/permission payload is invalid | Correct the field errors |
 
-The dashboard's Users tab appears only with `users.manage`; Activity and Remote
-Control are similarly selected from current session permissions.
+The dashboard's Users tab appears only with `users.manage`. The Activity tab
+appears with `activity.read` or `activity.read.own`; Remote Control is
+similarly selected from current session permissions.

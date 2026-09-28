@@ -243,6 +243,21 @@ async function requireAnyCapability(req, res, permissions) {
 	return user;
 }
 
+/**
+ * Activity dashboard scope: `activity.read` sees every hub; `activity.read.own`
+ * is pinned to the caller's account. Both together still mean "all". Auth
+ * disabled (loopback-only) is unrestricted. Missing both is 403.
+ */
+async function requireActivityScope(req, res) {
+	if (AUTH_DISABLED) return { user: { id: "auth-disabled", permissions: ["*"] }, ownerUserId: null };
+	const user = await requireAuth(req, res);
+	if (!user) return null;
+	if (user.permissions.includes("activity.read")) return { user, ownerUserId: null };
+	if (user.permissions.includes("activity.read.own")) return { user, ownerUserId: user.id };
+	sendJson(res, 403, { error: "forbidden", permission: "activity.read.own" });
+	return null;
+}
+
 function readBody(req) {
 	return new Promise((resolve, reject) => {
 		let size = 0;
@@ -2534,40 +2549,48 @@ const server = createServer(async (req, res) => {
 		};
 
 		if (req.method === "GET" && pathname === "/api/stats") {
-			if (!(await requireCapability(req, res, "activity.read"))) return;
-			return sendJson(res, 200, stats(filters));
+			const scope = await requireActivityScope(req, res);
+			if (!scope) return;
+			return sendJson(res, 200, stats({ ...filters, ownerUserId: scope.ownerUserId }));
 		}
 		if (req.method === "GET" && pathname === "/api/instances") {
-			if (!(await requireCapability(req, res, "activity.read"))) return;
-			return sendJson(res, 200, { instances: listInstances() });
+			const scope = await requireActivityScope(req, res);
+			if (!scope) return;
+			return sendJson(res, 200, { instances: listInstances({ ownerUserId: scope.ownerUserId }) });
 		}
 		if (req.method === "GET" && pathname === "/api/users") {
-			if (!(await requireCapability(req, res, "activity.read"))) return;
-			return sendJson(res, 200, { users: listUsers() });
+			const scope = await requireActivityScope(req, res);
+			if (!scope) return;
+			return sendJson(res, 200, { users: listUsers({ ownerUserId: scope.ownerUserId }) });
 		}
 		if (req.method === "GET" && pathname === "/api/events") {
-			if (!(await requireCapability(req, res, "activity.read"))) return;
+			const scope = await requireActivityScope(req, res);
+			if (!scope) return;
 			return sendJson(res, 200, {
 				events: recentEvents({
 					limit: Number.parseInt(url.searchParams.get("limit") ?? "100", 10),
 					...filters,
+					ownerUserId: scope.ownerUserId,
 				}),
 			});
 		}
 		const listFilters = (({ instanceId, user, agent, sandbox, from, to }) => ({ instanceId, user, agent, sandbox, from, to }))(filters);
 
 		if (req.method === "GET" && pathname === "/api/workflows") {
-			if (!(await requireCapability(req, res, "activity.read"))) return;
-			return sendJson(res, 200, listWorkflows({ ...listFilters, ...pageParams(url) }));
+			const scope = await requireActivityScope(req, res);
+			if (!scope) return;
+			return sendJson(res, 200, listWorkflows({ ...listFilters, ...pageParams(url), ownerUserId: scope.ownerUserId }));
 		}
 		if (req.method === "GET" && pathname === "/api/workflows/names") {
-			if (!(await requireCapability(req, res, "activity.read"))) return;
-			return sendJson(res, 200, { workflows: listWorkflowNames(listFilters) });
+			const scope = await requireActivityScope(req, res);
+			if (!scope) return;
+			return sendJson(res, 200, { workflows: listWorkflowNames({ ...listFilters, ownerUserId: scope.ownerUserId }) });
 		}
 		const workflowMatch = pathname.match(/^\/api\/workflows\/([A-Za-z0-9-]+)$/);
 		if (req.method === "GET" && workflowMatch) {
-			if (!(await requireCapability(req, res, "activity.read"))) return;
-			const detail = workflowDetail(workflowMatch[1]);
+			const scope = await requireActivityScope(req, res);
+			if (!scope) return;
+			const detail = workflowDetail(workflowMatch[1], { ownerUserId: scope.ownerUserId });
 			if (!detail) return sendJson(res, 404, { error: "unknown_workflow" });
 			return sendJson(res, 200, detail);
 		}
