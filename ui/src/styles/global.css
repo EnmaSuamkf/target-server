@@ -1147,6 +1147,10 @@ tbody tr.wf-row--selected, tbody tr.wf-row--selected:hover { background: var(--a
 .orgs-panel { display: grid; gap: var(--space-4); }
 .orgs-toolbar { display: flex; justify-content: flex-end; }
 .orgs-create { display: grid; gap: var(--space-3); }
+.orgs-delete { display: grid; gap: var(--space-3); }
+.orgs-delete-summary { display: grid; grid-template-columns: max-content 1fr; gap: var(--space-1) var(--space-3); margin: 0; }
+.orgs-delete-summary dt { color: var(--text-muted); }
+.orgs-delete-summary dd { margin: 0; }
 
 .badge--warn { background: var(--warn-50); color: var(--warn-700); border: 1px solid var(--warn-200); }
 .badge--success { background: var(--success-50); color: var(--success-700); border: 1px solid var(--success-200); }

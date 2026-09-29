@@ -7,7 +7,7 @@
  */
 import { createServer } from "node:http";
 import { createHash, createPublicKey, randomUUID, verify } from "node:crypto";
-import { existsSync, readdirSync, statSync, unlinkSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, renameSync, statSync, unlinkSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import * as path from "node:path";
@@ -51,6 +51,8 @@ import {
 	defaultOrgDbPath,
 	closeOrgDb,
 	closeOrgDbByPath,
+	retireOrgDbPath,
+	unretireOrgDbPath,
 	deleteAuthUser,
 	deleteRole,
 	findResetToken,
@@ -167,6 +169,11 @@ import {
 } from "./db.mjs";
 import {
 	assertMultiOrgDeviceLinkingMode,
+	controlDbPath,
+	deleteOrganizationCascade,
+	listActiveMembershipsByEmail,
+	setOrganizationStatus,
+	writePlatformAudit,
 	bumpSuperuserTokenVersion,
 	ensurePendingSuperuser,
 	getControlLinkRequest,
@@ -302,9 +309,15 @@ function consumeSelectOrgToken(raw) {
 
 async function completeOrgSignIn(email, orgId, res) {
 	const membership = getMembership(email, orgId);
-	if (!membership) {
+	const org = membership ? getOrganization(orgId) : null;
+	if (!membership || !org) {
 		const err = new Error("forbidden");
 		err.code = "not_member";
+		throw err;
+	}
+	if (org.status === "disabled") {
+		const err = new Error("organization is disabled");
+		err.code = "org_disabled";
 		throw err;
 	}
 	return runWithOrg(orgId, async () => {
@@ -909,8 +922,10 @@ async function handleAuthRoute(req, res, pathname, url) {
 			});
 			if (failed) return sendRedirect(res, loginRedirect({ auth_error: failed }));
 		}
-		if (memberships.length === 1) {
-			return runWithOrg(memberships[0].orgId, () => {
+		const activeMemberships = listActiveMembershipsByEmail(profile.email);
+		if (activeMemberships.length === 0) return sendRedirect(res, loginRedirect({ auth_error: "org_disabled" }));
+		if (activeMemberships.length === 1) {
+			return runWithOrg(activeMemberships[0].orgId, () => {
 				const active = getAuthUserByEmail(profile.email);
 				recordLogin(active.id);
 				signInUser(active, res);
@@ -946,8 +961,10 @@ async function handleAuthRoute(req, res, pathname, url) {
 		if (!ident?.passwordHash || !ok) return sendJson(res, 401, { error: "invalid_credentials" });
 		const memberships = listMembershipsByEmail(ident.email);
 		if (memberships.length === 0) return sendJson(res, 401, { error: "invalid_credentials" });
-		if (memberships.length === 1) {
-			const payload = await completeOrgSignIn(ident.email, memberships[0].orgId, res);
+		const activeMemberships = listActiveMembershipsByEmail(ident.email);
+		if (activeMemberships.length === 0) return sendJson(res, 403, { error: "org_disabled" });
+		if (activeMemberships.length === 1) {
+			const payload = await completeOrgSignIn(ident.email, activeMemberships[0].orgId, res);
 			return sendJson(res, 200, payload);
 		}
 		const issued = issueSelectOrgToken(ident.email);
@@ -982,6 +999,7 @@ async function handleAuthRoute(req, res, pathname, url) {
 			return sendJson(res, 200, payload);
 		} catch (err) {
 			if (err.code === "not_member") return sendJson(res, 403, { error: "forbidden" });
+			if (err.code === "org_disabled") return sendJson(res, 403, { error: "org_disabled" });
 			throw err;
 		}
 	}
@@ -1017,7 +1035,7 @@ async function handleAuthRoute(req, res, pathname, url) {
 		}
 		const ident = ensureIdentityCredentials(v.value.email);
 		if (ident?.passwordHash) {
-			const memberships = listMembershipsByEmail(ident.email);
+			const memberships = listActiveMembershipsByEmail(ident.email);
 			if (memberships[0]) {
 				await runWithOrg(memberships[0].orgId, async () => {
 					const user = getAuthUserByEmail(ident.email);
@@ -1322,6 +1340,46 @@ function removeSqliteFiles(dbPath) {
 	}
 }
 
+function archiveTimestamp(date = new Date()) {
+	return date.toISOString().replace(/\.\d{3}Z$/, "Z").replace(/[-:]/g, "");
+}
+
+function moveFile(from, to) {
+	try {
+		renameSync(from, to);
+	} catch (err) {
+		if (err.code !== "EXDEV") throw err;
+		copyFileSync(from, to);
+		unlinkSync(from);
+	}
+}
+
+/**
+ * Move `org-<slug>.db` plus `-wal` / `-shm` into `<dir of TARGET_SERVER_DB>/deleted-orgs/`
+ * as `org-<slug>-<UTC stamp>.db[-wal|-shm]`. Missing sidecars are skipped. Never the
+ * default org DB or control.db. Returns the archived paths.
+ */
+function archiveOrgDbFiles(dbPath, slug) {
+	const source = path.resolve(dbPath);
+	const protectedPaths = new Set([path.resolve(defaultOrgDbPath()), path.resolve(controlDbPath())]);
+	if (protectedPaths.has(source)) throw platformError("protected_db_path", `refusing to archive ${source}`);
+	const archiveDir = path.join(path.dirname(path.resolve(defaultOrgDbPath())), "deleted-orgs");
+	mkdirSync(archiveDir, { recursive: true });
+	let base = `org-${slug}-${archiveTimestamp()}`;
+	for (let n = 1; existsSync(path.join(archiveDir, `${base}.db`)); n += 1) {
+		base = `org-${slug}-${archiveTimestamp()}-${n}`;
+	}
+	const archivedTo = [];
+	for (const suffix of ["", "-wal", "-shm"]) {
+		const from = `${source}${suffix}`;
+		if (!existsSync(from)) continue;
+		const to = path.join(archiveDir, `${base}.db${suffix}`);
+		moveFile(from, to);
+		archivedTo.push(to);
+	}
+	return archivedTo;
+}
+
 function platformOrgDto(org) {
 	return runWithOrg(org.id, () => {
 		const admin = getFirstAdminUser();
@@ -1339,6 +1397,45 @@ function platformOrgDto(org) {
 	});
 }
 
+/** `platformOrgDto`, or zero counts when the org DB cannot be opened. */
+function platformOrgSummary(org) {
+	try {
+		return platformOrgDto(org);
+	} catch (err) {
+		log(`platform org summary failed for ${org.id}: ${String(err?.message ?? err)}`);
+		return {
+			id: org.id,
+			slug: org.slug,
+			name: org.name,
+			status: org.status,
+			createdAt: org.createdAt,
+			userCount: 0,
+			deviceCount: 0,
+			adminEmail: null,
+			adminStatus: null,
+		};
+	}
+}
+
+/**
+ * Cascade the control-plane rows away, retire and close the org DB so nothing can
+ * re-create it, then archive its files. Synchronous end to end: no request can
+ * interleave between the directory delete and the archive.
+ */
+function deletePlatformOrganization(org, actorId) {
+	const { userCount, deviceCount } = platformOrgSummary(org);
+	const cascade = deleteOrganizationCascade(org.id);
+	if (!cascade) throw platformError("not_found", "organization vanished during delete");
+	retireOrgDbPath(org.dbPath);
+	closeOrgDb(org.id);
+	closeOrgDbByPath(org.dbPath);
+	const archivedTo = archiveOrgDbFiles(org.dbPath, org.slug);
+	const deleted = { id: org.id, slug: org.slug, name: org.name, userCount, deviceCount, archivedTo };
+	writePlatformAudit({ actor: actorId, action: "organization.deleted", detail: deleted });
+	log(`organization ${org.slug} (${org.id}) deleted; files archived: ${archivedTo.join(", ") || "none"}`);
+	return deleted;
+}
+
 async function provisionOrganization({ name, slug, adminEmail, inviteMethods, actorId }) {
 	if (getOrganizationBySlug(slug)) throw platformError("slug_taken", "slug is already in use");
 	if (getSuperuserByEmail(adminEmail)) {
@@ -1346,6 +1443,7 @@ async function provisionOrganization({ name, slug, adminEmail, inviteMethods, ac
 	}
 	const id = randomUUID();
 	const dbPath = orgDbPathForSlug(slug);
+	unretireOrgDbPath(dbPath);
 	if (existsSync(dbPath) || existsSync(`${dbPath}-wal`)) removeSqliteFiles(dbPath);
 	let created;
 	let issued;
@@ -1399,24 +1497,7 @@ async function handlePlatformRoute(req, res, pathname) {
 
 	if (req.method === "GET" && (pathname === "/api/platform/orgs" || pathname === "/api/platform/organizations")) {
 		const orgs = [];
-		for (const org of listOrganizations()) {
-			try {
-				orgs.push(platformOrgDto(org));
-			} catch (err) {
-				log(`platform org list failed for ${org.id}: ${String(err?.message ?? err)}`);
-				orgs.push({
-					id: org.id,
-					slug: org.slug,
-					name: org.name,
-					status: org.status,
-					createdAt: org.createdAt,
-					userCount: 0,
-					deviceCount: 0,
-					adminEmail: null,
-					adminStatus: null,
-				});
-			}
-		}
+		for (const org of listOrganizations()) orgs.push(platformOrgSummary(org));
 		return sendJson(res, 200, { orgs });
 	}
 
@@ -1457,6 +1538,33 @@ async function handlePlatformRoute(req, res, pathname) {
 			}
 			throw err;
 		}
+	}
+
+	const orgMatch = pathname.match(/^\/api\/platform\/orgs\/([^/]+)$/);
+	if (orgMatch && (req.method === "PATCH" || req.method === "DELETE")) {
+		const org = getOrganization(orgMatch[1]);
+		if (!org) return sendJson(res, 404, { error: "not_found" });
+		if (org.id === DEFAULT_ORG_ID) return sendJson(res, 409, { error: "default_org_protected" });
+		// A bodyless DELETE/PATCH is a missing field (422), not a wrong media type.
+		const body = req.headers["content-type"] ? await readJson(req, res) : {};
+		if (!body) return true;
+		if (req.method === "PATCH") {
+			const v = validate("platform.org.status", body);
+			if (!v.ok) return sendJson(res, 422, { errors: v.errors });
+			const result = setOrganizationStatus(org.id, v.value.status, { actor: actor.id });
+			if (!result) return sendJson(res, 404, { error: "not_found" });
+			return sendJson(res, 200, { org: platformOrgSummary(result.org) });
+		}
+		const v = validate("platform.org.delete", body);
+		if (!v.ok) return sendJson(res, 422, { errors: v.errors });
+		if (v.value.confirm_slug !== org.slug) {
+			return sendJson(res, 422, {
+				errors: [
+					{ field: "confirm_slug", code: "confirm_slug_mismatch", message: "must match the organization slug" },
+				],
+			});
+		}
+		return sendJson(res, 200, { deleted: deletePlatformOrganization(org, actor.id) });
 	}
 
 	const adminInvite = pathname.match(/^\/api\/platform\/orgs\/([^/]+)\/admin-invite$/);
@@ -2619,12 +2727,36 @@ function authenticatedDevice(req) {
 	return authenticateDevice({ deviceId: credential.deviceId, secretHash: hashToken(credential.secret) });
 }
 
+/** Paths a disabled org's session may still call: leave, or switch to another active org. */
+const DISABLED_ORG_EXEMPT = new Set(["POST /api/auth/logout", "POST /api/auth/select-org"]);
+
+/**
+ * Resolve the organization from the authenticated principal, then refuse orgs
+ * that are gone (401) or disabled (403 `org_disabled`). Superusers resolve to
+ * the default org, which can be neither, so they are never blocked.
+ * Returns null when this function already wrote the response.
+ */
+async function resolveRequestOrg(req, res, pathname) {
+	const orgId = await resolvePrincipalOrg(req, res, pathname);
+	if (orgId == null || orgId === DEFAULT_ORG_ID) return orgId;
+	const org = getOrganization(orgId);
+	if (!org) {
+		sendJson(res, 401, { error: "unauthorized" });
+		return null;
+	}
+	if (org.status === "disabled" && !DISABLED_ORG_EXEMPT.has(`${req.method} ${pathname}`)) {
+		sendJson(res, 403, { error: "org_disabled" });
+		return null;
+	}
+	return orgId;
+}
+
 /**
  * Resolve the organization from the authenticated principal — never from the
  * body org field or Host header. Unknown principals get 401 without naming orgs.
  * Returns null when this function already wrote the response.
  */
-async function resolveRequestOrg(req, res, pathname) {
+async function resolvePrincipalOrg(req, res, pathname) {
 	// Login / setup / reset carry the org in the control-plane directories even
 	// when TARGET_MULTI_ORG is off — otherwise a newly provisioned org's first
 	// admin cannot complete invite setup (the request would wrap "default").
@@ -3126,6 +3258,13 @@ async function handleCatalogRoute(req, res, pathname) {
 	return sendJson(res, 404, { error: "not_found" });
 }
 
+/** A request that raced an org delete gets 401, never a 500 or a re-created DB file. */
+function sendOrgGoneError(res, err) {
+	if (err?.code !== "org_deleted" && err?.code !== "unknown_organization") return false;
+	if (!res.headersSent) sendJson(res, 401, { error: "unauthorized" });
+	return true;
+}
+
 const server = createServer(async (req, res) => {
 	try {
 		const url = new URL(req.url, `http://${req.headers.host ?? HOST}`);
@@ -3238,11 +3377,13 @@ const server = createServer(async (req, res) => {
 		if (req.method === "GET") return void (await serveStatic(res, pathname));
 		sendJson(res, 405, { error: "method not allowed" });
 	} catch (err) {
+		if (sendOrgGoneError(res, err)) return;
 		log(`request error: ${String(err)}`);
 		if (!res.headersSent) sendJson(res, 500, { error: "internal error" });
 	}
 		});
 	} catch (err) {
+		if (sendOrgGoneError(res, err)) return;
 		log(`request error: ${String(err)}`);
 		if (!res.headersSent) sendJson(res, 500, { error: "internal error" });
 	}

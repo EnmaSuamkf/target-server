@@ -106,6 +106,17 @@ API (Superuser only; everyone else `403`):
 - `GET /api/platform/orgs` → `{ orgs: [{ id, slug, name, status, createdAt, userCount, deviceCount, … }] }`
 - `POST /api/platform/orgs` `{ name, slug, admin_email, activation? }` → `201`
 - `POST /api/platform/orgs/:id/admin-invite` resends while pending (`409` once active)
+- `PATCH /api/platform/orgs/:id` `{ "status": "active" | "disabled" }` → `200 { org }`
+  (same shape as a `GET` row). `404` unknown id; `409 { error: "default_org_protected" }`
+  for `default`; `422 { errors }` for any other body. Audit `organization.disabled` /
+  `organization.enabled` (only when the status actually changes).
+- `DELETE /api/platform/orgs/:id` `{ "confirm_slug": "<slug>" }` →
+  `200 { deleted: { id, slug, name, userCount, deviceCount, archivedTo: [paths] } }`.
+  `404` unknown id; `409 { error: "default_org_protected" }` for `default`; `422`
+  with `errors: [{ field: "confirm_slug", code: "confirm_slug_mismatch", … }]` when the
+  typed slug does not match (or is missing). Audit `organization.deleted` with the same
+  detail as the response. Effects are described in
+  [Disabling and deleting an organization](#disabling-and-deleting-an-organization).
 
 The first Admin completes `/setup` (or Google). If that email already has a
 password on another org, the new membership is activated with the **same**
@@ -115,6 +126,43 @@ shows an org picker and the top bar can switch session org.
 
 `admin@admin.com` (Organization Admin of `default`) never sees **Create
 organization**. Only a Superuser session does.
+
+## Disabling and deleting an organization
+
+Superuser only, from the **Organizations** tab (per-row **Disable** / **Enable** and
+**Delete**) or the API above. The `default` organization (it holds
+`admin@admin.com` and `TARGET_SERVER_DB`) can be neither disabled nor deleted.
+
+**Disable** sets `organizations.status = 'disabled'`; nothing is removed.
+
+- Every request the server resolves to that org gets `403 { error: "org_disabled" }`:
+  existing sessions, `/api/auth/me`, setup / reset links, and hub device credentials
+  (ingest and sync). Superuser requests are never blocked.
+- Login into it is refused (`403 org_disabled` when it is the email's only org). A
+  member of several orgs signs in to the remaining active ones; the org picker and
+  `user.organizations` never offer a disabled org, and `select-org` into it is `403`.
+- **Enable** restores access with no data loss. Existing sessions work again.
+
+**Delete** requires typing the slug (`confirm_slug`). It is not a hard delete:
+
+1. One `BEGIN IMMEDIATE` control-plane transaction removes, in order, the org's
+   `token_directory` rows (pending invite / reset links become invalid, `4xx`),
+   `device_link_requests`, `device_directory` (its hubs get `401`), `user_directory`
+   memberships (its sessions get `401`, never `500`), `identities` that are left with
+   no membership and are not a Superuser, and finally the `organizations` row.
+   Members of other orgs keep those memberships and credentials.
+2. The org DB path is retired in-process so no in-flight request can re-create an
+   empty `org-<slug>.db`, and its handle is closed.
+3. `org-<slug>.db` (plus `-wal` / `-shm` when present) is **moved** to
+   `deleted-orgs/` next to `TARGET_SERVER_DB`, named
+   `org-<slug>-<YYYYMMDDTHHMMSSZ>.db[-wal|-shm]` (UTC). `TARGET_SERVER_DB` and
+   `control.db` are never touched.
+4. `platform_audit` gets `organization.deleted`; earlier audit rows are kept.
+
+The slug is free again immediately: creating an org with it provisions a fresh DB.
+To bring a deleted org back, restore the archived file to `org-<slug>.db` **and**
+recreate its `organizations` row and directory entries (see Operations); deleting
+the archive in `deleted-orgs/` is a manual, deliberate step.
 
 ## Memberships (one identity, many orgs)
 
@@ -193,6 +241,7 @@ legacy client, and a pre-change JWT.
 - Control plane: `TARGET_CONTROL_DB` (or `control.db`).
 - Default org: `TARGET_SERVER_DB`.
 - Other orgs: `org-<slug>.db` (and `-wal` / `-shm` if present) next to it.
+- Deleted orgs: archived files in `deleted-orgs/` next to `TARGET_SERVER_DB`.
 
 Restore an org file only together with the matching `organizations` row and
 directory entries, or the process will not route users/devices to it.
@@ -208,7 +257,7 @@ create an org from the Superuser dashboard instead of a new Web Service.
 ## Limitations (out of scope for v1)
 
 - Superuser impersonation of an org Admin
-- Disable / export / delete an organization
+- Export an organization
 - Per-org quotas (users, devices, storage)
 - Superuser Activity / Users / Remote / Library UI (Organizations tab only)
 - Choosing the org from Host / subdomain (resolution is identity-only)

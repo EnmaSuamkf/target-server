@@ -416,6 +416,12 @@ export const BLUEPRINTS = {
 		admin_email: EMAIL,
 		activation: USER_CREATE_ACTIVATION.optional(),
 	}),
+	"platform.org.status": Joi.object({
+		status: Joi.string().valid("active", "disabled").required(),
+	}),
+	"platform.org.delete": Joi.object({
+		confirm_slug: Joi.string().trim().min(1).max(64).required(),
+	}),
 	"user.role": Joi.object({
 		role_id: Joi.string().trim().min(1).required(),
 	}),

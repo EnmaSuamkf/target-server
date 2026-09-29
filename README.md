@@ -102,7 +102,10 @@ permission id) bootstrapped with `TARGET_SUPERUSER_EMAIL`. See
 permission catalogue (grouped by server vs client scope), `{ user, catalog }`
 session payload, 401/403 semantics, role API and invitation flow. One process
 can host many isolated orgs ([`docs/multi-org.md`](docs/multi-org.md)); one
-operator email may belong to several orgs (memberships + org switch). Superuser
+operator email may belong to several orgs (memberships + org switch). A
+Superuser can disable, re-enable or delete (archive to `deleted-orgs/`) an org
+from the Organizations tab or `PATCH` / `DELETE /api/platform/orgs/:id`
+([`docs/multi-org.md`](docs/multi-org.md#disabling-and-deleting-an-organization)). Superuser
 emails stay exclusive. Client-scoped
 IDs use the `client.` prefix (for example `client.read`,
 `client.workflows.create`); older `remote.*` rows are remapped when the
