@@ -1,10 +1,18 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { fetchAuthProviders } from "../api/auth.ts";
-import { createPlatformOrg, listPlatformOrgs, resendPlatformAdminInvite } from "../api/platform.ts";
+import {
+	createPlatformOrg,
+	deletePlatformOrg,
+	listPlatformOrgs,
+	resendPlatformAdminInvite,
+	setPlatformOrgStatus,
+} from "../api/platform.ts";
 import type { FieldError, InviteLinks, PlatformOrg } from "../api/types.ts";
 import { timeAgo } from "../lib/format.ts";
 import { Field } from "./Field.tsx";
 import { Modal } from "./Modal.tsx";
+
+const DEFAULT_ORG_ID = "default";
 
 function fieldError(errors: FieldError[], field: string) {
 	return errors.find((e) => e.field === field || e.field.startsWith(`${field}.`))?.message;
@@ -22,8 +30,17 @@ export function OrganizationsPanel() {
 	const [googleAvailable, setGoogleAvailable] = useState(false);
 	const [errors, setErrors] = useState<FieldError[]>([]);
 	const [notice, setNotice] = useState<string | null>(null);
+	const [noticeError, setNoticeError] = useState(false);
 	const [busy, setBusy] = useState(false);
 	const [pendingInvites, setPendingInvites] = useState<Record<string, InviteLinks>>({});
+	const [confirmDelete, setConfirmDelete] = useState<{ org: PlatformOrg; typed: string } | null>(null);
+	const [deleteError, setDeleteError] = useState<string | null>(null);
+
+	/** Create/resend notices keep the "failed" → error styling; lifecycle actions pass `error` explicitly. */
+	function showNotice(text: string | null, error = text?.includes("failed") ?? false) {
+		setNotice(text);
+		setNoticeError(error);
+	}
 
 	const load = useCallback(async () => {
 		try {
@@ -71,7 +88,7 @@ export function OrganizationsPanel() {
 		}
 		setBusy(true);
 		setErrors([]);
-		setNotice(null);
+		showNotice(null);
 		try {
 			const res = await createPlatformOrg({
 				name,
@@ -84,7 +101,7 @@ export function OrganizationsPanel() {
 				return;
 			}
 			setPendingInvites((prev) => ({ ...prev, [res.org.id]: res.invite }));
-			setNotice(
+			showNotice(
 				res.mail.sent
 					? `Created ${res.org.name} — invitation sent to ${res.admin.email} (${res.mail.transport}).`
 					: `Created ${res.org.name} — email failed (${res.mail.error ?? "unknown"}). Copy the invite from the table.`,
@@ -101,20 +118,106 @@ export function OrganizationsPanel() {
 
 	async function onResend(org: PlatformOrg) {
 		setBusy(true);
-		setNotice(null);
+		showNotice(null);
 		try {
 			const res = await resendPlatformAdminInvite(org.id);
 			if (!res.ok) {
-				setNotice(res.error === "already_activated" ? "That admin has already activated." : "Could not resend invite.");
+				showNotice(res.error === "already_activated" ? "That admin has already activated." : "Could not resend invite.");
 				return;
 			}
 			setPendingInvites((prev) => ({ ...prev, [org.id]: res.invite }));
-			setNotice(
+			showNotice(
 				res.mail.sent
 					? `Invitation resent to ${res.admin.email}.`
 					: `Resend failed — copy the link below for ${res.admin.email}.`,
 			);
 			await load();
+		} finally {
+			setBusy(false);
+		}
+	}
+
+	async function onToggleStatus(org: PlatformOrg) {
+		const next = org.status === "disabled" ? "active" : "disabled";
+		setBusy(true);
+		showNotice(null);
+		try {
+			const res = await setPlatformOrgStatus(org.id, next);
+			if (!res.ok) {
+				showNotice(
+					res.error === "default_org_protected"
+						? "The default organization cannot be disabled."
+						: res.error === "not_found"
+							? `${org.name} no longer exists.`
+							: `Could not change the status of ${org.name}.`,
+					true,
+				);
+				await load();
+				return;
+			}
+			showNotice(
+				next === "disabled"
+					? `Disabled ${res.org.name} — its users and hubs are refused until it is enabled again.`
+					: `Enabled ${res.org.name} — access restored.`,
+				false,
+			);
+			await load();
+		} catch (e) {
+			showNotice(`Could not change the status of ${org.name}: ${e instanceof Error ? e.message : String(e)}`, true);
+		} finally {
+			setBusy(false);
+		}
+	}
+
+	function openDelete(org: PlatformOrg) {
+		showNotice(null);
+		setDeleteError(null);
+		setConfirmDelete({ org, typed: "" });
+	}
+
+	function closeDelete() {
+		setConfirmDelete(null);
+		setDeleteError(null);
+	}
+
+	async function onDelete() {
+		if (!confirmDelete || confirmDelete.typed !== confirmDelete.org.slug) return;
+		const { org, typed } = confirmDelete;
+		setBusy(true);
+		setDeleteError(null);
+		try {
+			const res = await deletePlatformOrg(org.id, typed);
+			if (!res.ok) {
+				if (res.error === "invalid") {
+					setDeleteError(fieldError(res.errors, "confirm_slug") ?? "The slug does not match.");
+					return;
+				}
+				closeDelete();
+				showNotice(
+					res.error === "default_org_protected"
+						? "The default organization cannot be deleted."
+						: `${org.name} no longer exists.`,
+					true,
+				);
+				await load();
+				return;
+			}
+			closeDelete();
+			setPendingInvites((prev) => {
+				const rest = { ...prev };
+				delete rest[org.id];
+				return rest;
+			});
+			const archived = res.deleted.archivedTo;
+			showNotice(
+				archived.length > 0
+					? `Deleted ${res.deleted.name}. Files archived to ${archived.join(", ")}.`
+					: `Deleted ${res.deleted.name}. No database files were found to archive.`,
+				false,
+			);
+			await load();
+		} catch (e) {
+			setDeleteError(e instanceof Error ? e.message : String(e));
 		} finally {
 			setBusy(false);
 		}
@@ -131,7 +234,7 @@ export function OrganizationsPanel() {
 					Create organization
 				</button>
 			</div>
-			{notice ? <div className={notice.includes("failed") ? "err" : "panel-note"}>{notice}</div> : null}
+			{notice ? <div className={noticeError ? "err" : "panel-note"}>{notice}</div> : null}
 			{loadError ? <div className="err">{`Could not load organizations: ${loadError}`}</div> : null}
 			{!orgs && !loadError ? (
 				<div className="empty">Loading organizations…</div>
@@ -156,7 +259,17 @@ export function OrganizationsPanel() {
 							const pending = org.adminStatus === "pending";
 							return (
 								<tr key={org.id}>
-									<td>{org.name}</td>
+									<td>
+										{org.name}
+										{org.status === "disabled" ? (
+											<>
+												{" "}
+												<span className="badge badge--danger" title="Users and hubs of this organization are refused">
+													Disabled
+												</span>
+											</>
+										) : null}
+									</td>
 									<td className="mono">{org.slug}</td>
 									<td>{org.userCount}</td>
 									<td>{org.deviceCount}</td>
@@ -175,6 +288,26 @@ export function OrganizationsPanel() {
 											<button type="button" className="btn btn--sm" disabled={busy} onClick={() => void onResend(org)}>
 												Resend invite
 											</button>
+										) : null}
+										{org.id !== DEFAULT_ORG_ID ? (
+											<>
+												<button
+													type="button"
+													className="btn btn--sm"
+													disabled={busy}
+													onClick={() => void onToggleStatus(org)}
+												>
+													{org.status === "disabled" ? "Enable" : "Disable"}
+												</button>
+												<button
+													type="button"
+													className="btn btn--sm btn--danger"
+													disabled={busy}
+													onClick={() => openDelete(org)}
+												>
+													Delete
+												</button>
+											</>
 										) : null}
 									</td>
 								</tr>
@@ -274,6 +407,70 @@ export function OrganizationsPanel() {
 						<p className="hint">Google sign-in is not configured on this server — password setup only.</p>
 					) : null}
 				</form>
+			</Modal>
+
+			<Modal
+				open={confirmDelete !== null}
+				title="Delete organization"
+				description="Users lose access; files are archived to deleted-orgs/"
+				onClose={closeDelete}
+				footer={
+					<>
+						<button type="button" className="btn btn--ghost" onClick={closeDelete} disabled={busy}>
+							Cancel
+						</button>
+						<button
+							type="submit"
+							form="delete-org-form"
+							className="btn btn--danger"
+							disabled={busy || !confirmDelete || confirmDelete.typed !== confirmDelete.org.slug}
+						>
+							Delete organization
+						</button>
+					</>
+				}
+			>
+				{confirmDelete ? (
+					<form
+						id="delete-org-form"
+						className="orgs-delete"
+						onSubmit={(e) => {
+							e.preventDefault();
+							void onDelete();
+						}}
+					>
+						<dl className="orgs-delete-summary">
+							<dt>Name</dt>
+							<dd>{confirmDelete.org.name}</dd>
+							<dt>Slug</dt>
+							<dd className="mono">{confirmDelete.org.slug}</dd>
+							<dt>Users</dt>
+							<dd>{confirmDelete.org.userCount}</dd>
+							<dt>Hubs</dt>
+							<dd>{confirmDelete.org.deviceCount}</dd>
+						</dl>
+						<p className="msg msg--error" role="alert">
+							Users lose access; files are archived to deleted-orgs/. Sessions, invitations and linked hubs of
+							this organization stop working immediately.
+						</p>
+						<Field
+							label={`Type ${confirmDelete.org.slug} to confirm`}
+							required
+							{...(deleteError ? { error: deleteError } : {})}
+						>
+							{(props) => (
+								<input
+									{...props}
+									className="input mono"
+									autoComplete="off"
+									spellCheck={false}
+									value={confirmDelete.typed}
+									onChange={(e) => setConfirmDelete({ ...confirmDelete, typed: e.target.value })}
+								/>
+							)}
+						</Field>
+					</form>
+				) : null}
 			</Modal>
 		</div>
 	);

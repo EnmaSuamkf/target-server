@@ -264,6 +264,69 @@ export function createOrganization({
 	return getOrganization(id);
 }
 
+export const ORGANIZATION_STATUSES = Object.freeze(["active", "disabled"]);
+
+export function isOrganizationDisabled(orgOrId) {
+	const org = typeof orgOrId === "string" ? getOrganization(orgOrId) : orgOrId;
+	return org?.status === "disabled";
+}
+
+/** Set `active` / `disabled`. Audits only a real change. Returns `{ org, changed }` or null for an unknown id. */
+export function setOrganizationStatus(id, status, { actor = null } = {}) {
+	if (!ORGANIZATION_STATUSES.includes(status)) throw controlError("invalid_status", `invalid organization status: ${status}`);
+	if (id === DEFAULT_ORG_ID) throw controlError("default_org_protected", "the default organization cannot change status");
+	const org = getOrganization(id);
+	if (!org) return null;
+	if (org.status === status) return { org, changed: false };
+	openControlDb().prepare("UPDATE organizations SET status = ? WHERE id = ?").run(status, id);
+	writePlatformAudit({
+		actor: actor ?? "system",
+		action: status === "disabled" ? "organization.disabled" : "organization.enabled",
+		detail: { id, slug: org.slug, from: org.status, to: status },
+	});
+	return { org: getOrganization(id), changed: true };
+}
+
+/**
+ * Remove every control-plane row that points at `id`, then the organization row,
+ * in one IMMEDIATE transaction. Identities are dropped only when the email has
+ * no remaining membership and is not a Superuser. Foreign keys are not enforced
+ * on control.db, so this is the only thing keeping the directories consistent.
+ */
+export function deleteOrganizationCascade(id) {
+	if (id === DEFAULT_ORG_ID) throw controlError("default_org_protected", "the default organization cannot be deleted");
+	const database = openControlDb();
+	database.exec("BEGIN IMMEDIATE");
+	try {
+		const org = rowToOrganization(database.prepare("SELECT * FROM organizations WHERE id = ?").get(id));
+		if (!org) {
+			database.exec("ROLLBACK");
+			return null;
+		}
+		const emails = database
+			.prepare("SELECT DISTINCT email FROM user_directory WHERE org_id = ?")
+			.all(id)
+			.map((row) => row.email);
+		const tokens = database.prepare("DELETE FROM token_directory WHERE org_id = ?").run(id).changes;
+		const linkRequests = database.prepare("DELETE FROM device_link_requests WHERE org_id = ?").run(id).changes;
+		const devices = database.prepare("DELETE FROM device_directory WHERE org_id = ?").run(id).changes;
+		const memberships = database.prepare("DELETE FROM user_directory WHERE org_id = ?").run(id).changes;
+		const identities = [];
+		for (const email of emails) {
+			const remaining = database.prepare("SELECT 1 FROM user_directory WHERE email = ? LIMIT 1").get(email);
+			if (remaining) continue;
+			if (database.prepare("SELECT 1 FROM superusers WHERE email = ?").get(email)) continue;
+			if (database.prepare("DELETE FROM identities WHERE email = ?").run(email).changes > 0) identities.push(email);
+		}
+		database.prepare("DELETE FROM organizations WHERE id = ?").run(id);
+		database.exec("COMMIT");
+		return { org, removed: { tokens, linkRequests, devices, memberships, identities } };
+	} catch (err) {
+		if (database.isTransaction) database.exec("ROLLBACK");
+		throw err;
+	}
+}
+
 export function ensureDefaultOrganization({ dbPath = defaultOrgDbPath(), name = "Default" } = {}) {
 	const existing = getOrganization(DEFAULT_ORG_ID);
 	if (existing) return existing;
@@ -390,11 +453,20 @@ export function bumpIdentityTokenVersion(email) {
 	return getIdentityByEmail(email);
 }
 
+/** Memberships whose organization still exists and is not disabled. */
+export function listActiveMembershipsByEmail(email) {
+	return listMembershipsByEmail(email).filter((m) => {
+		const org = getOrganization(m.orgId);
+		return Boolean(org) && org.status !== "disabled";
+	});
+}
+
+/** Org picker entries: disabled or missing organizations are never offered. */
 export function membershipOrgSummaries(email) {
 	const out = [];
 	for (const m of listMembershipsByEmail(email)) {
 		const org = getOrganization(m.orgId);
-		if (org) out.push({ id: org.id, slug: org.slug, name: org.name });
+		if (org && org.status !== "disabled") out.push({ id: org.id, slug: org.slug, name: org.name });
 	}
 	return out;
 }

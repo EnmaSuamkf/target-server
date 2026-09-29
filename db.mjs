@@ -12,6 +12,7 @@
  */
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomBytes, randomUUID, scryptSync } from "node:crypto";
+import { resolve as resolvePath } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { validateCommand } from "./blueprint.mjs";
 import {
@@ -58,6 +59,28 @@ const orgContext = new AsyncLocalStorage();
 let processDefaultOrg = null;
 /** LRU registry of open org SQLite handles, newest at the end. */
 const orgDbs = new Map();
+/** Resolved paths of deleted organizations' DB files. Opening one would re-create an empty DB. */
+const retiredOrgDbPaths = new Set();
+
+function orgDbError(code, message) {
+	const err = new Error(message);
+	err.code = code;
+	return err;
+}
+
+/** Refuse any further open of `dbPath` (org deleted; files are being archived). */
+export function retireOrgDbPath(dbPath) {
+	retiredOrgDbPaths.add(resolvePath(dbPath));
+}
+
+/** Allow `dbPath` again, e.g. a new org reusing a deleted org's slug. */
+export function unretireOrgDbPath(dbPath) {
+	retiredOrgDbPaths.delete(resolvePath(dbPath));
+}
+
+export function isOrgDbPathRetired(dbPath) {
+	return retiredOrgDbPaths.has(resolvePath(dbPath));
+}
 
 /**
  * Presentation groups for the closed RBAC catalogue. Session/UI code should
@@ -236,7 +259,7 @@ export function currentOrgId() {
 export function runWithOrg(orgId, fn, opts = {}) {
 	const listed = getOrganization(orgId);
 	const dbPath = opts.dbPath ?? listed?.dbPath ?? (orgId === DEFAULT_ORG_ID ? defaultOrgDbPath() : null);
-	if (!dbPath) throw new Error(`unknown_organization: ${orgId}`);
+	if (!dbPath) throw orgDbError("unknown_organization", `unknown_organization: ${orgId}`);
 	return orgContext.run({ orgId, dbPath }, fn);
 }
 
@@ -308,6 +331,10 @@ function touchOrgDb(orgId, entry) {
 }
 
 function getOrOpenOrgDb(orgId, dbPath) {
+	if (isOrgDbPathRetired(dbPath)) {
+		closeOrgDb(orgId);
+		throw orgDbError("org_deleted", `org_deleted: ${orgId}`);
+	}
 	const existing = orgDbs.get(orgId);
 	if (existing) {
 		touchOrgDb(orgId, existing);

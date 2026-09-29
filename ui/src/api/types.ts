@@ -306,16 +306,28 @@ export interface FieldError {
 }
 
 /** Superuser control-plane organization (`GET /api/platform/orgs`). */
+export type PlatformOrgStatus = "active" | "disabled";
+
 export interface PlatformOrg {
 	id: string;
 	slug: string;
 	name: string;
-	status: string;
+	status: PlatformOrgStatus;
 	createdAt: string;
 	userCount: number;
 	deviceCount: number;
 	adminEmail?: string | null;
 	adminStatus?: "pending" | "active" | null;
+}
+
+/** `DELETE /api/platform/orgs/:id` result: counts taken before delete, plus where the DB files went. */
+export interface DeletedPlatformOrg {
+	id: string;
+	slug: string;
+	name: string;
+	userCount: number;
+	deviceCount: number;
+	archivedTo: string[];
 }
 
 /** Sync client registered for remote control (`GET /api/sync/clients`). */
