@@ -70,6 +70,20 @@ test("Agent Resources tab is gated on server catalog read permissions", () => {
 	assert.doesNotMatch(panel, />Library</);
 });
 
+test("superuser dashboard shows an Organizations tab with a create form", () => {
+	const app = read("../ui/src/App.tsx");
+	assert.match(app, /user\.superuser/);
+	assert.match(app, /OrganizationsPanel/);
+	assert.match(app, />\s*Organizations\s*</);
+	const panel = read("../ui/src/components/OrganizationsPanel.tsx");
+	assert.match(panel, /Create organization/);
+	assert.match(panel, /admin_email/);
+	assert.match(panel, /Resend invite/);
+	assert.match(panel, /Password setup link/);
+	assert.match(panel, /<Modal/);
+	assert.match(panel, /<Field/);
+});
+
 test("remote resources expose independent create/edit/delete/import/export actions", () => {
 	const source = read("../ui/src/components/RemoteResourcesPanel.tsx");
 	assert.match(source, /exportRemoteResources/);

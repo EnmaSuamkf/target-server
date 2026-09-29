@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { fetchAuthProviders, forgotPassword, login } from "../api/auth.ts";
+import { fetchAuthProviders, fetchOrgChoices, forgotPassword, login, selectOrg } from "../api/auth.ts";
 import type { AuthSession, FieldError } from "../api/types.ts";
 import { TargetMark } from "./TargetMark.tsx";
 
@@ -54,14 +54,24 @@ export function LoginPage({ onSuccess }: { onSuccess: (session: AuthSession) => 
 	const [busy, setBusy] = useState(false);
 	const [googleEnabled, setGoogleEnabled] = useState(false);
 	const [oauthError, setOauthError] = useState<string | null>(null);
+	const [orgPick, setOrgPick] = useState<{
+		token?: string;
+		organizations: { id: string; slug: string; name: string }[];
+	} | null>(null);
 
 	useEffect(() => {
 		const params = new URLSearchParams(location.search);
 		const authError = params.get("auth_error");
 		setOauthError(oauthErrorMessage(authError));
-		if (authError) {
+		if (params.get("choose_org") === "1") {
+			void fetchOrgChoices().then((choices) => {
+				if (choices?.organizations.length) setOrgPick({ organizations: choices.organizations });
+			});
+		}
+		if (authError || params.get("choose_org")) {
 			const url = new URL(location.href);
 			url.searchParams.delete("auth_error");
+			url.searchParams.delete("choose_org");
 			const next = `${url.pathname}${url.search}${url.hash}`;
 			history.replaceState(null, "", next);
 		}
@@ -90,6 +100,27 @@ export function LoginPage({ onSuccess }: { onSuccess: (session: AuthSession) => 
 				else setBadCreds(true);
 				return;
 			}
+			if ("selectOrg" in res && res.selectOrg) {
+				setOrgPick({ token: res.selectToken, organizations: res.organizations });
+				return;
+			}
+			onSuccess({ user: res.user, catalog: res.catalog ?? { groups: [] } });
+		} finally {
+			setBusy(false);
+		}
+	}
+
+	async function onPickOrg(orgId: string) {
+		if (!orgPick) return;
+		setBusy(true);
+		setErrors([]);
+		setBadCreds(false);
+		try {
+			const res = await selectOrg(orgId, orgPick.token);
+			if (!res.ok) {
+				setBadCreds(true);
+				return;
+			}
 			onSuccess({ user: res.user, catalog: res.catalog ?? { groups: [] } });
 		} finally {
 			setBusy(false);
@@ -107,7 +138,23 @@ export function LoginPage({ onSuccess }: { onSuccess: (session: AuthSession) => 
 					<p className="auth-muted">Report dashboard</p>
 				</div>
 
-				{mode === "sent" ? (
+				{orgPick ? (
+					<div className="auth-form">
+						<p className="auth-muted">Choose an organization</p>
+						{orgPick.organizations.map((org) => (
+							<button
+								key={org.id}
+								type="button"
+								className="btn btn--on auth-submit"
+								disabled={busy}
+								onClick={() => void onPickOrg(org.id)}
+							>
+								{org.name}
+								<span className="auth-muted"> ({org.slug})</span>
+							</button>
+						))}
+					</div>
+				) : mode === "sent" ? (
 					<div className="auth-message">
 						<p>If that address has an account, a reset link is on its way.</p>
 						<button type="button" className="btn btn--ghost" onClick={() => setMode("login")}>

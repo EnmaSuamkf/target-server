@@ -38,7 +38,7 @@ legacy.close();
 
 process.env.TARGET_SERVER_DB = dbPath;
 const db = await import("../db.mjs");
-db.open();
+db.open(dbPath);
 
 const hash = (value) => createHash("sha256").update(value).digest("hex");
 const future = "2026-12-31T00:00:00.000Z";

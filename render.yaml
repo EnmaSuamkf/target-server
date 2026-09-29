@@ -34,12 +34,18 @@ services:
         value: "1"
       - key: TARGET_SERVER_DB
         value: /var/data/target-server.db
+      - key: TARGET_CONTROL_DB
+        value: /var/data/control.db
+      # Leave at 0 until hubs are device-linked. TARGET_MULTI_ORG=1 requires
+      # TARGET_DEVICE_LINKING_MODE=required and rejects unlinked ingest/sync.
+      - key: TARGET_MULTI_ORG
+        value: "0"
       - key: TARGET_SMTP_URL
         sync: false
-      - key: TARGET_USE_PUBLISHED_ADMIN
-        value: "1"
+      - key: TARGET_SUPERUSER_EMAIL
+        sync: false
       - key: TARGET_SEED_ADMIN_PASSWORD
-        value: password-target-server
+        sync: false
       - key: TARGET_AUTH_SECRET
         sync: false
       - key: TARGET_INGEST_TOKEN

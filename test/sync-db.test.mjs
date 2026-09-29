@@ -31,9 +31,9 @@ const {
 	nextRemoteStepKey,
 	updateRemoteWorkflowStatus,
 } = await import("../db.mjs");
+open(tmpDb);
 
 test("sync layer: insert client, enqueue command, claim and ack it", () => {
-	open();
 	const now = new Date().toISOString();
 
 	const client = upsertClient({

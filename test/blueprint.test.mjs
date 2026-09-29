@@ -23,7 +23,7 @@ test("blueprint password min length", () => {
 });
 
 test("blueprint stripUnknown drops injected role", () => {
-	const r = validate("user.create", { email: "someone@example.com", role: "superadmin" });
+	const r = validate("user.create", { email: "someone@example.com", role_id: "admin", role: "superadmin" });
 	assert.equal(r.ok, true);
 	assert.equal(r.value.role, undefined);
 });
@@ -31,6 +31,7 @@ test("blueprint stripUnknown drops injected role", () => {
 test("user.create activation requires at least one method", () => {
 	const r = validate("user.create", {
 		email: "someone@example.com",
+		role_id: "admin",
 		activation: { password: false, google: false },
 	});
 	assert.equal(r.ok, false);
@@ -40,11 +41,27 @@ test("user.create activation requires at least one method", () => {
 test("user.create activation accepts password only", () => {
 	const r = validate("user.create", {
 		email: "someone@example.com",
+		role_id: "admin",
 		activation: { password: true },
 	});
 	assert.equal(r.ok, true);
 	assert.equal(r.value.activation.password, true);
 	assert.equal(r.value.activation.google, false);
+});
+
+test("user.create requires role_id", () => {
+	const r = validate("user.create", { email: "someone@example.com" });
+	assert.equal(r.ok, false);
+	assert.ok(r.errors.some((e) => e.field === "role_id"));
+});
+
+test("platform.org.create requires kebab slug and admin_email", () => {
+	const bad = validate("platform.org.create", { name: "Acme", slug: "Not_Valid", admin_email: "a@example.com" });
+	assert.equal(bad.ok, false);
+	assert.ok(bad.errors.some((e) => e.field === "slug"));
+	const ok = validate("platform.org.create", { name: "Acme", slug: "acme-co", admin_email: "admin@acme.example.com" });
+	assert.equal(ok.ok, true);
+	assert.equal(ok.value.slug, "acme-co");
 });
 
 test("blueprint error shape", () => {

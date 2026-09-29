@@ -12,6 +12,7 @@ const tmpDb = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "target-server-not
 process.env.TARGET_SERVER_DB = tmpDb;
 
 const { open, insertEvent, upsertInstance, workflowDetail } = await import("../db.mjs");
+open(tmpDb);
 
 const WF = "wf-notes";
 const STEP = "step-1";

@@ -151,7 +151,7 @@ test("callback activates invited pending user without password", async () => {
 	const adminCookie = sessionCookieFromSetCookie(adminLogin.headers["set-cookie"]);
 	const createRes = await httpPostJson(
 		`${base}/api/auth/users`,
-		{ email: "google-invited@example.com" },
+		{ email: "google-invited@example.com", role_id: "admin" },
 		{ cookie: adminCookie },
 	);
 	assert.equal(createRes.status, 201);

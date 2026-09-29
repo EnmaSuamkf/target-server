@@ -402,7 +402,18 @@ const RESOURCE_SET_IMPORT = Joi.alternatives()
 export const BLUEPRINTS = {
 	"user.create": Joi.object({
 		email: EMAIL,
-		role_id: Joi.string().trim().min(1).optional(),
+		role_id: Joi.string().trim().min(1).required(),
+		activation: USER_CREATE_ACTIVATION.optional(),
+	}),
+	"platform.org.create": Joi.object({
+		name: Joi.string().trim().min(1).max(100).required(),
+		slug: Joi.string()
+			.trim()
+			.lowercase()
+			.pattern(/^[a-z0-9]+(?:-[a-z0-9]+)*$/)
+			.max(64)
+			.required(),
+		admin_email: EMAIL,
 		activation: USER_CREATE_ACTIVATION.optional(),
 	}),
 	"user.role": Joi.object({
@@ -416,7 +427,11 @@ export const BLUEPRINTS = {
 		name: Joi.string().trim().min(1).max(100).required(),
 		permissions: Joi.array().items(Joi.string().trim().min(1)).required(),
 	}),
-	"auth.login": Joi.object({ email: EMAIL, password: Joi.string().required() }),
+	"auth.login": Joi.object({ email: EMAIL, password: Joi.string().required() }).unknown(true),
+	"auth.selectOrg": Joi.object({
+		org_id: Joi.string().trim().min(1).required(),
+		token: Joi.string().trim().min(1).optional(),
+	}),
 	"auth.forgot": Joi.object({ email: EMAIL }),
 	"auth.passwordReset": Joi.object({
 		deliver: Joi.string().valid("email", "link").required(),

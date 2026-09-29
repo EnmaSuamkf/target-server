@@ -138,3 +138,16 @@ test("role API accepts the three client catalog sync permissions", async () => {
 		);
 	}
 });
+
+test("organization admin role cannot be edited or deleted", async () => {
+	const admin = await login(base);
+	const patch = await fetch(
+		`${base}/api/auth/roles/admin`,
+		json("PATCH", { name: "Changed", permissions: [] }, admin),
+	);
+	assert.equal(patch.status, 409);
+	assert.equal((await patch.json()).error, "system_role_protected");
+	const del = await fetch(`${base}/api/auth/roles/admin`, { method: "DELETE", headers: { cookie: admin } });
+	assert.equal(del.status, 409);
+	assert.equal((await del.json()).error, "system_role_protected");
+});

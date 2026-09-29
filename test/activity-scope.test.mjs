@@ -311,7 +311,7 @@ test("a database whose CHECK predates activity.read.own migrates and then accept
 	const script = `
 		process.env.TARGET_SERVER_DB = ${JSON.stringify(dbPath)};
 		const db = await import(${JSON.stringify(dbUrl)});
-		db.open();
+		db.open(process.env.TARGET_SERVER_DB);
 		const sql = db.open().prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'auth_role_permissions'").get().sql;
 		if (!sql.includes("'activity.read.own'")) throw new Error("CHECK was not widened");
 		const role = db.createRole({ name: "Migrated own", permissions: ["activity.read.own"] });
