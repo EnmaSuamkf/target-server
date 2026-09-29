@@ -139,22 +139,51 @@ Opening an older database remaps retired IDs without a separate upgrade step:
    `client.workflows.create`, `client.workflows.steps.add` and
    `client.workflows.steps.edit`.
 4. The system `admin` role is seeded with every current catalogue ID; unknown
-   admin rows are dropped.
-5. The SQLite `CHECK` on `auth_role_permissions.permission` is rebuilt so it
+   admin rows are dropped. The system `none` role is seeded with **zero**
+   permissions.
+5. Users whose `role` is NULL, empty, or points at a missing `auth_roles` id
+   (including pre-RBAC empty assignments, and rows whose role was deleted from
+   the database) are remapped to `none`. They keep their account and can still
+   sign in if they have a password; they receive no permissions. They are
+   **not** promoted to Organization Admin. Users already assigned `admin` stay
+   `admin`.
+6. The SQLite `CHECK` on `auth_role_permissions.permission` is rebuilt so it
    accepts the new IDs and rejects the retired `*.manage` and `remote.*`
    strings.
 
 The migration is additive and repeatable. Role create/update still rejects
 unknown IDs.
 
-## System administrator
+## Superuser vs Organization Admin
+
+These are different principals. Superuser is **not** a permission id and is
+**not** in `PERMISSIONS` / `PERMISSION_CATALOG`.
+
+| | Organization Admin | Superuser |
+| --- | --- | --- |
+| Where | Each org database: protected system role `admin` (`ADMIN_ROLE_ID`) | Control-plane `superusers` table (shared across orgs) |
+| Permissions | Auto-granted every org-scoped id in `PERMISSIONS` (current and future) | `permissions: []` — platform checks are hard-coded (`requireSuperuser`) |
+| Editable / deletable | No (`system_role_protected`) | Not a role; there is no catalogue grant to edit |
+| Last-admin guards | Per organization (each org has its own DB). Deleting or reassigning the last `admin` in org A does not affect org B | Not applicable |
+| Login | Identity, then one org or `POST /api/auth/select-org` | Same `POST /api/auth/login`: email is resolved in `superusers` **first** |
+| Session | `{ user: { id, email, role, permissions, org, organizations, … }, catalog }` | `{ user: { id, email, superuser: true, permissions: [], organizations: [] }, catalog }` so the UI can branch |
+| Bootstrap | Seeded org admin on an empty default org (see `TARGET_SEED_ADMIN_PASSWORD`) | `TARGET_SUPERUSER_EMAIL` creates a **pending** superuser (idempotent) and emails a one-time setup link. Never seeds a default superuser password. File-mail also logs the outbox copy path |
+
+`GET /api/platform/*` routes require a superuser. An Organization Admin calling
+them receives `403 { "error": "forbidden" }`.
+
+One server can host many isolated organizations (each with its own `admin`
+role and users). Superuser creates those orgs; see
+[`docs/multi-org.md`](multi-org.md).
+
+## System administrator (Organization Admin)
 
 Migration creates the protected role id `admin` (display name
-`Administrator`) and assigns every catalogue permission. Existing users are
-migrated to it, including legacy/empty assignments. This role cannot be edited
-or deleted.
+`Administrator`) and assigns every catalogue permission. The protected role
+`none` (display name `None`) has zero permissions; orphaned assignments land
+there instead of on `admin`. Neither system role can be edited or deleted.
 
-The server also prevents:
+The server also prevents, **inside that organization**:
 
 - deleting the last administrator, even when non-admin users remain;
 - assigning the last administrator to another role;
@@ -199,8 +228,8 @@ Invite example:
 }
 ```
 
-`role_id` must exist. Omitting it preserves backwards compatibility by assigning
-`admin`; the Users UI always sends the selected role explicitly.
+`role_id` is required and must exist. Omitting it returns `422` with a field
+error. The Users UI always sends the selected role explicitly.
 
 ## Session responses and denied access
 

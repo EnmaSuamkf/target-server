@@ -55,6 +55,18 @@ legacy
 	.run();
 legacy
 	.prepare(
+		`INSERT INTO auth_users (id, email, role, token_version, created_at)
+		 VALUES ('empty-role', 'empty@example.test', '', 1, '2026-01-01T00:00:00.000Z')`,
+	)
+	.run();
+legacy
+	.prepare(
+		`INSERT INTO auth_users (id, email, role, token_version, created_at)
+		 VALUES ('orphan-role', 'orphan@example.test', 'deleted-role', 1, '2026-01-01T00:00:00.000Z')`,
+	)
+	.run();
+legacy
+	.prepare(
 		`INSERT INTO auth_roles (id, name, is_system, created_at, updated_at)
 		 VALUES ('legacy-operator', 'Legacy Operator', 0, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
 	)
@@ -83,7 +95,7 @@ legacy.close();
 
 process.env.TARGET_SERVER_DB = dbPath;
 const rbac = await import("../db.mjs");
-rbac.open();
+rbac.open(dbPath);
 
 test("additive migration preserves legacy users and gives admin every catalogued permission", () => {
 	const user = rbac.getAuthUserById("legacy-admin");
@@ -94,6 +106,19 @@ test("additive migration preserves legacy users and gives admin every catalogued
 	assert.equal(admin.isSystem, true);
 	assert.deepEqual(admin.permissions, [...rbac.PERMISSIONS].sort());
 	assert.equal(rbac.countUsersByRole(rbac.ADMIN_ROLE_ID), 1);
+});
+
+test("orphaned and empty roles migrate to none, not admin", () => {
+	const empty = rbac.getAuthUserById("empty-role");
+	assert.equal(empty.role, rbac.NONE_ROLE_ID);
+	assert.deepEqual(rbac.getAuthUserPermissions(empty), []);
+	const orphan = rbac.getAuthUserById("orphan-role");
+	assert.equal(orphan.role, rbac.NONE_ROLE_ID);
+	assert.deepEqual(rbac.getAuthUserPermissions(orphan), []);
+	const none = rbac.getRoleById(rbac.NONE_ROLE_ID);
+	assert.equal(none.isSystem, true);
+	assert.deepEqual(none.permissions, []);
+	assert.equal(rbac.getAuthUserById("legacy-admin").role, rbac.ADMIN_ROLE_ID);
 });
 
 test("opening a pre-granular DB remaps old resource manage rows and grants workflow children", () => {
@@ -209,6 +234,14 @@ test("role functions reject unknown permissions and protect the system admin rol
 	);
 	assert.throws(
 		() => rbac.deleteRole(rbac.ADMIN_ROLE_ID),
+		(error) => error.code === "system_role_protected",
+	);
+	assert.throws(
+		() => rbac.updateRole(rbac.NONE_ROLE_ID, { name: "Changed", permissions: [] }),
+		(error) => error.code === "system_role_protected",
+	);
+	assert.throws(
+		() => rbac.deleteRole(rbac.NONE_ROLE_ID),
 		(error) => error.code === "system_role_protected",
 	);
 });

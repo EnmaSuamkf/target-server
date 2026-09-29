@@ -7,7 +7,7 @@
  */
 import { createServer } from "node:http";
 import { createHash, createPublicKey, randomUUID, verify } from "node:crypto";
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import * as path from "node:path";
@@ -20,10 +20,13 @@ import {
 	randomTokenBytes,
 	requireAuth,
 	requirePermission,
+	requireSuperuser,
 	signInUser,
 	userIsActive,
 	verifyPassword,
 	hashPassword,
+	readToken,
+	verifyJwt,
 } from "./auth.mjs";
 import {
 	buildGoogleAuthUrl,
@@ -45,6 +48,9 @@ import {
 	countAuthUsers,
 	createAuthUser,
 	createRole,
+	defaultOrgDbPath,
+	closeOrgDb,
+	closeOrgDbByPath,
 	deleteAuthUser,
 	deleteRole,
 	findResetToken,
@@ -54,6 +60,8 @@ import {
 	getAuthUserById,
 	getAuthUserInviteMethods,
 	getAuthUserPermissions,
+	getFirstAdminUser,
+	ADMIN_ROLE_ID,
 	invalidateResetTokens,
 	isPublishedRenderDeploy,
 	insertResetToken,
@@ -148,7 +156,41 @@ import {
 	consumeDeviceRequestNonce,
 	getPermissionCatalog,
 	listSyncableCatalog,
+	DEFAULT_ORG_ID,
+	currentOrgId,
+	runWithOrg,
+	backfillDefaultOrganization,
+	migrateAllOrgDatabases,
+	getJwtSecret,
+	isMultiOrg,
+	ensureIdentityCredentials,
 } from "./db.mjs";
+import {
+	assertMultiOrgDeviceLinkingMode,
+	bumpSuperuserTokenVersion,
+	ensurePendingSuperuser,
+	getControlLinkRequest,
+	getDeviceDirectory,
+	getIdentityByEmail,
+	getMembership,
+	getOrganization,
+	getOrganizationBySlug,
+	createOrganization,
+	getSuperuserByEmail,
+	getSuperuserById,
+	getTokenDirectory,
+	getUserDirectoryByOrgUser,
+	listMembershipsByEmail,
+	listOrganizations,
+	membershipOrgSummaries,
+	recordSuperuserLogin,
+	setSuperuserPassword,
+	upsertIdentity,
+	upsertTokenDirectory,
+	deleteTokenDirectory,
+	deleteTokenDirectoryForSubject,
+	upsertUserDirectory,
+} from "./control-plane.mjs";
 import { initMailer, isDeliveringTransport, mailTransportName, sendMail } from "./mailer.mjs";
 import { inviteMail, resetMail, withToken } from "./mail-templates.mjs";
 import { isLoopbackHost } from "./boot-guards.mjs";
@@ -164,7 +206,7 @@ const UI_SOURCES = ["src", "index.html", "vite.config.ts", "package.json"];
 const SKIP_STALE_CHECK = Boolean(process.env.TARGET_SKIP_UI_STALE_CHECK);
 const MAX_BODY_BYTES = 5 * 1024 * 1024;
 
-open();
+open(process.env.TARGET_SERVER_DB ?? "./target-server.db");
 
 function log(msg) {
 	console.log(`[target-server] ${msg}`);
@@ -188,16 +230,9 @@ async function assertBootGuards() {
 		log("WARNING: mail uses file outbox — set TARGET_SMTP_URL for delivered invitations on this host");
 	}
 	if (await adminHasDefaultPassword()) {
-		const explicitSeed = process.env.TARGET_SEED_ADMIN_PASSWORD?.trim();
-		if (explicitSeed === DEFAULT_ADMIN_PASSWORD || process.env.TARGET_USE_PUBLISHED_ADMIN === "1" || isPublishedRenderDeploy()) {
-			log(
-				"WARNING: admin@admin.com uses the published default password — TARGET_SEED_ADMIN_PASSWORD was explicitly set for this deployment",
-			);
-		} else {
-			throw new Error(
-				"admin@admin.com still has the published default password — set TARGET_SEED_ADMIN_PASSWORD before first boot on a public bind",
-			);
-		}
+		throw new Error(
+			"admin@admin.com still has the published default password — set TARGET_SEED_ADMIN_PASSWORD before first boot on a public bind",
+		);
 	}
 	if (!process.env.TARGET_AUTH_SECRET) {
 		log("WARNING: TARGET_AUTH_SECRET is not set — sessions depend on the DB-persisted secret");
@@ -207,9 +242,83 @@ async function assertBootGuards() {
 	}
 }
 
-function sendRedirect(res, location) {
-	res.writeHead(302, { location, "cache-control": "no-store" });
+function sendRedirect(res, location, extraHeaders = {}) {
+	res.writeHead(302, { location, "cache-control": "no-store", ...extraHeaders });
 	res.end();
+}
+
+const SELECT_COOKIE = "target_org_select";
+const SELECT_TTL_SEC = 15 * 60;
+
+function cookieSecureFlag() {
+	if (process.env.TARGET_AUTH_SECURE_COOKIE === "0") return false;
+	if (process.env.TARGET_AUTH_SECURE_COOKIE === "1") return true;
+	const pub = process.env.TARGET_PUBLIC_URL ?? process.env.RENDER_EXTERNAL_URL ?? "";
+	return pub.startsWith("https://");
+}
+
+function selectCookieHeader(raw, maxAge = SELECT_TTL_SEC) {
+	const flags = ["HttpOnly", "SameSite=Strict", "Path=/", `Max-Age=${maxAge}`];
+	if (cookieSecureFlag()) flags.push("Secure");
+	return `${SELECT_COOKIE}=${encodeURIComponent(raw)}; ${flags.join("; ")}`;
+}
+
+function setSelectCookie(res, raw) {
+	res.setHeader("Set-Cookie", selectCookieHeader(raw));
+}
+
+function clearSelectCookie(res) {
+	const flags = ["HttpOnly", "SameSite=Strict", "Path=/", "Max-Age=0"];
+	if (cookieSecureFlag()) flags.push("Secure");
+	const clearing = `${SELECT_COOKIE}=; ${flags.join("; ")}`;
+	const existing = res.getHeader("Set-Cookie");
+	if (!existing) res.setHeader("Set-Cookie", clearing);
+	else res.setHeader("Set-Cookie", [...(Array.isArray(existing) ? existing : [existing]), clearing]);
+}
+
+function readSelectCookie(req) {
+	const cookie = req.headers.cookie ?? "";
+	for (const part of cookie.split(";")) {
+		const [k, ...rest] = part.trim().split("=");
+		if (k === SELECT_COOKIE) return decodeURIComponent(rest.join("="));
+	}
+	return null;
+}
+
+function issueSelectOrgToken(email) {
+	deleteTokenDirectoryForSubject(null, email, "select_org");
+	const raw = randomTokenBytes().toString("hex");
+	const expiresAt = new Date(Date.now() + SELECT_TTL_SEC * 1000).toISOString();
+	upsertTokenDirectory({ tokenHash: hashToken(raw), orgId: null, subjectId: email, kind: "select_org", expiresAt });
+	return { raw, organizations: membershipOrgSummaries(email) };
+}
+
+function consumeSelectOrgToken(raw) {
+	if (!raw) return null;
+	const dir = getTokenDirectory(hashToken(raw));
+	if (!dir || dir.kind !== "select_org" || dir.expiresAt < new Date().toISOString()) return null;
+	return dir;
+}
+
+async function completeOrgSignIn(email, orgId, res) {
+	const membership = getMembership(email, orgId);
+	if (!membership) {
+		const err = new Error("forbidden");
+		err.code = "not_member";
+		throw err;
+	}
+	return runWithOrg(orgId, async () => {
+		const user = getAuthUserByEmail(email);
+		if (!user || !userIsActive(user)) {
+			const err = new Error("forbidden");
+			err.code = "not_member";
+			throw err;
+		}
+		recordLogin(user.id);
+		signInUser(user, res);
+		clearSelectCookie(res);
+		return userResponse(user);
+	});
 }
 
 function authOrigin() {
@@ -280,6 +389,11 @@ function readBody(req) {
 }
 
 async function readJson(req, res) {
+	if (req._jsonInvalid) {
+		sendJson(res, 400, { error: "invalid JSON" });
+		return null;
+	}
+	if (req._jsonParsed) return req._jsonBody;
 	const ct = req.headers["content-type"] ?? "";
 	if (!ct.includes("application/json")) {
 		sendJson(res, 415, { error: "content-type must be application/json" });
@@ -293,9 +407,37 @@ async function readJson(req, res) {
 		return null;
 	}
 	try {
-		return JSON.parse(raw || "{}");
+		const parsed = JSON.parse(raw || "{}");
+		req._jsonParsed = true;
+		req._jsonBody = parsed;
+		return parsed;
 	} catch {
 		sendJson(res, 400, { error: "invalid JSON" });
+		return null;
+	}
+}
+
+/** Parse JSON without sending a response, caching the body for a later `readJson`. */
+async function peekJson(req) {
+	if (req._jsonInvalid) return null;
+	if (req._jsonParsed) return req._jsonBody;
+	const ct = req.headers["content-type"] ?? "";
+	if (!ct.includes("application/json")) return undefined;
+	let raw;
+	try {
+		raw = await readBody(req);
+	} catch {
+		return undefined;
+	}
+	try {
+		const parsed = JSON.parse(raw || "{}");
+		req._jsonParsed = true;
+		req._jsonBody = parsed;
+		return parsed;
+	} catch {
+		req._jsonParsed = true;
+		req._jsonBody = null;
+		req._jsonInvalid = true;
 		return null;
 	}
 }
@@ -338,7 +480,7 @@ function ingestWorkflowOwnerAllows(existing, incomingOwner) {
 
 async function handleIngest(req, res) {
 	const device = authenticatedDevice(req);
-	if (DEVICE_LINKING_MODE === "required" && !device) return sendJson(res, 401, { error: "device_link_required" });
+	if ((DEVICE_LINKING_MODE === "required" || isMultiOrg()) && !device) return sendJson(res, 401, { error: "device_link_required" });
 	if (device && !device.scopes.includes("ingest:write")) return sendJson(res, 403, { error: "scope_forbidden" });
 	if (INGEST_TOKEN) {
 		const auth = req.headers.authorization ?? "";
@@ -530,10 +672,23 @@ async function serveStatic(res, urlPath) {
 }
 
 async function userResponse(user) {
+	if (user.superuser) {
+		return {
+			user: { id: user.id, email: user.email, superuser: true, permissions: [], organizations: [] },
+			catalog: getPermissionCatalog(),
+		};
+	}
 	const usesDefaultPassword =
 		user.email === DEFAULT_ADMIN_EMAIL && (await adminHasDefaultPassword());
+	const orgRow = getOrganization(currentOrgId());
+	const org = orgRow ? { id: orgRow.id, slug: orgRow.slug, name: orgRow.name } : null;
 	return {
-		user: { ...publicUser(user), usesDefaultPassword },
+		user: {
+			...publicUser(user),
+			usesDefaultPassword,
+			org,
+			organizations: membershipOrgSummaries(user.email),
+		},
 		catalog: getPermissionCatalog(),
 	};
 }
@@ -579,12 +734,13 @@ function resolveInviteActivationForCreate(activation) {
 	};
 }
 
-async function issueInvite(user) {
+async function issueInvite(user, { organizationName } = {}) {
 	sweepExpiredResets();
 	invalidateResetTokens(user.id, "invite");
 	const { allowPassword, allowGoogle } = getAuthUserInviteMethods(user);
 	const origin = publicUrl({ host: HOST, port: PORT }).replace(/\/$/, "");
 	const loginUrl = `${origin}/login`;
+	const orgName = organizationName ?? getOrganization(currentOrgId())?.name;
 
 	let raw = null;
 	let expiresAt = null;
@@ -604,6 +760,7 @@ async function issueInvite(user) {
 		allowGoogle,
 		setupUrl: allowPassword ? setupUrl : undefined,
 		loginUrl: allowGoogle ? loginUrl : undefined,
+		organizationName: orgName,
 	});
 	if (raw) mailBody = withToken(mailBody, raw);
 
@@ -649,6 +806,52 @@ async function issueReset(user, { deliver = "email" } = {}) {
 	return { reset, mail };
 }
 
+async function issueSuperuserToken(su, { kind, ttlMs, logLabel }) {
+	deleteTokenDirectoryForSubject(null, su.id, kind);
+	const raw = randomTokenBytes().toString("hex");
+	const tokenHash = hashToken(raw);
+	const expiresAt = new Date(Date.now() + ttlMs).toISOString();
+	upsertTokenDirectory({ tokenHash, orgId: null, subjectId: su.id, kind, expiresAt });
+	const origin = publicUrl({ host: HOST, port: PORT }).replace(/\/$/, "");
+	const path = kind === "invite" ? "/setup" : "/reset";
+	const url = `${origin}${path}?token=${raw}`;
+	const body =
+		kind === "invite"
+			? withToken(
+					inviteMail({
+						publicUrl: origin,
+						email: su.email,
+						allowPassword: true,
+						allowGoogle: false,
+						setupUrl: url,
+					}),
+					raw,
+				)
+			: withToken(resetMail({ publicUrl: origin, email: su.email }), raw);
+	let mail;
+	try {
+		mail = await sendMail({ to: su.email, ...body });
+	} catch (err) {
+		mail = { sent: false, transport: mailTransportName(), error: String(err?.message ?? err) };
+		log(`${logLabel} mail failed for ${su.email}: ${String(err?.message ?? err)}`);
+	}
+	log(`${logLabel}: ${url}`);
+	if (mail?.path) log(`${logLabel} mail: ${mail.path}`);
+	return { raw, url, expiresAt, mail };
+}
+
+async function bootstrapSuperuserFromEnv() {
+	const email = String(process.env.TARGET_SUPERUSER_EMAIL ?? "").trim();
+	if (!email) return;
+	const su = ensurePendingSuperuser(email);
+	if (!su) return;
+	if (su.passwordHash) {
+		log(`superuser ${su.email} already activated`);
+		return;
+	}
+	await issueSuperuserToken(su, { kind: "invite", ttlMs: 7 * 24 * 3600 * 1000, logLabel: "superuser setup" });
+}
+
 async function handleAuthRoute(req, res, pathname, url) {
 	const pubOpts = { host: HOST, port: PORT };
 
@@ -687,21 +890,37 @@ async function handleAuthRoute(req, res, pathname, url) {
 			return sendRedirect(res, loginRedirect({ auth_error: "oauth_failed" }));
 		}
 
-		const byEmail = getAuthUserByEmail(profile.email);
-		if (!byEmail) return sendRedirect(res, loginRedirect({ auth_error: "not_invited" }));
-
-		const bySub = getAuthUserByGoogleSub(profile.sub);
-		if (bySub && bySub.id !== byEmail.id) {
+		const memberships = listMembershipsByEmail(profile.email);
+		if (memberships.length === 0) return sendRedirect(res, loginRedirect({ auth_error: "not_invited" }));
+		const ident = getIdentityByEmail(profile.email);
+		if (ident?.googleSub && ident.googleSub !== profile.sub) {
 			return sendRedirect(res, loginRedirect({ auth_error: "oauth_failed" }));
 		}
-		if (byEmail.googleSub && byEmail.googleSub !== profile.sub) {
-			return sendRedirect(res, loginRedirect({ auth_error: "oauth_failed" }));
+		upsertIdentity({ email: profile.email, googleSub: profile.sub });
+		for (const m of memberships) {
+			const failed = runWithOrg(m.orgId, () => {
+				const byEmail = getAuthUserByEmail(profile.email);
+				if (!byEmail) return "not_invited";
+				const bySub = getAuthUserByGoogleSub(profile.sub);
+				if (bySub && bySub.id !== byEmail.id) return "oauth_failed";
+				if (byEmail.googleSub && byEmail.googleSub !== profile.sub) return "oauth_failed";
+				if (!byEmail.googleSub) activateAuthUserWithGoogle(byEmail.id, profile.sub);
+				return null;
+			});
+			if (failed) return sendRedirect(res, loginRedirect({ auth_error: failed }));
 		}
-
-		const active = byEmail.googleSub ? byEmail : activateAuthUserWithGoogle(byEmail.id, profile.sub);
-		recordLogin(active.id);
-		signInUser(active, res);
-		return sendRedirect(res, `${authOrigin()}/`);
+		if (memberships.length === 1) {
+			return runWithOrg(memberships[0].orgId, () => {
+				const active = getAuthUserByEmail(profile.email);
+				recordLogin(active.id);
+				signInUser(active, res);
+				return sendRedirect(res, `${authOrigin()}/`);
+			});
+		}
+		const issued = issueSelectOrgToken(profile.email);
+		return sendRedirect(res, `${authOrigin()}/login?choose_org=1`, {
+			"set-cookie": selectCookieHeader(issued.raw),
+		});
 	}
 
 	if (req.method === "POST" && pathname === "/api/auth/login") {
@@ -711,20 +930,69 @@ async function handleAuthRoute(req, res, pathname, url) {
 		if (!body) return;
 		const v = validate("auth.login", body);
 		if (!v.ok) return sendJson(res, 422, { errors: v.errors });
-		const user = getAuthUserByEmail(v.value.email);
-		const stored = user?.passwordHash ?? DUMMY_PASSWORD_HASH;
+		const su = getSuperuserByEmail(v.value.email);
+		if (su) {
+			const stored = su.passwordHash ?? DUMMY_PASSWORD_HASH;
+			const ok = await verifyPassword(v.value.password, stored);
+			if (!su.passwordHash || !ok) return sendJson(res, 401, { error: "invalid_credentials" });
+			recordSuperuserLogin(su.id);
+			const fresh = getSuperuserById(su.id);
+			signInUser(fresh, res);
+			return sendJson(res, 200, await userResponse(fresh));
+		}
+		const ident = ensureIdentityCredentials(v.value.email);
+		const stored = ident?.passwordHash ?? DUMMY_PASSWORD_HASH;
 		const ok = await verifyPassword(v.value.password, stored);
-		if (!user || !user.passwordHash || !ok) return sendJson(res, 401, { error: "invalid_credentials" });
-		recordLogin(user.id);
-		signInUser(user, res);
-		return sendJson(res, 200, await userResponse(user));
+		if (!ident?.passwordHash || !ok) return sendJson(res, 401, { error: "invalid_credentials" });
+		const memberships = listMembershipsByEmail(ident.email);
+		if (memberships.length === 0) return sendJson(res, 401, { error: "invalid_credentials" });
+		if (memberships.length === 1) {
+			const payload = await completeOrgSignIn(ident.email, memberships[0].orgId, res);
+			return sendJson(res, 200, payload);
+		}
+		const issued = issueSelectOrgToken(ident.email);
+		return sendJson(res, 200, { selectOrg: true, selectToken: issued.raw, organizations: issued.organizations });
+	}
+
+	if (req.method === "GET" && pathname === "/api/auth/org-choices") {
+		const raw = url.searchParams.get("token") || readSelectCookie(req);
+		const dir = consumeSelectOrgToken(raw);
+		if (!dir) return sendJson(res, 401, { error: "unauthorized" });
+		return sendJson(res, 200, { organizations: membershipOrgSummaries(dir.subjectId) });
+	}
+
+	if (req.method === "POST" && pathname === "/api/auth/select-org") {
+		const lim = checkRateLimit(req, "login");
+		if (lim.limited) return rateLimited(res, lim.retryAfter);
+		const body = await readJson(req, res);
+		if (!body) return;
+		const v = validate("auth.selectOrg", body);
+		if (!v.ok) return sendJson(res, 422, { errors: v.errors });
+		const raw = v.value.token || readSelectCookie(req);
+		const dir = consumeSelectOrgToken(raw);
+		let email = dir?.subjectId ?? null;
+		if (!email) {
+			const sessionUser = await authenticate(req, res);
+			if (!sessionUser || sessionUser.superuser) return sendJson(res, 401, { error: "unauthorized" });
+			email = sessionUser.email;
+		}
+		try {
+			const payload = await completeOrgSignIn(email, v.value.org_id, res);
+			if (raw) deleteTokenDirectory(hashToken(raw));
+			return sendJson(res, 200, payload);
+		} catch (err) {
+			if (err.code === "not_member") return sendJson(res, 403, { error: "forbidden" });
+			throw err;
+		}
 	}
 
 	if (req.method === "POST" && pathname === "/api/auth/logout") {
 		const user = await requireAuth(req, res);
 		if (!user) return;
-		bumpTokenVersion(user.id);
+		if (user.superuser) bumpSuperuserTokenVersion(user.id);
+		else bumpTokenVersion(user.id);
 		clearAuthCookie(res);
+		clearSelectCookie(res);
 		res.writeHead(204);
 		return res.end();
 	}
@@ -742,8 +1010,21 @@ async function handleAuthRoute(req, res, pathname, url) {
 		if (!body) return;
 		const v = validate("auth.forgot", body);
 		if (!v.ok) return sendJson(res, 422, { errors: v.errors });
-		const user = getAuthUserByEmail(v.value.email);
-		if (user?.passwordHash) await issueReset(user, { deliver: "email" });
+		const su = getSuperuserByEmail(v.value.email);
+		if (su?.passwordHash) {
+			await issueSuperuserToken(su, { kind: "reset", ttlMs: 3600 * 1000, logLabel: "superuser reset" });
+			return sendJson(res, 202, { ok: true });
+		}
+		const ident = ensureIdentityCredentials(v.value.email);
+		if (ident?.passwordHash) {
+			const memberships = listMembershipsByEmail(ident.email);
+			if (memberships[0]) {
+				await runWithOrg(memberships[0].orgId, async () => {
+					const user = getAuthUserByEmail(ident.email);
+					if (user?.passwordHash) await issueReset(user, { deliver: "email" });
+				});
+			}
+		}
 		return sendJson(res, 202, { ok: true });
 	}
 
@@ -753,6 +1034,16 @@ async function handleAuthRoute(req, res, pathname, url) {
 		if (lim.limited) return rateLimited(res, lim.retryAfter);
 		const user = await requireAuth(req, res);
 		if (!user) return;
+		if (user.superuser) {
+			if (!user.passwordHash) return sendJson(res, 409, { error: "no_password" });
+			const body = await readJson(req, res);
+			if (!body) return;
+			const v = validate("auth.passwordReset", body);
+			if (!v.ok) return sendJson(res, 422, { errors: v.errors });
+			const issued = await issueSuperuserToken(user, { kind: "reset", ttlMs: 3600 * 1000, logLabel: "superuser reset" });
+			if (v.value.deliver === "link") return sendJson(res, 200, { reset: { resetUrl: issued.url, expiresAt: issued.expiresAt } });
+			return sendJson(res, 200, { ok: true, mail: issued.mail });
+		}
 		if (!user.passwordHash) return sendJson(res, 409, { error: "no_password" });
 		const body = await readJson(req, res);
 		if (!body) return;
@@ -771,8 +1062,23 @@ async function handleAuthRoute(req, res, pathname, url) {
 		const v = validate("auth.setup", body);
 		if (!v.ok) return sendJson(res, 422, { errors: v.errors });
 		sweepExpiredResets();
-		const row = findResetToken(hashToken(v.value.token));
+		const tokenHash = hashToken(v.value.token);
 		const now = new Date().toISOString();
+		const dir = getTokenDirectory(tokenHash);
+		if (dir && dir.orgId == null) {
+			if (dir.kind !== "invite" || dir.expiresAt < now) return sendJson(res, 400, { error: "invalid_or_expired" });
+			const su = getSuperuserById(dir.subjectId);
+			if (!su) return sendJson(res, 400, { error: "invalid_or_expired" });
+			if (su.passwordHash) return sendJson(res, 409, { error: "already_activated" });
+			deleteTokenDirectory(tokenHash);
+			const pw = await hashPassword(v.value.password);
+			setSuperuserPassword(su.id, pw);
+			const fresh = bumpSuperuserTokenVersion(su.id);
+			recordSuperuserLogin(fresh.id);
+			signInUser(fresh, res);
+			return sendJson(res, 200, await userResponse(fresh));
+		}
+		const row = findResetToken(tokenHash);
 		if (!row || row.kind !== "invite" || row.usedAt || row.expiresAt < now) {
 			return sendJson(res, 400, { error: "invalid_or_expired" });
 		}
@@ -797,8 +1103,22 @@ async function handleAuthRoute(req, res, pathname, url) {
 		const v = validate("auth.reset", body);
 		if (!v.ok) return sendJson(res, 422, { errors: v.errors });
 		sweepExpiredResets();
-		const row = findResetToken(hashToken(v.value.token));
+		const tokenHash = hashToken(v.value.token);
 		const now = new Date().toISOString();
+		const dir = getTokenDirectory(tokenHash);
+		if (dir && dir.orgId == null) {
+			if (dir.kind !== "reset" || dir.expiresAt < now) return sendJson(res, 400, { error: "invalid_or_expired" });
+			const su = getSuperuserById(dir.subjectId);
+			if (!su?.passwordHash) return sendJson(res, 400, { error: "invalid_or_expired" });
+			deleteTokenDirectory(tokenHash);
+			const pw = await hashPassword(v.value.password);
+			setSuperuserPassword(su.id, pw);
+			const fresh = bumpSuperuserTokenVersion(su.id);
+			recordSuperuserLogin(fresh.id);
+			signInUser(fresh, res);
+			return sendJson(res, 200, await userResponse(fresh));
+		}
+		const row = findResetToken(tokenHash);
 		if (!row || row.kind !== "reset" || row.usedAt || row.expiresAt < now) {
 			return sendJson(res, 400, { error: "invalid_or_expired" });
 		}
@@ -827,7 +1147,13 @@ async function handleAuthRoute(req, res, pathname, url) {
 		if (!body) return;
 		const v = validate("user.create", body);
 		if (!v.ok) return sendJson(res, 422, { errors: v.errors });
-		if (getAuthUserByEmail(v.value.email)) {
+		const local = getAuthUserByEmail(v.value.email);
+		if (local) {
+			try {
+				upsertUserDirectory({ email: local.email, orgId: currentOrgId() ?? DEFAULT_ORG_ID, userId: local.id });
+			} catch (err) {
+				if (err.code !== "email_taken") throw err;
+			}
 			return sendJson(res, 409, { errors: [{ field: "email", code: "email_taken", message: "Email is already in use" }] });
 		}
 		const inviteMethods = resolveInviteActivationForCreate(v.value.activation);
@@ -847,13 +1173,16 @@ async function handleAuthRoute(req, res, pathname, url) {
 			created = createAuthUser({
 				email: v.value.email,
 				createdBy: actor.id,
-				roleId: v.value.role_id ?? "admin",
+				roleId: v.value.role_id,
 				inviteAllowPassword: inviteMethods.inviteAllowPassword,
 				inviteAllowGoogle: inviteMethods.inviteAllowGoogle,
 			});
 		} catch (err) {
 			if (err.code === "role_not_found") {
 				return sendJson(res, 422, { errors: [{ field: "role_id", code: "role_not_found", message: "Role does not exist" }] });
+			}
+			if (err.code === "email_taken") {
+				return sendJson(res, 409, { errors: [{ field: "email", code: "email_taken", message: "Email is already in use" }] });
 			}
 			throw err;
 		}
@@ -895,7 +1224,8 @@ async function handleAuthRoute(req, res, pathname, url) {
 		try {
 			return sendJson(res, 200, { role: updateRole(roleMatch[1], { ...v.value, actorUserId: actor.id }) });
 		} catch (err) {
-			if (["role_not_found", "system_role_protected"].includes(err.code)) return sendJson(res, 409, { error: err.code });
+			if (err.code === "role_not_found") return sendJson(res, 404, { error: err.code });
+			if (err.code === "system_role_protected") return sendJson(res, 409, { error: err.code });
 			if (["invalid_permission", "invalid_role_name"].includes(err.code)) return sendJson(res, 422, { error: err.code });
 			if (String(err.message).includes("UNIQUE")) return sendJson(res, 409, { error: "role_name_taken" });
 			throw err;
@@ -969,6 +1299,180 @@ async function handleAuthRoute(req, res, pathname, url) {
 	}
 
 	return false;
+}
+
+function platformError(code, message) {
+	const err = new Error(message);
+	err.code = code;
+	return err;
+}
+
+function orgDbPathForSlug(slug) {
+	return path.join(path.dirname(path.resolve(defaultOrgDbPath())), `org-${slug}.db`);
+}
+
+function removeSqliteFiles(dbPath) {
+	closeOrgDbByPath(dbPath);
+	for (const suffix of ["", "-wal", "-shm"]) {
+		try {
+			unlinkSync(`${dbPath}${suffix}`);
+		} catch (err) {
+			if (err.code !== "ENOENT") throw err;
+		}
+	}
+}
+
+function platformOrgDto(org) {
+	return runWithOrg(org.id, () => {
+		const admin = getFirstAdminUser();
+		return {
+			id: org.id,
+			slug: org.slug,
+			name: org.name,
+			status: org.status,
+			createdAt: org.createdAt,
+			userCount: countAuthUsers(),
+			deviceCount: listLinkedDevices().length,
+			adminEmail: admin?.email ?? null,
+			adminStatus: admin ? (userIsActive(admin) ? "active" : "pending") : null,
+		};
+	});
+}
+
+async function provisionOrganization({ name, slug, adminEmail, inviteMethods, actorId }) {
+	if (getOrganizationBySlug(slug)) throw platformError("slug_taken", "slug is already in use");
+	if (getSuperuserByEmail(adminEmail)) {
+		throw platformError("email_taken", "email is already in use");
+	}
+	const id = randomUUID();
+	const dbPath = orgDbPathForSlug(slug);
+	if (existsSync(dbPath) || existsSync(`${dbPath}-wal`)) removeSqliteFiles(dbPath);
+	let created;
+	let issued;
+	try {
+		({ created, issued } = await runWithOrg(
+			id,
+			async () => {
+				open();
+				const user = createAuthUser({
+					email: adminEmail,
+					createdBy: actorId,
+					roleId: ADMIN_ROLE_ID,
+					inviteAllowPassword: inviteMethods.inviteAllowPassword,
+					inviteAllowGoogle: inviteMethods.inviteAllowGoogle,
+				});
+				const mail = userIsActive(user)
+					? { invite: {}, mail: { sent: false } }
+					: await issueInvite(user, { organizationName: name });
+				return { created: user, issued: mail };
+			},
+			{ dbPath },
+		));
+		closeOrgDb(id);
+		let org;
+		try {
+			org = createOrganization({ id, slug, name, dbPath, createdBy: actorId });
+		} catch (err) {
+			if (/UNIQUE/.test(String(err.message))) throw platformError("slug_taken", "slug is already in use");
+			throw err;
+		}
+		runWithOrg(id, () => open());
+		return {
+			org: platformOrgDto(org),
+			admin: publicUser(created),
+			invite: issued.invite,
+			mail: issued.mail,
+		};
+	} catch (err) {
+		if (!getOrganization(id)) {
+			closeOrgDb(id);
+			removeSqliteFiles(dbPath);
+		}
+		throw err;
+	}
+}
+
+async function handlePlatformRoute(req, res, pathname) {
+	if (!pathname.startsWith("/api/platform/")) return false;
+	const actor = await requireSuperuser(req, res);
+	if (!actor) return true;
+
+	if (req.method === "GET" && (pathname === "/api/platform/orgs" || pathname === "/api/platform/organizations")) {
+		const orgs = [];
+		for (const org of listOrganizations()) {
+			try {
+				orgs.push(platformOrgDto(org));
+			} catch (err) {
+				log(`platform org list failed for ${org.id}: ${String(err?.message ?? err)}`);
+				orgs.push({
+					id: org.id,
+					slug: org.slug,
+					name: org.name,
+					status: org.status,
+					createdAt: org.createdAt,
+					userCount: 0,
+					deviceCount: 0,
+					adminEmail: null,
+					adminStatus: null,
+				});
+			}
+		}
+		return sendJson(res, 200, { orgs });
+	}
+
+	if (req.method === "POST" && pathname === "/api/platform/orgs") {
+		const body = await readJson(req, res);
+		if (!body) return true;
+		const v = validate("platform.org.create", body);
+		if (!v.ok) return sendJson(res, 422, { errors: v.errors });
+		const inviteMethods = resolveInviteActivationForCreate(v.value.activation);
+		if (inviteMethods.inviteAllowGoogle && !isGoogleOAuthConfigured()) {
+			return sendJson(res, 422, {
+				errors: [
+					{
+						field: "activation.google",
+						code: "google_oauth_disabled",
+						message: "Google sign-in is not configured on this server",
+					},
+				],
+			});
+		}
+		try {
+			const created = await provisionOrganization({
+				name: v.value.name,
+				slug: v.value.slug,
+				adminEmail: v.value.admin_email,
+				inviteMethods,
+				actorId: actor.id,
+			});
+			return sendJson(res, 201, created);
+		} catch (err) {
+			if (err.code === "slug_taken") {
+				return sendJson(res, 409, { errors: [{ field: "slug", code: "slug_taken", message: "Slug is already in use" }] });
+			}
+			if (err.code === "email_taken") {
+				return sendJson(res, 409, {
+					errors: [{ field: "admin_email", code: "email_taken", message: "Email is already in use" }],
+				});
+			}
+			throw err;
+		}
+	}
+
+	const adminInvite = pathname.match(/^\/api\/platform\/orgs\/([^/]+)\/admin-invite$/);
+	if (req.method === "POST" && adminInvite) {
+		const org = getOrganization(adminInvite[1]);
+		if (!org) return sendJson(res, 404, { error: "not_found" });
+		return runWithOrg(org.id, async () => {
+			const admin = getFirstAdminUser();
+			if (!admin) return sendJson(res, 404, { error: "not_found" });
+			if (userIsActive(admin)) return sendJson(res, 409, { error: "already_activated" });
+			const { invite, mail } = await issueInvite(admin, { organizationName: org.name });
+			return sendJson(res, 200, { admin: publicUser(admin), invite, mail });
+		});
+	}
+
+	return sendJson(res, 404, { error: "not_found" });
 }
 
 function syncCommandToApi(cmd) {
@@ -1368,7 +1872,7 @@ async function requireSyncClient(req, res) {
 		}
 		return client;
 	}
-	if (DEVICE_LINKING_MODE === "required") {
+	if (DEVICE_LINKING_MODE === "required" || isMultiOrg()) {
 		sendJson(res, 401, { error: "device_link_required" });
 		return null;
 	}
@@ -1390,7 +1894,7 @@ async function handleSyncRoute(req, res, pathname, url) {
 
 	if (req.method === "POST" && pathname === "/api/sync/register") {
 		const device = authenticatedDevice(req);
-		if (DEVICE_LINKING_MODE === "required" && !device) return sendJson(res, 401, { error: "device_link_required" });
+		if ((DEVICE_LINKING_MODE === "required" || isMultiOrg()) && !device) return sendJson(res, 401, { error: "device_link_required" });
 		if (device && !device.scopes.includes("sync:write")) return sendJson(res, 403, { error: "scope_forbidden" });
 		const body = await readJson(req, res);
 		if (!body) return true;
@@ -2115,6 +2619,96 @@ function authenticatedDevice(req) {
 	return authenticateDevice({ deviceId: credential.deviceId, secretHash: hashToken(credential.secret) });
 }
 
+/**
+ * Resolve the organization from the authenticated principal — never from the
+ * body org field or Host header. Unknown principals get 401 without naming orgs.
+ * Returns null when this function already wrote the response.
+ */
+async function resolveRequestOrg(req, res, pathname) {
+	// Login / setup / reset carry the org in the control-plane directories even
+	// when TARGET_MULTI_ORG is off — otherwise a newly provisioned org's first
+	// admin cannot complete invite setup (the request would wrap "default").
+	if (req.method === "POST" && (pathname === "/api/auth/login" || pathname === "/api/auth/forgot-password")) {
+		const body = await peekJson(req);
+		const email = typeof body?.email === "string" ? body.email : null;
+		if (email && getSuperuserByEmail(email)) return DEFAULT_ORG_ID;
+		return DEFAULT_ORG_ID;
+	}
+
+	if (req.method === "POST" && (pathname === "/api/auth/setup" || pathname === "/api/auth/reset-password")) {
+		const body = await peekJson(req);
+		const token = typeof body?.token === "string" ? body.token : null;
+		const dir = token ? getTokenDirectory(hashToken(token)) : null;
+		if (dir && dir.orgId == null) return DEFAULT_ORG_ID;
+		return dir?.orgId ?? DEFAULT_ORG_ID;
+	}
+
+	if (!isMultiOrg()) {
+		const jwt = readToken(req);
+		if (jwt) {
+			const payload = verifyJwt(jwt, getJwtSecret());
+			if (payload && typeof payload.sub === "string" && payload.su !== true) {
+				const orgId = typeof payload.org === "string" && payload.org ? payload.org : DEFAULT_ORG_ID;
+				if (orgId !== DEFAULT_ORG_ID) {
+					const dir = getUserDirectoryByOrgUser(orgId, payload.sub);
+					if (!dir) {
+						sendJson(res, 401, { error: "unauthorized" });
+						return null;
+					}
+					return orgId;
+				}
+			}
+		}
+		return DEFAULT_ORG_ID;
+	}
+
+	const deviceCred = deviceCredential(req);
+	if (deviceCred) {
+		const dir = getDeviceDirectory(deviceCred.deviceId);
+		if (!dir) {
+			sendJson(res, 401, { error: "unauthorized" });
+			return null;
+		}
+		return dir.orgId;
+	}
+
+	if (pathname === "/ingest" || pathname === "/api/sync/register") {
+		sendJson(res, 401, { error: "device_link_required" });
+		return null;
+	}
+
+	if (pathname.startsWith("/api/device-links/") && linkCredential(req)) {
+		const requestId = pathname.match(/\/api\/device-links\/requests\/([^/]+)/)?.[1];
+		const row = requestId ? getControlLinkRequest(requestId) : null;
+		if (row?.org_id) return row.org_id;
+		return DEFAULT_ORG_ID;
+	}
+
+	const jwt = readToken(req);
+	if (jwt) {
+		const payload = verifyJwt(jwt, getJwtSecret());
+		if (payload && typeof payload.sub === "string") {
+			if (payload.su === true) {
+				const su = getSuperuserById(payload.sub);
+				if (!su) {
+					sendJson(res, 401, { error: "unauthorized" });
+					return null;
+				}
+				return DEFAULT_ORG_ID;
+			}
+			const orgId = typeof payload.org === "string" && payload.org ? payload.org : DEFAULT_ORG_ID;
+			const dir = getUserDirectoryByOrgUser(orgId, payload.sub);
+			if (!dir) {
+				sendJson(res, 401, { error: "unauthorized" });
+				return null;
+			}
+			return orgId;
+		}
+	}
+
+	return DEFAULT_ORG_ID;
+}
+
 function verifyDisconnectProof(req, body, credential) {
 	const timestamp = typeof req.headers["x-target-date"] === "string" ? req.headers["x-target-date"] : "";
 	const nonce = typeof req.headers["x-target-nonce"] === "string" ? req.headers["x-target-nonce"] : "";
@@ -2536,7 +3130,10 @@ const server = createServer(async (req, res) => {
 	try {
 		const url = new URL(req.url, `http://${req.headers.host ?? HOST}`);
 		const { pathname } = url;
-
+		const orgId = await resolveRequestOrg(req, res, pathname);
+		if (orgId == null) return;
+		await runWithOrg(orgId, async () => {
+		try {
 		if (req.method === "POST" && pathname === "/ingest") return void (await handleIngest(req, res));
 		if (req.method === "GET" && pathname === "/health") return sendJson(res, 200, { ok: true });
 
@@ -2558,6 +3155,11 @@ const server = createServer(async (req, res) => {
 		if (pathname.startsWith("/api/") && !AUTH_DISABLED) {
 			const user = await requireAuth(req, res);
 			if (!user) return;
+		}
+
+		if (pathname.startsWith("/api/platform/")) {
+			const handled = await handlePlatformRoute(req, res, pathname);
+			if (handled !== false) return;
 		}
 
 		if (pathname.startsWith("/api/sync/")) {
@@ -2639,9 +3241,20 @@ const server = createServer(async (req, res) => {
 		log(`request error: ${String(err)}`);
 		if (!res.headersSent) sendJson(res, 500, { error: "internal error" });
 	}
+		});
+	} catch (err) {
+		log(`request error: ${String(err)}`);
+		if (!res.headersSent) sendJson(res, 500, { error: "internal error" });
+	}
 });
 
 async function start() {
+	try {
+		assertMultiOrgDeviceLinkingMode();
+	} catch (err) {
+		console.error(`[target-server] ${err.message}`);
+		process.exit(1);
+	}
 	if (AUTH_DISABLED) {
 		if (!isLoopbackHost(HOST)) {
 			console.error("[target-server] TARGET_AUTH_DISABLED=1 is refused on a non-loopback bind");
@@ -2651,7 +3264,12 @@ async function start() {
 	}
 	await initMailer();
 	try {
-		await assertBootGuards();
+		await runWithOrg(DEFAULT_ORG_ID, () => {
+			backfillDefaultOrganization();
+			migrateAllOrgDatabases();
+			return assertBootGuards();
+		});
+		await bootstrapSuperuserFromEnv();
 	} catch (err) {
 		console.error(`[target-server] ${err.message}`);
 		process.exit(1);

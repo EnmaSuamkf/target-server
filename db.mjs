@@ -10,14 +10,54 @@
  *    re-sent batch (same ids) inserts nothing new but is still acknowledged, per
  *    the contract in docs/report-server.es.html §7.4.
  */
+import { AsyncLocalStorage } from "node:async_hooks";
 import { randomBytes, randomUUID, scryptSync } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { validateCommand } from "./blueprint.mjs";
+import {
+	DEFAULT_ORG_ID,
+	adoptJwtSecretFromOrgHandle,
+	authenticateControlLinkRequest,
+	consumeControlLinkRequest,
+	deleteTokenDirectory,
+	deleteTokenDirectoryForSubject,
+	deleteUserDirectoryMembership,
+	ensureDefaultOrganization,
+	expireControlLinkRequest,
+	expireDueControlLinkRequests,
+	getControlLinkRequest,
+	getControlLinkRequestByIdempotencyKey,
+	getIdentityByEmail,
+	getJwtSecret as readControlJwtSecret,
+	getMembership,
+	getOrganization,
+	getSuperuserByEmail,
+	getUserDirectoryByEmail,
+	insertControlLinkRequest,
+	isMultiOrg,
+	listMembershipsByEmail,
+	listOrganizations,
+	openControlDb,
+	registerJwtSecretAdopter,
+	updateControlLinkRequestDecision,
+	upsertDeviceDirectory,
+	upsertIdentity,
+	upsertTokenDirectory,
+	upsertUserDirectory,
+} from "./control-plane.mjs";
 
-let db = null;
-
+export { DEFAULT_ORG_ID, isMultiOrg };
 export const DEFAULT_ADMIN_EMAIL = "admin@admin.com";
 export const DEFAULT_ADMIN_PASSWORD = "password-target-server";
+const MAX_OPEN_ORG_DBS = 64;
+const directorySynced = new Set();
+
+/** Per-request (and boot) organization: `{ orgId, dbPath }`. `open()` never falls back when this is empty. */
+const orgContext = new AsyncLocalStorage();
+/** Set by `open(path)` / boot so node:test callbacks still see the implicit default org after ALS is reset. */
+let processDefaultOrg = null;
+/** LRU registry of open org SQLite handles, newest at the end. */
+const orgDbs = new Map();
 
 /**
  * Presentation groups for the closed RBAC catalogue. Session/UI code should
@@ -94,6 +134,8 @@ export const PERMISSION_CATALOG = Object.freeze([
 ]);
 export const PERMISSIONS = Object.freeze(PERMISSION_CATALOG.map(({ id }) => id));
 export const ADMIN_ROLE_ID = "admin";
+/** System role with zero permissions. Orphaned/empty assignments land here instead of admin. */
+export const NONE_ROLE_ID = "none";
 const PERMISSION_SET = new Set(PERMISSIONS);
 
 /** Retired resource-level IDs expanded into per-action children on open. */
@@ -179,9 +221,130 @@ export function expandStoredPermission(permission) {
 export const DEVICE_SCOPES = Object.freeze(["ingest:write", "sync:write"]);
 const DEVICE_SCOPE_SET = new Set(DEVICE_SCOPES);
 
-export function open(dbPath = process.env.TARGET_SERVER_DB ?? "./target-server.db") {
-	if (db) return db;
-	db = new DatabaseSync(dbPath);
+export function defaultOrgDbPath() {
+	return process.env.TARGET_SERVER_DB ?? "./target-server.db";
+}
+
+export function currentOrgId() {
+	return orgContext.getStore()?.orgId ?? processDefaultOrg?.orgId ?? null;
+}
+
+/**
+ * Run `fn` with `orgId` as the current organization. Nested `open()` calls use that org's DB.
+ * Path comes from the control-plane organizations table (default org falls back to TARGET_SERVER_DB).
+ */
+export function runWithOrg(orgId, fn, opts = {}) {
+	const listed = getOrganization(orgId);
+	const dbPath = opts.dbPath ?? listed?.dbPath ?? (orgId === DEFAULT_ORG_ID ? defaultOrgDbPath() : null);
+	if (!dbPath) throw new Error(`unknown_organization: ${orgId}`);
+	return orgContext.run({ orgId, dbPath }, fn);
+}
+
+/** Close a cached org handle so leftover files can be deleted and retried. */
+export function closeOrgDb(orgId) {
+	const entry = orgDbs.get(orgId);
+	if (entry) {
+		try {
+			entry.handle.close();
+		} catch {
+			// already closed
+		}
+		orgDbs.delete(orgId);
+	}
+	directorySynced.delete(orgId);
+}
+
+export function closeOrgDbByPath(dbPath) {
+	for (const [orgId, entry] of [...orgDbs]) {
+		if (entry.dbPath === dbPath) closeOrgDb(orgId);
+	}
+}
+
+function enterDefaultOrg(dbPath) {
+	processDefaultOrg = { orgId: DEFAULT_ORG_ID, dbPath };
+	orgContext.enterWith(processDefaultOrg);
+}
+
+function adoptJwtSecretFromDefaultOrgFile() {
+	const cached = orgDbs.get(DEFAULT_ORG_ID);
+	if (cached) {
+		adoptJwtSecretFromOrgHandle(cached.handle);
+		return;
+	}
+	let peek;
+	try {
+		peek = new DatabaseSync(defaultOrgDbPath(), { readOnly: true });
+	} catch {
+		return;
+	}
+	try {
+		adoptJwtSecretFromOrgHandle(peek);
+	} finally {
+		peek.close();
+	}
+}
+
+function evictLruOrgDb(keepOrgId) {
+	while (orgDbs.size >= MAX_OPEN_ORG_DBS) {
+		let evicted = false;
+		for (const [orgId, entry] of orgDbs) {
+			if (orgId === keepOrgId) continue;
+			try {
+				entry.handle.close();
+			} catch {
+				// already closed
+			}
+			orgDbs.delete(orgId);
+			evicted = true;
+			break;
+		}
+		if (!evicted) break;
+	}
+}
+
+function touchOrgDb(orgId, entry) {
+	orgDbs.delete(orgId);
+	orgDbs.set(orgId, entry);
+}
+
+function getOrOpenOrgDb(orgId, dbPath) {
+	const existing = orgDbs.get(orgId);
+	if (existing) {
+		touchOrgDb(orgId, existing);
+		return existing.handle;
+	}
+	evictLruOrgDb(orgId);
+	if (orgId === DEFAULT_ORG_ID) ensureDefaultOrganization({ dbPath });
+	const handle = openOrgFile(dbPath);
+	orgDbs.set(orgId, { handle, dbPath });
+	return handle;
+}
+
+/**
+ * Returns the SQLite handle for the current org context.
+ * Throws `org_context_missing` when none is set — never silently opens a default DB.
+ * Test/boot helper: `open(path)` at top level enters the implicit "default" org for that file.
+ */
+export function open(dbPath) {
+	let ctx = orgContext.getStore() ?? processDefaultOrg;
+	if (!ctx) {
+		if (arguments.length === 0) {
+			throw new Error("org_context_missing: open() requires an organization context");
+		}
+		enterDefaultOrg(dbPath);
+		ctx = processDefaultOrg;
+	}
+	const handle = getOrOpenOrgDb(ctx.orgId, ctx.dbPath);
+	if (ctx.orgId === DEFAULT_ORG_ID) ensureDefaultOrganization({ dbPath: ctx.dbPath });
+	if (!directorySynced.has(ctx.orgId)) {
+		directorySynced.add(ctx.orgId);
+		syncCurrentOrgDirectory();
+	}
+	return handle;
+}
+
+function openOrgFile(dbPath) {
+	const db = new DatabaseSync(dbPath);
 	db.exec("PRAGMA journal_mode = WAL;");
 	db.exec(`
 		CREATE TABLE IF NOT EXISTS instances (
@@ -308,7 +471,8 @@ export function open(dbPath = process.env.TARGET_SERVER_DB ?? "./target-server.d
 	migrateRbacSchema(db);
 	migrateDeviceLinkSchema(db);
 	migrateCatalogSchema(db);
-	seedAuth();
+	adoptJwtSecretFromOrgHandle(db);
+	seedAuth(db);
 	return db;
 }
 
@@ -457,6 +621,13 @@ function migrateRbacSchema(database) {
 				 ON CONFLICT(id) DO UPDATE SET is_system = 1`,
 			)
 			.run(ADMIN_ROLE_ID, now, now);
+		database
+			.prepare(
+				`INSERT INTO auth_roles (id, name, is_system, created_at, updated_at)
+				 VALUES (?, 'None', 1, ?, ?)
+				 ON CONFLICT(id) DO UPDATE SET is_system = 1`,
+			)
+			.run(NONE_ROLE_ID, now, now);
 		const insertPermission = database.prepare(
 			"INSERT OR IGNORE INTO auth_role_permissions (role_id, permission) VALUES (?, ?)",
 		);
@@ -467,15 +638,16 @@ function migrateRbacSchema(database) {
 				 WHERE role_id = ? AND permission NOT IN (${PERMISSIONS.map(() => "?").join(",")})`,
 			)
 			.run(ADMIN_ROLE_ID, ...PERMISSIONS);
-		// Earlier databases have only the legacy `role` string. Preserve every
-		// user and safely map orphaned/empty assignments to the system admin role.
+		database.prepare("DELETE FROM auth_role_permissions WHERE role_id = ?").run(NONE_ROLE_ID);
+		// NULL/empty/orphaned assignments (including pre-RBAC empty `role`) map
+		// to `none`, never to Organization Admin. Users already on `admin` stay there.
 		database
 			.prepare(
 				`UPDATE auth_users SET role = ?
 				 WHERE role IS NULL OR TRIM(role) = ''
 				    OR NOT EXISTS (SELECT 1 FROM auth_roles r WHERE r.id = auth_users.role)`,
 			)
-			.run(ADMIN_ROLE_ID);
+			.run(NONE_ROLE_ID);
 		database.exec("COMMIT");
 	} catch (err) {
 		database.exec("ROLLBACK");
@@ -902,38 +1074,34 @@ function publishedDeployUrl() {
 }
 
 export function isPublishedRenderDeploy() {
-	if (process.env.RENDER === "true") return true;
 	const url = publishedDeployUrl();
 	return url === "https://target-server-okjn.onrender.com";
 }
 
 function resolveSeedPassword() {
-	if (isPublishedRenderDeploy()) {
-		return DEFAULT_ADMIN_PASSWORD;
-	}
-	if (process.env.TARGET_USE_PUBLISHED_ADMIN === "1") {
-		return DEFAULT_ADMIN_PASSWORD;
-	}
 	const raw = process.env.TARGET_SEED_ADMIN_PASSWORD;
 	if (raw === undefined) return DEFAULT_ADMIN_PASSWORD;
 	const trimmed = raw.trim();
 	return trimmed || DEFAULT_ADMIN_PASSWORD;
 }
 
-function seedAuth() {
-	const count = db.prepare("SELECT COUNT(*) AS n FROM auth_users").get().n;
+function seedAuth(database) {
+	const count = database.prepare("SELECT COUNT(*) AS n FROM auth_users").get().n;
+	if (count > 0) return;
+	const orgId = currentOrgId() ?? DEFAULT_ORG_ID;
+	if (orgId !== DEFAULT_ORG_ID) return;
+	const existingDir = getMembership(DEFAULT_ADMIN_EMAIL, orgId) ?? getUserDirectoryByEmail(DEFAULT_ADMIN_EMAIL);
+	if (existingDir && existingDir.orgId !== orgId) return;
 	const seedPassword = resolveSeedPassword();
-	if (count > 0) {
-		syncAdminSeedPassword(seedPassword);
-		return;
-	}
 	const now = new Date().toISOString();
 	const id = randomUUID();
 	const hash = hashPasswordSync(seedPassword);
-	db.prepare(
+	database.prepare(
 		`INSERT INTO auth_users (id, email, password_hash, role, token_version, created_at, activated_at)
 		 VALUES (?, ?, ?, 'admin', 1, ?, ?)`,
 	).run(id, DEFAULT_ADMIN_EMAIL, hash, now, now);
+	upsertUserDirectory({ email: DEFAULT_ADMIN_EMAIL, orgId, userId: id });
+	upsertIdentity({ email: DEFAULT_ADMIN_EMAIL, passwordHash: hash });
 	if (seedPassword === DEFAULT_ADMIN_PASSWORD) {
 		console.warn("[target-server] WARNING: default admin credentials active (admin@admin.com / password-target-server)");
 	} else {
@@ -941,28 +1109,69 @@ function seedAuth() {
 	}
 }
 
-function syncAdminSeedPassword(seedPassword) {
-	const user = getAuthUserByEmail(DEFAULT_ADMIN_EMAIL);
-	if (!user?.passwordHash) return;
-	const hash = hashPasswordSync(seedPassword);
-	open().prepare("UPDATE auth_users SET password_hash = ? WHERE email = ?").run(hash, DEFAULT_ADMIN_EMAIL);
-	if (seedPassword === DEFAULT_ADMIN_PASSWORD) {
-		console.warn("[target-server] WARNING: synced admin@admin.com password to the published default");
-	} else {
-		console.warn("[target-server] WARNING: synced admin@admin.com password to TARGET_SEED_ADMIN_PASSWORD");
+registerJwtSecretAdopter(adoptJwtSecretFromDefaultOrgFile);
+
+export function getJwtSecret() {
+	return readControlJwtSecret();
+}
+
+function directoryOrgReady(orgId) {
+	return Boolean(orgId && getOrganization(orgId));
+}
+
+function syncCurrentOrgDirectory() {
+	const orgId = currentOrgId();
+	if (!directoryOrgReady(orgId)) return;
+	for (const user of listAuthUsers()) {
+		try {
+			upsertUserDirectory({ email: user.email, orgId, userId: user.id });
+			upsertIdentity({
+				email: user.email,
+				...(user.passwordHash ? { passwordHash: user.passwordHash } : {}),
+				...(user.googleSub ? { googleSub: user.googleSub } : {}),
+			});
+		} catch (err) {
+			if (err.code !== "email_taken") throw err;
+		}
+	}
+	for (const device of listLinkedDevices({ includeArchived: true })) {
+		upsertDeviceDirectory({ deviceId: device.id, orgId });
+	}
+	const tokens = open()
+		.prepare("SELECT token_hash, user_id, kind, expires_at FROM auth_resets WHERE used_at IS NULL")
+		.all();
+	for (const token of tokens) {
+		upsertTokenDirectory({
+			tokenHash: token.token_hash,
+			orgId,
+			subjectId: token.user_id,
+			kind: token.kind,
+			expiresAt: token.expires_at,
+		});
 	}
 }
 
-export function getJwtSecret() {
-	const env = process.env.TARGET_AUTH_SECRET;
-	if (env) return env;
-	const row = open().prepare("SELECT jwt_secret FROM auth_meta WHERE id = 1").get();
-	if (row) return row.jwt_secret;
-	const secret = randomBytes(32).toString("base64url");
-	const now = new Date().toISOString();
-	open().prepare("INSERT INTO auth_meta (id, jwt_secret, created_at) VALUES (1, ?, ?)").run(secret, now);
-	console.warn("[target-server] generated JWT secret and persisted it in auth_meta (set TARGET_AUTH_SECRET to override)");
-	return secret;
+/** Idempotent default-org row plus directory backfill for users/devices/tokens already in the org DB. */
+export function backfillDefaultOrganization() {
+	ensureDefaultOrganization({ dbPath: defaultOrgDbPath() });
+	runWithOrg(DEFAULT_ORG_ID, () => {
+		open();
+		syncCurrentOrgDirectory();
+	});
+}
+
+/** Open and migrate every org DB listed in the control plane. Throws naming the org on failure. */
+export function migrateAllOrgDatabases() {
+	ensureDefaultOrganization({ dbPath: defaultOrgDbPath() });
+	for (const org of listOrganizations()) {
+		try {
+			runWithOrg(org.id, () => {
+				open();
+			});
+		} catch (err) {
+			throw new Error(`failed to migrate organization ${org.slug} (${org.id}): ${err.message}`, { cause: err });
+		}
+	}
 }
 
 export function getAuthUserById(id) {
@@ -971,6 +1180,26 @@ export function getAuthUserById(id) {
 
 export function getAuthUserByEmail(email) {
 	return rowToAuthUser(open().prepare("SELECT * FROM auth_users WHERE email = ?").get(email));
+}
+
+/** Fill control-plane identity hashes from the first membership that already has credentials. */
+export function ensureIdentityCredentials(email) {
+	const normalized = String(email ?? "").trim().toLowerCase();
+	if (!normalized) return null;
+	let ident = getIdentityByEmail(normalized);
+	if (ident?.passwordHash || ident?.googleSub) return ident;
+	for (const m of listMembershipsByEmail(normalized)) {
+		const user = runWithOrg(m.orgId, () => getAuthUserByEmail(normalized));
+		if (user?.passwordHash || user?.googleSub) {
+			upsertIdentity({
+				email: normalized,
+				...(user.passwordHash ? { passwordHash: user.passwordHash } : {}),
+				...(user.googleSub ? { googleSub: user.googleSub } : {}),
+			});
+			break;
+		}
+	}
+	return getIdentityByEmail(normalized);
 }
 
 export function getAuthUserByGoogleSub(googleSub) {
@@ -986,7 +1215,12 @@ export function activateAuthUserWithGoogle(id, googleSub) {
 			 WHERE id = ?`,
 		)
 		.run(googleSub, now, id);
-	return getAuthUserById(id);
+	const user = getAuthUserById(id);
+	if (user) {
+		upsertIdentity({ email: user.email, googleSub });
+		replicateIdentityCredentials(user.email);
+	}
+	return user;
 }
 
 export function listAuthUsers() {
@@ -1000,6 +1234,13 @@ export function countAuthUsers() {
 	return open().prepare("SELECT COUNT(*) AS n FROM auth_users").get().n;
 }
 
+export function getFirstAdminUser() {
+	const r = open()
+		.prepare("SELECT * FROM auth_users WHERE role = ? ORDER BY created_at ASC LIMIT 1")
+		.get(ADMIN_ROLE_ID);
+	return r ? rowToAuthUser(r) : null;
+}
+
 export function createAuthUser({
 	email,
 	createdBy = null,
@@ -1011,25 +1252,53 @@ export function createAuthUser({
 		throw new Error("createAuthUser: at least one invite activation method required");
 	}
 	requireRole(roleId);
+	const orgId = currentOrgId();
+	if (getSuperuserByEmail(email)) throw rbacError("email_taken", "email is already in use");
+	if (getMembership(email, orgId) && getAuthUserByEmail(email)) {
+		throw rbacError("email_taken", "email is already in use");
+	}
+	const local = getAuthUserByEmail(email);
+	if (local) {
+		if (directoryOrgReady(orgId)) upsertUserDirectory({ email, orgId, userId: local.id });
+		throw rbacError("email_taken", "email is already in use");
+	}
+	const identity = getIdentityByEmail(email);
 	const now = new Date().toISOString();
 	const id = randomUUID();
-	open()
-		.prepare(
-			`INSERT INTO auth_users (
-				id, email, password_hash, role, token_version, created_at, created_by, invited_at,
-				invite_allow_password, invite_allow_google
-			) VALUES (?, ?, NULL, ?, 1, ?, ?, ?, ?, ?)`,
-		)
-		.run(
-			id,
-			email,
-			roleId,
-			now,
-			createdBy,
-			now,
-			inviteAllowPassword ? 1 : 0,
-			inviteAllowGoogle ? 1 : 0,
-		);
+	const copyHash = identity?.passwordHash ?? null;
+	const copyGoogle = identity?.googleSub ?? null;
+	const activated = copyHash || copyGoogle ? now : null;
+	try {
+		open()
+			.prepare(
+				`INSERT INTO auth_users (
+					id, email, password_hash, google_sub, role, token_version, created_at, created_by, invited_at,
+					activated_at, invite_allow_password, invite_allow_google
+				) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)`,
+			)
+			.run(
+				id,
+				email,
+				copyHash,
+				copyGoogle,
+				roleId,
+				now,
+				createdBy,
+				now,
+				activated,
+				inviteAllowPassword ? 1 : 0,
+				inviteAllowGoogle ? 1 : 0,
+			);
+	} catch (err) {
+		if (/UNIQUE/.test(String(err.message))) {
+			const existing = getAuthUserByEmail(email);
+			if (existing && directoryOrgReady(orgId)) upsertUserDirectory({ email, orgId, userId: existing.id });
+			throw rbacError("email_taken", "email is already in use");
+		}
+		throw err;
+	}
+	if (directoryOrgReady(orgId)) upsertUserDirectory({ email, orgId, userId: id });
+	upsertIdentity({ email, ...(copyHash ? { passwordHash: copyHash } : {}), ...(copyGoogle ? { googleSub: copyGoogle } : {}) });
 	return getAuthUserById(id);
 }
 
@@ -1039,8 +1308,14 @@ export function deleteAuthUser(id) {
 	if (user.role === ADMIN_ROLE_ID && countAuthUsersByRole(ADMIN_ROLE_ID) <= 1) {
 		throw rbacError("last_administrator", "cannot delete the last administrator");
 	}
+	const orgId = currentOrgId();
 	open().prepare("DELETE FROM auth_resets WHERE user_id = ?").run(id);
 	open().prepare("DELETE FROM auth_users WHERE id = ?").run(id);
+	deleteUserDirectoryMembership({ email: user.email, orgId });
+	if (orgId) {
+		deleteTokenDirectoryForSubject(orgId, id, "invite");
+		deleteTokenDirectoryForSubject(orgId, id, "reset");
+	}
 	return true;
 }
 
@@ -1054,7 +1329,32 @@ export function setUserPassword(id, passwordHash) {
 	open()
 		.prepare("UPDATE auth_users SET password_hash = ?, activated_at = COALESCE(activated_at, ?) WHERE id = ?")
 		.run(passwordHash, now, id);
-	return getAuthUserById(id);
+	const user = getAuthUserById(id);
+	if (user) {
+		upsertIdentity({ email: user.email, passwordHash });
+		deleteTokenDirectoryForSubject(null, user.email, "select_org");
+		replicateIdentityCredentials(user.email);
+	}
+	return user;
+}
+
+export function replicateIdentityCredentials(email) {
+	const ident = getIdentityByEmail(email);
+	if (!ident) return;
+	const now = new Date().toISOString();
+	for (const m of listMembershipsByEmail(email)) {
+		runWithOrg(m.orgId, () => {
+			const u = getAuthUserByEmail(email);
+			if (!u) return;
+			open()
+				.prepare(
+					`UPDATE auth_users SET password_hash = ?, google_sub = ?,
+					 activated_at = CASE WHEN ? IS NOT NULL OR ? IS NOT NULL THEN COALESCE(activated_at, ?) ELSE activated_at END
+					 WHERE id = ?`,
+				)
+				.run(ident.passwordHash, ident.googleSub, ident.passwordHash, ident.googleSub, now, u.id);
+		});
+	}
 }
 
 export function recordLogin(id) {
@@ -1069,6 +1369,8 @@ export function touchInvitedAt(id) {
 }
 
 export function invalidateResetTokens(userId, kind) {
+	const orgId = currentOrgId();
+	if (orgId) deleteTokenDirectoryForSubject(orgId, userId, kind);
 	open().prepare("DELETE FROM auth_resets WHERE user_id = ? AND kind = ? AND used_at IS NULL").run(userId, kind);
 }
 
@@ -1080,6 +1382,8 @@ export function insertResetToken({ tokenHash, userId, kind, expiresAt }) {
 			 VALUES (?, ?, ?, ?, ?)`,
 		)
 		.run(tokenHash, userId, kind, now, expiresAt);
+	const orgId = currentOrgId();
+	if (directoryOrgReady(orgId)) upsertTokenDirectory({ tokenHash, orgId, subjectId: userId, kind, expiresAt });
 }
 
 export function findResetToken(tokenHash) {
@@ -1098,6 +1402,7 @@ export function findResetToken(tokenHash) {
 export function consumeResetToken(tokenHash) {
 	const now = new Date().toISOString();
 	const info = open().prepare("UPDATE auth_resets SET used_at = ? WHERE token_hash = ? AND used_at IS NULL").run(now, tokenHash);
+	if (info.changes > 0) deleteTokenDirectory(tokenHash);
 	return info.changes > 0;
 }
 
@@ -1192,7 +1497,7 @@ function writeDeviceAudit({ deviceId = null, requestId = null, actorUserId = nul
 		.run(
 			randomUUID(),
 			deviceId,
-			requestId,
+			controlPlaneLinks() ? null : requestId,
 			actorUserId,
 			action,
 			detail == null ? null : JSON.stringify(detail),
@@ -1205,7 +1510,12 @@ function getLinkedDeviceRow(id) {
 }
 
 function getLinkRequestRow(id) {
+	if (controlPlaneLinks()) return getControlLinkRequest(id);
 	return open().prepare("SELECT * FROM device_link_requests WHERE id = ?").get(id);
+}
+
+function controlPlaneLinks() {
+	return isMultiOrg();
 }
 
 /** Create a pending request; callers pass hashes, never raw pairing credentials. */
@@ -1226,6 +1536,32 @@ export function createDeviceLinkRequest({
 	}
 	const normalizedScopes = normalizeDeviceScopes(scopes);
 	const now = createdAt ?? new Date().toISOString();
+	if (controlPlaneLinks()) {
+		try {
+			insertControlLinkRequest({
+				id,
+				idempotencyKey,
+				idempotencyFingerprint,
+				deviceName: deviceName.trim(),
+				hubVersion,
+				publicKey: publicKey.trim(),
+				scopesJson: JSON.stringify(normalizedScopes),
+				pollingCredentialHash,
+				createdAt: now,
+				expiresAt,
+			});
+			return rowToLinkRequest(getControlLinkRequest(id));
+		} catch (err) {
+			if (idempotencyKey && /UNIQUE constraint failed: device_link_requests.idempotency_key/.test(err.message)) {
+				const existing = getControlLinkRequestByIdempotencyKey(idempotencyKey);
+				if (existing?.idempotency_fingerprint === idempotencyFingerprint) {
+					return { ...rowToLinkRequest(existing), idempotent: true };
+				}
+				throw deviceError("idempotency_conflict", "idempotency key belongs to a different request");
+			}
+			throw err;
+		}
+	}
 	const database = open();
 	try {
 		database
@@ -1256,12 +1592,27 @@ export function getDeviceLinkRequest(id) {
 
 /** Internal lookup for Target-Link authentication; the hash is never returned. */
 export function getDeviceLinkRequestByPollingCredentialHash(pollingCredentialHash) {
+	if (controlPlaneLinks()) {
+		const row = openControlDb()
+			.prepare("SELECT * FROM device_link_requests WHERE polling_credential_hash = ?")
+			.get(pollingCredentialHash);
+		return rowToLinkRequest(row);
+	}
 	const row = open().prepare("SELECT * FROM device_link_requests WHERE polling_credential_hash = ?").get(pollingCredentialHash);
 	return rowToLinkRequest(row);
 }
 
 /** Authenticate a pending pairing credential without exposing its stored hash. */
 export function authenticateDeviceLinkRequest({ requestId, pollingCredentialHash, now = new Date().toISOString() }) {
+	if (controlPlaneLinks()) {
+		const row = authenticateControlLinkRequest({ requestId, pollingCredentialHash });
+		if (!row) return null;
+		if ((row.status === "pending" || row.status === "approved") && row.expires_at <= now) {
+			expireControlLinkRequest(requestId);
+			return null;
+		}
+		return rowToLinkRequest(row);
+	}
 	const row = open()
 		.prepare("SELECT * FROM device_link_requests WHERE id = ? AND polling_credential_hash = ?")
 		.get(requestId, pollingCredentialHash);
@@ -1279,6 +1630,25 @@ export function decideDeviceLinkRequest({ requestId, ownerUserId, decision, deci
 	if (decision !== "approved" && decision !== "denied") throw deviceError("invalid_link_decision", "invalid link decision");
 	if (!getAuthUserById(ownerUserId)) throw deviceError("owner_not_found", "link owner does not exist");
 	const now = decidedAt ?? new Date().toISOString();
+	if (controlPlaneLinks()) {
+		const request = getControlLinkRequest(requestId);
+		if (!request) throw deviceError("link_request_not_found", "link request does not exist");
+		const orgId = currentOrgId();
+		if (request.org_id && orgId && request.org_id !== orgId) {
+			throw deviceError("link_request_not_found", "link request does not exist");
+		}
+		if (request.status === decision && request.owner_user_id === ownerUserId) {
+			return { ...rowToLinkRequest(request), idempotent: true };
+		}
+		if (request.status !== "pending" || request.expires_at <= now) {
+			if (request.status === "pending" && request.expires_at <= now) expireControlLinkRequest(requestId);
+			throw deviceError("invalid_link_state", "link request is no longer pending");
+		}
+		const info = updateControlLinkRequestDecision({ requestId, decision, ownerUserId, orgId, decidedAt: now });
+		if (info.changes !== 1) throw deviceError("invalid_link_state", "link request state changed");
+		writeDeviceAudit({ requestId, actorUserId: ownerUserId, action: `link.${decision}`, createdAt: now });
+		return rowToLinkRequest(getControlLinkRequest(requestId));
+	}
 	const database = open();
 	database.exec("BEGIN IMMEDIATE");
 	try {
@@ -1311,6 +1681,34 @@ export function decideDeviceLinkRequest({ requestId, ownerUserId, decision, deci
 	}
 }
 
+function insertLinkedDeviceFromRequest({ request, deviceId, deviceSecretHash, now, credentialExpiresAt }) {
+	const database = open();
+	database.exec("BEGIN IMMEDIATE");
+	try {
+		if (!getAuthUserById(request.owner_user_id)) throw deviceError("owner_not_found", "link owner does not exist");
+		database
+			.prepare(
+				`INSERT INTO linked_devices
+				 (id, owner_user_id, name, hub_version, public_key, scopes_json, status, credential_version, created_at, updated_at)
+				 VALUES (?, ?, ?, ?, ?, ?, 'active', 1, ?, ?)`,
+			)
+			.run(deviceId, request.owner_user_id, request.device_name, request.hub_version, request.public_key, request.scopes_json, now, now);
+		database
+			.prepare(
+				`INSERT INTO device_credentials (device_id, version, secret_hash, issued_at, expires_at)
+				 VALUES (?, 1, ?, ?, ?)`,
+			)
+			.run(deviceId, deviceSecretHash, now, credentialExpiresAt);
+		writeDeviceAudit({ deviceId, requestId: request.id, actorUserId: request.owner_user_id, action: "link.consumed", createdAt: now });
+		const device = rowToLinkedDevice(getLinkedDeviceRow(deviceId));
+		database.exec("COMMIT");
+		return device;
+	} catch (err) {
+		database.exec("ROLLBACK");
+		throw err;
+	}
+}
+
 /**
  * Atomically materialize an approved request. Both hashes are supplied by the
  * route layer; neither the raw polling credential nor device secret reaches DB.
@@ -1325,6 +1723,23 @@ export function consumeDeviceLinkRequest({
 }) {
 	if (!pollingCredentialHash?.trim() || !deviceSecretHash?.trim()) throw deviceError("invalid_link_credential", "credential hash is required");
 	const now = consumedAt ?? new Date().toISOString();
+	if (controlPlaneLinks()) {
+		const request = getControlLinkRequest(requestId);
+		if (!request || request.polling_credential_hash !== pollingCredentialHash) throw deviceError("invalid_link_credential", "invalid link credential");
+		if (request.status === "consumed") throw deviceError("already_consumed", "link request was already consumed");
+		if (request.status !== "approved" || !request.owner_user_id || !request.org_id || request.expires_at <= now) {
+			if (request.status === "approved" && request.expires_at <= now) expireControlLinkRequest(requestId);
+			throw deviceError("invalid_link_state", "link request is not consumable");
+		}
+		const orgId = request.org_id;
+		const device = runWithOrg(orgId, () =>
+			insertLinkedDeviceFromRequest({ request, deviceId, deviceSecretHash, now, credentialExpiresAt }),
+		);
+		const consumed = consumeControlLinkRequest({ requestId, pollingCredentialHash, deviceId, consumedAt: now });
+		if (consumed.changes !== 1) throw deviceError("already_consumed", "link request was already consumed");
+		upsertDeviceDirectory({ deviceId, orgId });
+		return device;
+	}
 	const database = open();
 	database.exec("BEGIN IMMEDIATE");
 	try {
@@ -1361,6 +1776,7 @@ export function consumeDeviceLinkRequest({
 		writeDeviceAudit({ deviceId, requestId, actorUserId: request.owner_user_id, action: "link.consumed", createdAt: now });
 		const device = rowToLinkedDevice(getLinkedDeviceRow(deviceId));
 		database.exec("COMMIT");
+		upsertDeviceDirectory({ deviceId, orgId: currentOrgId() ?? DEFAULT_ORG_ID });
 		return device;
 	} catch (err) {
 		database.exec("ROLLBACK");
@@ -1369,6 +1785,10 @@ export function consumeDeviceLinkRequest({
 }
 
 export function expireDeviceLinkRequests(now = new Date().toISOString()) {
+	if (controlPlaneLinks()) {
+		const rows = expireDueControlLinkRequests(now);
+		return rows.length;
+	}
 	const database = open();
 	const rows = database
 		.prepare("SELECT id FROM device_link_requests WHERE status IN ('pending', 'approved') AND expires_at <= ?")

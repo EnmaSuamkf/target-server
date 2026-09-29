@@ -32,7 +32,36 @@ export async function login(email: string, password: string) {
 	if (res.status === 401) return { ok: false as const, error: "invalid_credentials" as const };
 	if (res.status === 422) return { ok: false as const, errors: body.errors as FieldError[] };
 	if (!res.ok) throw new Error(`/api/auth/login → ${res.status}`);
+	if (body.selectOrg) {
+		return {
+			ok: true as const,
+			selectOrg: true as const,
+			selectToken: body.selectToken as string,
+			organizations: body.organizations as { id: string; slug: string; name: string }[],
+		};
+	}
 	return { ok: true as const, user: body.user as AuthUser, catalog: body.catalog as PermissionCatalog };
+}
+
+export async function selectOrg(orgId: string, selectToken?: string) {
+	const res = await fetch("/api/auth/select-org", {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ org_id: orgId, ...(selectToken ? { token: selectToken } : {}) }),
+	});
+	const body = await res.json();
+	if (res.status === 403) return { ok: false as const, error: "forbidden" as const };
+	if (res.status === 401) return { ok: false as const, error: "unauthorized" as const };
+	if (!res.ok) throw new Error(`/api/auth/select-org → ${res.status}`);
+	return { ok: true as const, user: body.user as AuthUser, catalog: body.catalog as PermissionCatalog };
+}
+
+export async function fetchOrgChoices(selectToken?: string) {
+	const q = selectToken ? `?token=${encodeURIComponent(selectToken)}` : "";
+	const res = await fetch(`/api/auth/org-choices${q}`);
+	if (res.status === 401) return null;
+	if (!res.ok) throw new Error(`/api/auth/org-choices → ${res.status}`);
+	return parseJson<{ organizations: { id: string; slug: string; name: string }[] }>(res);
 }
 
 export async function logout() {

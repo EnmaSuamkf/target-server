@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { kindLabel, kindTip } from "./api/kinds.ts";
-import { logout, requestPasswordReset } from "./api/auth.ts";
+import { logout, requestPasswordReset, selectOrg } from "./api/auth.ts";
 import type {
 	AuthUser,
 	PermissionCatalog,
@@ -35,6 +35,7 @@ import { SyncClientsPanel } from "./components/SyncClientsPanel.tsx";
 import { DevicesPanel } from "./components/DevicesPanel.tsx";
 import { UsersPanel } from "./components/UsersPanel.tsx";
 import { LibraryPanel } from "./components/LibraryPanel.tsx";
+import { OrganizationsPanel } from "./components/OrganizationsPanel.tsx";
 import { WorkflowDetail } from "./components/WorkflowDetail.tsx";
 import { WorkflowsTable } from "./components/WorkflowsTable.tsx";
 import { useApi } from "./hooks/useApi.ts";
@@ -172,6 +173,43 @@ function ChangePasswordButton() {
  * always answer the same question.
  */
 export function App({ user, catalog = null, onSignOut }: { user: AuthUser; catalog?: PermissionCatalog | null; onSignOut: () => void }) {
+	if (user.superuser) {
+		return (
+			<>
+				<header className="topbar">
+					<div className="topbar-inner">
+						<div className="brand">
+							<span className="mark">
+								<TargetMark />
+							</span>
+							<span className="name">The Target Project</span>
+							<span className="sub">· Organizations</span>
+						</div>
+						<span className="live">
+							<span className="dot" />
+							{user.email}
+							{" · superuser"}
+						</span>
+						<ChangePasswordButton />
+						<button type="button" className="btn btn--ghost btn--sm topbar-signout" onClick={() => void logout().then(onSignOut)}>
+							Sign out
+						</button>
+					</div>
+				</header>
+				<main className="shell">
+					<nav className="dash-tabs" aria-label="Dashboard sections">
+						<button type="button" className="dash-tab dash-tab--active">
+							Organizations
+						</button>
+					</nav>
+					<h1 className="page-title">Organizations</h1>
+					<p className="page-sub">Create isolated organizations and invite each one’s first Organization Admin.</p>
+					<OrganizationsPanel />
+				</main>
+			</>
+		);
+	}
+
 	const can = (permission: string) => hasPermission(user, permission);
 	const canActivity = can("activity.read") || can("activity.read.own");
 	const ownActivityOnly = can("activity.read.own") && !can("activity.read");
@@ -344,6 +382,30 @@ export function App({ user, catalog = null, onSignOut }: { user: AuthUser; catal
 						{" · "}
 						{`live · refresh ${POLL_MS / 1000}s`}
 					</span>
+					{user.organizations && user.organizations.length > 1 && user.org ? (
+						<label className="topbar-org">
+							<span className="visually-hidden">Organization</span>
+							<select
+								className="input input--sm"
+								value={user.org.id}
+								onChange={(e) => {
+									const id = e.target.value;
+									if (id === user.org?.id) return;
+									void selectOrg(id).then((res) => {
+										if (res.ok) location.reload();
+									});
+								}}
+							>
+								{user.organizations.map((org) => (
+									<option key={org.id} value={org.id}>
+										{org.name}
+									</option>
+								))}
+							</select>
+						</label>
+					) : user.org ? (
+						<span className="topbar-org-name">{user.org.name}</span>
+					) : null}
 					<ChangePasswordButton />
 					<button type="button" className="btn btn--ghost btn--sm topbar-signout" onClick={() => void logout().then(onSignOut)}>
 						Sign out

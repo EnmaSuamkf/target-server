@@ -63,7 +63,8 @@ Configuration (env vars):
 | `PORT` | `8900` | HTTP port |
 | `HOST` | `127.0.0.1` | Bind address |
 | `TARGET_INGEST_TOKEN` | _(empty)_ | If set, `POST /ingest` requires `Authorization: Bearer <token>` |
-| `TARGET_SERVER_DB` | `./target-server.db` | SQLite file |
+| `TARGET_SERVER_DB` | `./target-server.db` | SQLite file for the default organization |
+| `TARGET_CONTROL_DB` | `control.db` next to `TARGET_SERVER_DB` | Control-plane SQLite (orgs, directories, Superusers, JWT secret) |
 | `TARGET_SKIP_UI_STALE_CHECK` | _(empty)_ | If set, serve `public/dist` even when it is older than `ui/` |
 | `TARGET_AUTH_SECRET` | _(generated + stored in DB)_ | HS256 signing key for sessions |
 | `TARGET_AUTH_TTL_HOURS` | `8` | Access-token lifetime |
@@ -73,12 +74,15 @@ Configuration (env vars):
 | `TARGET_MAIL_FROM` | `target-server@localhost` | Envelope / From address |
 | `TARGET_MAIL_TRANSPORT` | auto | Force `smtp` \| `file` \| `noop` (file is the local default) |
 | `TARGET_ALLOW_FILE_MAIL` | `0` | Allow file/noop mail transport on a public bind |
-| `TARGET_SEED_ADMIN_PASSWORD` | published default | Password for the seeded `admin@admin.com` — set before first boot when deployed |
+| `TARGET_SEED_ADMIN_PASSWORD` | published default | Password used only when seeding `admin@admin.com` on an empty database. A password later changed by the admin survives restarts. A public bind refuses to start while the published default is still in place. |
 | `TARGET_TRUST_PROXY` | `0` | Use the last hop of `X-Forwarded-For` for rate limiting (only behind a trusted proxy) |
 | `TARGET_AUTH_DISABLED` | `0` | Skip the API auth guard (local dev/tests only; refused on a public bind) |
 | `TARGET_DEVICE_LINKING_MODE` | `legacy` | Device-link rollout: `legacy` keeps current ingest/sync, `optional` accepts linked and legacy hubs, `required` rejects unlinked ingest/sync |
 | `TARGET_GOOGLE_CLIENT_ID` | _(empty)_ | Google OAuth Web client ID — when set with `TARGET_GOOGLE_CLIENT_SECRET`, enables **Sign in with Google** |
 | `TARGET_GOOGLE_CLIENT_SECRET` | _(empty)_ | Google OAuth client secret (**never commit**; set in Render or local env only) |
+| `TARGET_MULTI_ORG` | `0` | `1` enables db-per-org isolation (`TARGET_DEVICE_LINKING_MODE=required` is then mandatory). See [`docs/multi-org.md`](docs/multi-org.md). |
+| `TARGET_SUPERUSER_EMAIL` | _(empty)_ | If set, creates a pending control-plane Superuser (idempotent) and emails a one-time setup link. Never seeds a Superuser password. Local file mail vs Render Resend: [`docs/multi-org.md`](docs/multi-org.md#superuser-bootstrap-local-vs-render). |
+| `TARGET_DEFAULT_ORG_SLUG` | `default` | Slug for organization id `default` on first boot only |
 
 ## Authentication
 
@@ -90,15 +94,21 @@ Human accounts live under `/api/auth/users` — distinct from `GET /api/users`,
 which still lists reporting instance display names.
 
 Roles are dynamic and permissions are enforced by the backend. The protected
-`admin` role has every permission; editing/deleting it, removing the last
-administrator, and deleting/changing your own account are blocked. See
-[`docs/rbac.md`](docs/rbac.md) for the permission catalogue (grouped by server
-vs client scope), `{ user, catalog }` session payload, 401/403 semantics,
-role API and invitation flow. Client-scoped IDs use the `client.` prefix
-(for example `client.read`, `client.workflows.create`); older `remote.*` rows
-are remapped when the database is opened. Resource domains use `create` /
-`edit` / `delete` / `import` / `export` — not the retired
-`remote.templates.manage`, `remote.tcp-tools.manage` or `remote.rci.manage`.
+organization `admin` role has every org-scoped permission; editing/deleting it,
+removing the last administrator in that org, and deleting/changing your own
+account are blocked. Platform Superuser is a control-plane account (not a
+permission id) bootstrapped with `TARGET_SUPERUSER_EMAIL`. See
+[`docs/rbac.md`](docs/rbac.md) for Superuser vs Organization Admin, the
+permission catalogue (grouped by server vs client scope), `{ user, catalog }`
+session payload, 401/403 semantics, role API and invitation flow. One process
+can host many isolated orgs ([`docs/multi-org.md`](docs/multi-org.md)); one
+operator email may belong to several orgs (memberships + org switch). Superuser
+emails stay exclusive. Client-scoped
+IDs use the `client.` prefix (for example `client.read`,
+`client.workflows.create`); older `remote.*` rows are remapped when the
+database is opened. Resource domains use `create` / `edit` / `delete` /
+`import` / `export` — not the retired `remote.templates.manage`,
+`remote.tcp-tools.manage` or `remote.rci.manage`.
 Linked hubs pull a role-filtered catalog through `GET /api/sync/catalog`
 (`catalog-sync/v1`); see [Catalog pull](docs/remote-sync.md#catalog-pull-catalog-syncv1).
 
@@ -236,7 +246,7 @@ On any non-loopback `HOST`, the server **refuses to start** without:
 
 - `TARGET_PUBLIC_URL` (links must not come from the bind address or Host header)
 - a real mail transport (`TARGET_SMTP_URL`, unless `TARGET_ALLOW_FILE_MAIL=1`)
-- a non-default seed admin password (`TARGET_SEED_ADMIN_PASSWORD`)
+- `admin@admin.com` must not still use the published default password (set `TARGET_SEED_ADMIN_PASSWORD` before first boot; later changes are not overwritten)
 
 It also refuses `TARGET_AUTH_DISABLED=1` on a public bind. Set
 `TARGET_INGEST_TOKEN` before exposing the port.
@@ -249,12 +259,15 @@ The repo includes [`render.yaml`](render.yaml) (Blueprint). To deploy:
 2. In the [Render Dashboard](https://dashboard.render.com) → **Blueprints** → **New Blueprint Instance**, select `EnmaSuamkf/target-server`.
 3. When prompted, set the secret env vars (`sync: false` in the Blueprint):
    - `TARGET_SMTP_URL` — e.g. `smtps://resend:re_KEY@smtp.resend.com:465` (Resend API key is read from this URL on Render; SMTP ports are blocked on the free plan, so the server uses Resend's HTTPS API instead)
-   - `TARGET_SEED_ADMIN_PASSWORD` — non-default password for `admin@admin.com` (before first boot)
+   - `TARGET_SEED_ADMIN_PASSWORD` — non-default password for `admin@admin.com` (used only on first boot of an empty database)
    - `TARGET_AUTH_SECRET` — optional; generated on first boot if omitted
    - `TARGET_INGEST_TOKEN` — optional; protects `POST /ingest`
    - `TARGET_GOOGLE_CLIENT_ID` / `TARGET_GOOGLE_CLIENT_SECRET` — optional; enable Google sign-in (set in Environment; see checklist doc)
+   - `TARGET_SUPERUSER_EMAIL` — optional; your mailbox. Boot emails a one-time Superuser setup link via Resend (no `.eml`, no seeded password). See [`docs/multi-org.md`](docs/multi-org.md#superuser-bootstrap-local-vs-render).
 4. Deploy. The public URL is **https://targetworkflows.com** (custom domain; `TARGET_PUBLIC_URL` in the Blueprint). The Render hostname `https://target-server-okjn.onrender.com` remains as a fallback.
-5. **Customer tenants** (isolated instances on subdomains such as `edreams.targetworkflows.com`): see [`docs/tenant-provisioning.md`](docs/tenant-provisioning.md).
+5. **Customer tenants** — two shapes:
+   - **Dedicated Web Service** per customer (subdomains such as `edreams.targetworkflows.com`): [`docs/tenant-provisioning.md`](docs/tenant-provisioning.md).
+   - **Shared server, many orgs:** set `TARGET_SUPERUSER_EMAIL`, complete the emailed `/setup` link, then **Create organization**. Do **not** set `TARGET_MULTI_ORG=1` until hubs are linked (`TARGET_DEVICE_LINKING_MODE=required` is then mandatory and unlinked ingest/sync is rejected). Full checklist: [`docs/multi-org.md`](docs/multi-org.md#superuser-bootstrap-local-vs-render).
 
 Build: `npm ci && npm --prefix ui ci && npm run build`. Start: `node server.mjs`.
 Health check: `GET /health`. SQLite lives at `TARGET_SERVER_DB` (ephemeral on the free plan unless you add a persistent disk).

@@ -4,14 +4,23 @@
 
 const SETUP_PLACEHOLDER = "/setup?token=…";
 
-function inviteHeader(origin, email) {
+function inviteHeader(origin, email, organizationName) {
+	const orgLine = organizationName
+		? {
+				text: `You have been given an account on ${organizationName} on the Target report server.`,
+				html: `<p>You have been given an account on <strong>${organizationName}</strong> on the Target report server.</p>`,
+			}
+		: {
+				text: "You have been given an account on the Target report server.",
+				html: "<p>You have been given an account on the Target report server.</p>",
+			};
 	return {
-		text: `You have been given an account on the Target report server.
+		text: `${orgLine.text}
 
   Server:  ${origin}/
   Email:   ${email}
 `,
-		html: `<p>You have been given an account on the Target report server.</p>
+		html: `${orgLine.html}
 <ul><li><strong>Server:</strong> ${origin}/</li><li><strong>Email:</strong> ${email}</li></ul>`,
 	};
 }
@@ -45,10 +54,12 @@ Open the page and choose <Continue with Google>. If the Google app is still in T
 	};
 }
 
-export function inviteMail({ publicUrl, email, allowPassword, allowGoogle, setupUrl, loginUrl }) {
+export function inviteMail({ publicUrl, email, allowPassword, allowGoogle, setupUrl, loginUrl, organizationName }) {
 	const origin = publicUrl.replace(/\/$/, "");
-	const subject = "Your Target report server account";
-	const header = inviteHeader(origin, email);
+	const subject = organizationName
+		? `Your ${organizationName} account on the Target report server`
+		: "Your Target report server account";
+	const header = inviteHeader(origin, email, organizationName);
 
 	const setupLink = setupUrl ?? `${origin}${SETUP_PLACEHOLDER}`;
 	const loginLink = loginUrl ?? `${origin}/login`;

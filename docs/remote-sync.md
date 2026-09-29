@@ -24,6 +24,11 @@ A linked device (owner known from device-link) receives the owner's current
 DB-role grants plus the same grouped catalogue as `/api/auth/me`. A legacy
 unlinked client receives `owner: null`; the server does not invent a user.
 
+On a multi-org server (`TARGET_MULTI_ORG=1`), every sync route is scoped to
+the **device’s organization** (the org of the human who approved the link).
+Operator JWT sessions see only clients, commands, remote workflows and catalog
+in their own org. See [`docs/multi-org.md`](multi-org.md).
+
 ```json
 {
   "client_id": "client-id",

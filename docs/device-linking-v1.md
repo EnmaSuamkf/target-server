@@ -96,6 +96,9 @@ browser. It does not ask for, store, or transmit a human password.
 3. **Human approves or denies.** The browser posts using its same-site human
    session. The server attaches the authenticated user as owner, records an
    audit event, and changes only that request to `approved`/`denied`.
+   **The device’s organization is the approver’s organization** (the JWT org,
+   not a field on the pairing payload). Later ingest and sync for that
+   credential stay in that org. See [`docs/multi-org.md`](multi-org.md).
 4. **Hub polls then consumes.** Polling says only `pending`, `approved`,
    `denied`, or `expired`. Once approved, the hub makes a separate atomic
    consume call. That call returns a device secret exactly once. The hub stores
@@ -347,7 +350,7 @@ The implementation introduces an explicit deployment setting:
   allowlist/registration secret.
 * `required` accepts device-protected ingest/sync only. Legacy requests return
   `401 device_link_required`; a hub remains locally operational and tells its
-  operator how to relink.
+  operator how to relink. `TARGET_MULTI_ORG=1` **requires** this mode at boot.
 
 SQLite migrations are additive: device, credential-version, link-request,
 nonce and audit tables coexist with `instances`, `clients`, `events`, and

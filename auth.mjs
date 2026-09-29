@@ -3,7 +3,8 @@
  */
 import { createHash, createHmac, randomBytes, scrypt, timingSafeEqual } from "node:crypto";
 import { promisify } from "node:util";
-import { getAuthUserById, getAuthUserPermissions, getJwtSecret } from "./db.mjs";
+import { getAuthUserById, getAuthUserPermissions, getJwtSecret, currentOrgId, DEFAULT_ORG_ID } from "./db.mjs";
+import { getSuperuserById, getUserDirectoryByOrgUser } from "./control-plane.mjs";
 
 const scryptAsync = promisify(scrypt);
 
@@ -99,10 +100,21 @@ export function readToken(req) {
 
 export function sessionPayload(user) {
 	const now = Math.floor(Date.now() / 1000);
+	if (user.superuser) {
+		return {
+			sub: user.id,
+			email: user.email,
+			su: true,
+			tv: user.tokenVersion,
+			iat: now,
+			exp: now + ttlSeconds(),
+		};
+	}
 	return {
 		sub: user.id,
 		email: user.email,
 		role: user.role,
+		org: currentOrgId() ?? DEFAULT_ORG_ID,
 		tv: user.tokenVersion,
 		iat: now,
 		exp: now + ttlSeconds(),
@@ -127,6 +139,14 @@ export function userIsActive(row) {
 }
 
 export function publicUser(row) {
+	if (row.superuser) {
+		return {
+			id: row.id,
+			email: row.email,
+			superuser: true,
+			permissions: [],
+		};
+	}
 	return {
 		id: row.id,
 		email: row.email,
@@ -140,6 +160,15 @@ export function publicUser(row) {
 	};
 }
 
+function maybeRefreshCookie(res, payload, user, secret) {
+	if (!res || typeof payload.iat !== "number") return;
+	const half = ttlSeconds() / 2;
+	if (Math.floor(Date.now() / 1000) - payload.iat >= half) {
+		const jwt = signJwt(sessionPayload(user), secret);
+		setAuthCookie(res, jwt);
+	}
+}
+
 /** Verify JWT + token_version against the DB. Optionally refresh a half-expired cookie. */
 export async function authenticate(req, res = null) {
 	const token = readToken(req);
@@ -147,19 +176,24 @@ export async function authenticate(req, res = null) {
 	const secret = getJwtSecret();
 	const payload = verifyJwt(token, secret);
 	if (!payload || typeof payload.sub !== "string") return null;
+	if (payload.su === true) {
+		const su = getSuperuserById(payload.sub);
+		if (!su || su.tokenVersion !== payload.tv) return null;
+		su.permissions = [];
+		maybeRefreshCookie(res, payload, su, secret);
+		return su;
+	}
+	const orgClaim = typeof payload.org === "string" && payload.org ? payload.org : DEFAULT_ORG_ID;
+	const dir = getUserDirectoryByOrgUser(orgClaim, payload.sub);
+	if (!dir) return null;
+	const ctxOrg = currentOrgId();
+	if (ctxOrg && ctxOrg !== orgClaim) return null;
 	const user = getAuthUserById(payload.sub);
 	if (!user || user.tokenVersion !== payload.tv) return null;
 	// Roles are deliberately resolved for every request. JWTs carry only an
 	// identity/version, so a DB role or permission change takes effect at once.
 	user.permissions = getAuthUserPermissions(user);
-
-	if (res && typeof payload.iat === "number") {
-		const half = ttlSeconds() / 2;
-		if (Math.floor(Date.now() / 1000) - payload.iat >= half) {
-			const jwt = signJwt(sessionPayload(user), secret);
-			setAuthCookie(res, jwt);
-		}
-	}
+	maybeRefreshCookie(res, payload, user, secret);
 	return user;
 }
 
@@ -180,6 +214,18 @@ export async function requirePermission(req, res, permission) {
 	if (!user.permissions.includes(permission)) {
 		res.writeHead(403, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
 		res.end(JSON.stringify({ error: "forbidden", permission }));
+		return null;
+	}
+	return user;
+}
+
+/** Platform operator. Hard-coded; never a PERMISSIONS id. */
+export async function requireSuperuser(req, res) {
+	const user = await requireAuth(req, res);
+	if (!user) return null;
+	if (!user.superuser) {
+		res.writeHead(403, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
+		res.end(JSON.stringify({ error: "forbidden" }));
 		return null;
 	}
 	return user;

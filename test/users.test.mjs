@@ -54,7 +54,7 @@ test("create user returns invite url and writes mail without password", async ()
 	const res = await fetch(`${base}/api/auth/users`, {
 		method: "POST",
 		headers: { "content-type": "application/json", cookie },
-		body: JSON.stringify({ email: "invited@example.com" }),
+		body: JSON.stringify({ email: "invited@example.com", role_id: "admin" }),
 	});
 	assert.equal(res.status, 201);
 	const body = await res.json();
@@ -76,9 +76,21 @@ test("duplicate email 409", async () => {
 	const res = await fetch(`${base}/api/auth/users`, {
 		method: "POST",
 		headers: { "content-type": "application/json", cookie },
-		body: JSON.stringify({ email: "invited@example.com" }),
+		body: JSON.stringify({ email: "invited@example.com", role_id: "admin" }),
 	});
 	assert.equal(res.status, 409);
+});
+
+test("create user without role_id returns 422", async () => {
+	const cookie = await adminSession();
+	const res = await fetch(`${base}/api/auth/users`, {
+		method: "POST",
+		headers: { "content-type": "application/json", cookie },
+		body: JSON.stringify({ email: "missing-role@example.com" }),
+	});
+	assert.equal(res.status, 422);
+	const body = await res.json();
+	assert.ok(body.errors.some((e) => e.field === "role_id"));
 });
 
 test("google-only invite rejected when OAuth not configured", async () => {
@@ -88,6 +100,7 @@ test("google-only invite rejected when OAuth not configured", async () => {
 		headers: { "content-type": "application/json", cookie },
 		body: JSON.stringify({
 			email: "google-only@example.com",
+			role_id: "admin",
 			activation: { google: true },
 		}),
 	});
@@ -104,6 +117,7 @@ test("google-only invite: API and mail without setup token", async () => {
 			headers: { "content-type": "application/json", cookie },
 			body: JSON.stringify({
 				email: "google-mail@example.com",
+				role_id: "admin",
 				activation: { google: true },
 			}),
 		});
@@ -131,6 +145,7 @@ test("password-only invite: API and mail with setup token, no Google", async () 
 		headers: { "content-type": "application/json", cookie },
 		body: JSON.stringify({
 			email: "password-only@example.com",
+			role_id: "admin",
 			activation: { password: true, google: false },
 		}),
 	});
@@ -156,6 +171,7 @@ test("both activation: API and mail include setup and Google", async () => {
 			headers: { "content-type": "application/json", cookie },
 			body: JSON.stringify({
 				email: "both-methods@example.com",
+				role_id: "admin",
 				activation: { password: true, google: true },
 			}),
 		});
@@ -184,6 +200,7 @@ test("resend preserves google-only methods without setup token", async () => {
 				headers: { "content-type": "application/json", cookie },
 				body: JSON.stringify({
 					email: "resend-google@example.com",
+					role_id: "admin",
 					activation: { google: true },
 				}),
 			})
@@ -218,6 +235,7 @@ test("resend preserves password-only methods with new setup token", async () => 
 			headers: { "content-type": "application/json", cookie },
 			body: JSON.stringify({
 				email: "resend-password@example.com",
+				role_id: "admin",
 				activation: { password: true, google: false },
 			}),
 		})
@@ -259,7 +277,7 @@ test("setup completes invitation and signs in", async () => {
 		await fetch(`${base}/api/auth/users`, {
 			method: "POST",
 			headers: { "content-type": "application/json", cookie },
-			body: JSON.stringify({ email: "fresh@example.com" }),
+		body: JSON.stringify({ email: "fresh@example.com", role_id: "admin" }),
 		})
 	).json();
 	const token = new URL(created.invite.url).searchParams.get("token");

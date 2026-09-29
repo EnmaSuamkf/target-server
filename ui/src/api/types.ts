@@ -238,14 +238,17 @@ export const EMPTY_FILTERS: Filters = {
 export interface AuthUser {
 	id: string;
 	email: string;
-	role: string;
+	role?: string;
 	permissions: string[];
-	createdAt: string;
-	lastLoginAt: string | null;
-	status: "pending" | "active";
+	createdAt?: string;
+	lastLoginAt?: string | null;
+	status?: "pending" | "active";
 	usesDefaultPassword?: boolean;
 	inviteAllowPassword?: boolean;
 	inviteAllowGoogle?: boolean;
+	superuser?: boolean;
+	org?: { id: string; slug: string; name: string } | null;
+	organizations?: { id: string; slug: string; name: string }[];
 }
 
 export type PermissionScope = "server" | "client";
@@ -300,6 +303,19 @@ export interface FieldError {
 	field: string;
 	code: string;
 	message: string;
+}
+
+/** Superuser control-plane organization (`GET /api/platform/orgs`). */
+export interface PlatformOrg {
+	id: string;
+	slug: string;
+	name: string;
+	status: string;
+	createdAt: string;
+	userCount: number;
+	deviceCount: number;
+	adminEmail?: string | null;
+	adminStatus?: "pending" | "active" | null;
 }
 
 /** Sync client registered for remote control (`GET /api/sync/clients`). */

@@ -1,8 +1,19 @@
-# Provision a customer tenant (subdomain)
+# Provision a customer tenant
 
-Each customer gets an **isolated** `target-server` Web Service on Render, a **fresh SQLite disk**, and a subdomain of `targetworkflows.com`.
+Two supported shapes:
 
-Example: eDreams → `https://edreams.targetworkflows.com`
+1. **Dedicated deployment** (this document’s original path): each customer gets
+   an isolated `target-server` Web Service on Render, a **fresh SQLite disk**,
+   and a subdomain of `targetworkflows.com`.
+2. **Shared server, many orgs:** one process, one control-plane DB, and one
+   SQLite file per organization. A platform Superuser creates the org and
+   invites its first Organization Admin. See [`docs/multi-org.md`](multi-org.md).
+
+Dedicated deployments remain fully supported. Use them when the customer needs
+a separate Render service, disk, or subdomain. Use a shared org when several
+customers share one `target-server` instance.
+
+Example dedicated URL: eDreams → `https://edreams.targetworkflows.com`
 
 ## Naming
 
@@ -39,8 +50,7 @@ Example: eDreams → `https://edreams.targetworkflows.com`
 | `TARGET_MAIL_TRANSPORT` | `resend` |
 | `TARGET_ALLOW_FILE_MAIL` | `1` (boot safety; keep Resend configured) |
 | `TARGET_SERVER_DB` | `/var/data/target-server.db` |
-| `TARGET_USE_PUBLISHED_ADMIN` | `1` |
-| `TARGET_SEED_ADMIN_PASSWORD` | unique strong password (store in password manager) |
+| `TARGET_SEED_ADMIN_PASSWORD` | unique strong password (store in password manager; used only on first boot of an empty database) |
 | `TARGET_AUTH_SECRET` | random 32+ bytes hex |
 | `TARGET_INGEST_TOKEN` | random token |
 | `TARGET_DEVICE_LINKING_MODE` | `optional` |
@@ -87,7 +97,14 @@ Save. While the consent screen is in **Testing**, add customer Google accounts a
 
 ## Notes
 
-- Tenants do **not** share SQLite data; each disk is isolated.
+- Tenants on dedicated services do **not** share SQLite data; each disk is isolated.
+- On a **shared** multi-org server, do not spin a new Web Service. On the
+  primary Render service set `TARGET_SUPERUSER_EMAIL`, complete the Resend
+  setup mail, then **Create organization** (or `POST /api/platform/orgs`).
+  Checklist: [`docs/multi-org.md`](multi-org.md#superuser-bootstrap-local-vs-render).
+  Each org is `org-<slug>.db` plus a control-plane row. Backup that file (and
+  `/var/data/control.db`) independently.
 - Mail sending reuses the verified Resend domain `targetworkflows.com`.
 - Prefer linking the GitHub repo via **Git Provider** so each tenant auto-deploys from `main`.
 - Blueprint `render.yaml` drives the **primary** service (`targetworkflows.com`) only. Customer tenants are separate Web Services so a Blueprint sync cannot overwrite their URLs/secrets.
+- **Existing tenants:** if `admin@admin.com` still uses the published default password (`password-target-server`), rotate it before deploying this change. A public bind now refuses to start while that default remains, and `TARGET_SEED_ADMIN_PASSWORD` is no longer re-applied on every boot — a password the admin already changed survives restarts.
