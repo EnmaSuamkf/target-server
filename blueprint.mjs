@@ -145,6 +145,13 @@ export const SCHEDULE_TIMEZONE = Joi.string()
 	.custom((value, helpers) => (isValidTimeZone(value) ? value : helpers.error("schedule.timezone")))
 	.messages({ "schedule.timezone": "timezone must be a valid IANA time zone (e.g. Europe/Madrid)" });
 
+/** Operator-facing schedule body: create-with-schedule and PUT …/schedule (a full replace). */
+const REMOTE_SCHEDULE = Joi.object({
+	spec: SCHEDULE_SPEC.required(),
+	timezone: SCHEDULE_TIMEZONE.required(),
+	include_previous: Joi.boolean().default(true),
+});
+
 export const COMMAND_TYPES = [
 	"workflow.create",
 	"workflow.delete",
@@ -595,13 +602,9 @@ export const BLUEPRINTS = {
 		conversation_context: OPTIONAL_STRING.optional(),
 		agent: Joi.string().valid("claude", "free-code", "cursor").optional(),
 		template_id: STRING.optional(),
+		schedule: REMOTE_SCHEDULE.optional(),
 	}),
-	// Operator-facing schedule body (create with schedule, PUT schedule).
-	"sync.remote_workflow.schedule": Joi.object({
-		spec: SCHEDULE_SPEC.required(),
-		timezone: SCHEDULE_TIMEZONE.required(),
-		include_previous: Joi.boolean().default(true),
-	}),
+	"sync.remote_workflow.schedule": REMOTE_SCHEDULE,
 	"sync.remote_workflow.steps_from_template": Joi.object({
 		template_id: STRING.required(),
 	}),

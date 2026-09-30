@@ -4092,12 +4092,21 @@ export function updateSeries(id, patch = {}, { updatedAt = null } = {}) {
 	return info.changes > 0 ? getSeries(id) : null;
 }
 
-/** Series of one client, newest first. */
-export function listSeriesByClient(clientId) {
+/** Series of one client (every client of the org when `clientId` is null), newest first. */
+export function listSeriesByClient(clientId = null) {
+	const sql = clientId
+		? "SELECT * FROM remote_schedule_series WHERE client_id = ? ORDER BY created_at DESC, rowid DESC"
+		: "SELECT * FROM remote_schedule_series ORDER BY created_at DESC, rowid DESC";
+	const stmt = open().prepare(sql);
+	return (clientId ? stmt.all(clientId) : stmt.all()).map(rowToSeries);
+}
+
+/** Remote workflows that are instances of a series, oldest first (execution order). */
+export function listSeriesInstances(seriesId) {
 	return open()
-		.prepare("SELECT * FROM remote_schedule_series WHERE client_id = ? ORDER BY created_at DESC, rowid DESC")
-		.all(clientId)
-		.map(rowToSeries);
+		.prepare("SELECT * FROM remote_workflows WHERE series_id = ? ORDER BY created_at ASC, rowid ASC")
+		.all(seriesId)
+		.map(rowToRemoteWorkflow);
 }
 
 const REMOTE_SCHEDULE_FIELD_COLUMNS = Object.freeze({
