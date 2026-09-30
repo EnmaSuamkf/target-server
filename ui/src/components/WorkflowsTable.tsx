@@ -1,6 +1,10 @@
-import type { WorkflowRow } from "../api/types.ts";
+import { useState } from "react";
+import type { SyncRemoteWorkflowRow, SyncScheduleSeriesRow, WorkflowRow } from "../api/types.ts";
 import { compactTokens, shortId, timeAgo } from "../lib/format.ts";
+import { DEFAULT_SCHEDULE_FILTER, matchesScheduleFilter, type ScheduleFilter } from "../lib/scheduleView.ts";
 import { AgentBadge, SandboxBadge, StatusBadge } from "./Badges.tsx";
+import { ScheduleBadges } from "./ScheduleBadges.tsx";
+import { ScheduleFilterBar } from "./ScheduleFilterBar.tsx";
 
 const COLUMNS = ["Workflow", "User", "Agent", "Sandbox", "Status", "Steps", "Tokens (in / out)", "Last activity"];
 
@@ -26,12 +30,29 @@ interface WorkflowsTableProps {
 	workflows: WorkflowRow[] | null;
 	selectedId: string;
 	onSelect: (id: string) => void;
+	/** Remote workflows, joined to reported rows by local id; null when the viewer cannot see them. */
+	remoteWorkflows?: SyncRemoteWorkflowRow[] | null;
+	series?: SyncScheduleSeriesRow[] | null;
 }
 
 /** The workflow-centric fleet view: one row per reported workflow. */
-export function WorkflowsTable({ workflows, selectedId, onSelect }: WorkflowsTableProps) {
+export function WorkflowsTable({ workflows, selectedId, onSelect, remoteWorkflows = null, series = null }: WorkflowsTableProps) {
+	const [filter, setFilter] = useState<ScheduleFilter>(DEFAULT_SCHEDULE_FILTER);
 	if (!workflows || workflows.length === 0) return <div className="empty">No workflows reported in this range.</div>;
+	const remoteByLocalId = new Map((remoteWorkflows ?? []).filter((r) => r.local_id).map((r) => [r.local_id as string, r]));
+	const seriesById = new Map((series ?? []).map((s) => [s.id, s]));
+	// Schedule and archive state lives on the remote workflow. A workflow that is
+	// not remote has neither, so it only shows under "All".
+	const visible = remoteWorkflows
+		? workflows.filter((w) => {
+				const remote = remoteByLocalId.get(w.workflowId);
+				return remote ? matchesScheduleFilter(remote, filter) : filter === "all";
+			})
+		: workflows;
 	return (
+		<>
+		{remoteWorkflows ? <ScheduleFilterBar value={filter} onChange={setFilter} /> : null}
+		{visible.length === 0 ? <div className="empty">No workflows match this filter.</div> : (
 		<table className="wf-table">
 			<thead>
 				<tr>
@@ -41,7 +62,8 @@ export function WorkflowsTable({ workflows, selectedId, onSelect }: WorkflowsTab
 				</tr>
 			</thead>
 			<tbody>
-				{workflows.map((w) => {
+				{visible.map((w) => {
+					const remote = remoteByLocalId.get(w.workflowId);
 					const selected = w.workflowId === selectedId;
 					return (
 						<tr
@@ -51,7 +73,10 @@ export function WorkflowsTable({ workflows, selectedId, onSelect }: WorkflowsTab
 							onClick={() => onSelect(selected ? "" : w.workflowId)}
 						>
 							<td>
-								<div className="wf-name">{w.name}</div>
+								<div className="wf-name">
+									{w.name}
+									{remote ? <ScheduleBadges workflow={remote} series={remote.series_id ? seriesById.get(remote.series_id) : null} /> : null}
+								</div>
 								<div className="mono wf-id">{shortId(w.workflowId)}</div>
 							</td>
 							<td>{w.user || <span className="badge badge--neutral">anonymous</span>}</td>
@@ -74,5 +99,7 @@ export function WorkflowsTable({ workflows, selectedId, onSelect }: WorkflowsTab
 				})}
 			</tbody>
 		</table>
+		)}
+		</>
 	);
 }

@@ -531,6 +531,27 @@ The **Agent Resources** tab holds workflow templates, TCP packs and RCI resource
 stored on this server. It is not the per-client **Remote resources** panel on
 Remote control — Agent Resources items stay on the server and are not pushed to hubs.
 
+### Scheduled series
+
+Remote workflows can run on a schedule (`docs/remote-sync.md` has the API and
+protocol). A schedule is a **series**: every run is its own workflow, cloned by
+the hub from the armed instance when the previous run fires.
+
+- **Schedule editor** (`ScheduleEditor`): in the *New remote workflow* dialog
+  ("When it runs") and in a workflow's **Schedule** section (save / cancel).
+  Choose once, daily or weekly, a time zone (defaults to the browser's) and
+  whether each run gets a reference to the previous one. A preview lists the
+  next three runs, computed in the browser with `Intl` using the same rules as the
+  hub (`ui/src/lib/schedule.ts`). It needs `client.workflows.execute` **and**
+  `client.workflows.manage`, a client that advertises `workflow.set_schedule`, and
+  a workflow that is not running; otherwise it is disabled with the reason.
+- **Badges**: "Scheduled · next …" on the armed instance, "Run of <series>" on
+  the rest, "Archived" on archived workflows.
+- **Filters** (remote workflows list and the activity table): All (hides
+  archived), Scheduled, Scheduled runs, Archived.
+- **Series view**: each series with its instances (status, created by, scheduled
+  for), missed/skipped notices and a banner when the series is broken.
+
 The app polls the JSON API every 4s and shows KPIs, the workflow table (with a
 per-workflow step canvas), the instance fleet, event/version breakdowns and a
 live event feed.

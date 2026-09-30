@@ -17,6 +17,7 @@ import type {
 	SyncEventsResponse,
 	SyncRemoteWorkflowDetailResponse,
 	SyncRemoteWorkflowsResponse,
+	SyncScheduleSeriesResponse,
 	LinkedDevicesResponse,
 	RemoteResourceActions,
 } from "./api/types.ts";
@@ -317,6 +318,17 @@ export function App({ user, catalog = null, onSignOut }: { user: AuthUser; catal
 	const syncRefresh = useCallback(() => setSyncRefreshKey((k) => k + 1), []);
 	const remoteActive = tab === "remote" && canSeeRemoteArea;
 	const syncQuery = remoteActive && syncRefreshKey ? `?_=${syncRefreshKey}` : "";
+	// The activity table badges and filters scheduled/archived workflows, which
+	// only the sync endpoints know about.
+	const scheduleViewActive = canRemote;
+	const { data: scheduleViewWorkflows } = useApi<SyncRemoteWorkflowsResponse>(
+		activityActive && scheduleViewActive ? "/api/sync/remote-workflows" : null,
+		POLL_MS * 4,
+	);
+	const { data: scheduleViewSeries } = useApi<SyncScheduleSeriesResponse>(
+		activityActive && scheduleViewActive ? "/api/sync/schedule-series" : null,
+		POLL_MS * 4,
+	);
 	const { data: syncClients } = useApi<SyncClientsResponse>(
 		remoteActive && canRemote ? `/api/sync/clients${syncQuery}` : null,
 		POLL_MS,
@@ -510,7 +522,13 @@ export function App({ user, catalog = null, onSignOut }: { user: AuthUser; catal
 
 						<div className="panel">
 							<h2>Workflows</h2>
-							<WorkflowsTable workflows={wfs?.workflows ?? null} selectedId={filters.workflow} onSelect={selectWorkflow} />
+							<WorkflowsTable
+								workflows={wfs?.workflows ?? null}
+								selectedId={filters.workflow}
+								onSelect={selectWorkflow}
+								remoteWorkflows={scheduleViewWorkflows?.remote_workflows ?? null}
+								series={scheduleViewSeries?.series ?? null}
+							/>
 							<Pagination
 								total={wfs ? wfs.total : null}
 								page={page}
