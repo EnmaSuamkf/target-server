@@ -12,6 +12,8 @@ import type {
 	RemoteResourceDomain,
 	RemoteResourceBundle,
 	RemoteResourcesResponse,
+	ScheduleBody,
+	SyncScheduleSeries,
 	TcpSelection,
 } from "./types.ts";
 
@@ -47,6 +49,7 @@ export async function createRemoteWorkflow(body: {
 	conversation_context?: string;
 	agent?: string;
 	template_id?: string;
+	schedule?: ScheduleBody;
 }): Promise<{ ok: true; data: SyncCreateRemoteWorkflowResponse } | { ok: false; errors: FieldError[] }> {
 	const res = await fetch("/api/sync/remote-workflows", {
 		method: "POST",
@@ -58,6 +61,51 @@ export async function createRemoteWorkflow(body: {
 		return { ok: false, errors: syncApiErrors(res, data) };
 	}
 	return { ok: true, data: data as SyncCreateRemoteWorkflowResponse };
+}
+
+/** Schedule (or re-schedule) a remote workflow; a full replace, refused 409 while a run is in progress. */
+export async function setRemoteWorkflowSchedule(
+	remoteId: string,
+	schedule: ScheduleBody,
+): Promise<
+	| { ok: true; remote_workflow: SyncRemoteWorkflowRow; series: SyncScheduleSeries; command: SyncCommand }
+	| { ok: false; errors: FieldError[] }
+> {
+	const res = await fetch(`/api/sync/remote-workflows/${encodeURIComponent(remoteId)}/schedule`, {
+		method: "PUT",
+		headers: { "content-type": "application/json" },
+		credentials: "same-origin",
+		body: JSON.stringify(schedule),
+	});
+	const data = (await res.json().catch(() => ({}))) as {
+		remote_workflow?: SyncRemoteWorkflowRow;
+		series?: SyncScheduleSeries;
+		command?: SyncCommand;
+	} & Record<string, unknown>;
+	if (!res.ok) return { ok: false, errors: syncApiErrors(res, data) };
+	if (!data.remote_workflow || !data.series || !data.command) {
+		return { ok: false, errors: [{ field: "_", code: "bad_response", message: "missing schedule in response" }] };
+	}
+	return { ok: true, remote_workflow: data.remote_workflow, series: data.series, command: data.command };
+}
+
+/** Cancel the series of a remote workflow; `command` is null when it was already cancelled. */
+export async function cancelRemoteWorkflowSchedule(
+	remoteId: string,
+): Promise<{ ok: true; series: SyncScheduleSeries; command: SyncCommand | null } | { ok: false; errors: FieldError[] }> {
+	const res = await fetch(`/api/sync/remote-workflows/${encodeURIComponent(remoteId)}/schedule`, {
+		method: "DELETE",
+		credentials: "same-origin",
+	});
+	const data = (await res.json().catch(() => ({}))) as {
+		series?: SyncScheduleSeries;
+		command?: SyncCommand | null;
+	} & Record<string, unknown>;
+	if (!res.ok) return { ok: false, errors: syncApiErrors(res, data) };
+	if (!data.series) {
+		return { ok: false, errors: [{ field: "_", code: "bad_response", message: "missing series in response" }] };
+	}
+	return { ok: true, series: data.series, command: data.command ?? null };
 }
 
 export async function appendRemoteTemplate(
@@ -255,4 +303,5 @@ export function downloadJson(filename: string, value: unknown) {
 	URL.revokeObjectURL(url);
 }
 
+export type { SyncScheduleSeriesResponse } from "./types.ts";
 export type { SyncClientsResponse, SyncRemoteWorkflowsResponse, SyncEventsResponse, SyncRemoteWorkflowDetailResponse, RemoteResourcesResponse, RemoteResource };

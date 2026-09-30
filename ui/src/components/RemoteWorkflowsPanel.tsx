@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import {
 	appendRemoteTemplate,
+	cancelRemoteWorkflowSchedule,
 	createRemoteWorkflow,
 	deleteRemoteWorkflow,
 	enqueueRemoteCommand,
 	setRemoteWorkflowResourceSets,
+	setRemoteWorkflowSchedule,
 	setRemoteWorkflowTcps,
 	updateRemoteWorkflowContext,
 	updateRemoteStepRunSelection,
@@ -13,12 +15,14 @@ import type {
 	FieldError,
 	ResourceSelection,
 	ResourceSetsResponse,
+	ScheduleBody,
 	SyncClientRow,
 	SyncCommand,
 	SyncEventRow,
 	SyncRemoteStepRow,
 	SyncRemoteWorkflowDetailResponse,
 	SyncRemoteWorkflowRow,
+	SyncScheduleSeriesResponse,
 	TcpSelection,
 	TcpsResponse,
 	TemplatesResponse,
@@ -28,9 +32,22 @@ import type {
 import { useApi } from "../hooks/useApi.ts";
 import { sameResourceSelections } from "../lib/rciSelection.ts";
 import { sameTcpSelections } from "../lib/tcpSelection.ts";
+import {
+	describeSchedule,
+	draftFromSeries,
+	draftToBody,
+	emptyScheduleDraft,
+	formatInZone,
+	type ScheduleDraft,
+} from "../lib/schedule.ts";
 import { Field } from "./Field.tsx";
 import { Modal } from "./Modal.tsx";
 import { ResourceSelectionEditor } from "./ResourceSelectionEditor.tsx";
+import { ScheduleBadges } from "./ScheduleBadges.tsx";
+import { ScheduleEditor } from "./ScheduleEditor.tsx";
+import { ScheduleFilterBar } from "./ScheduleFilterBar.tsx";
+import { SeriesView } from "./SeriesView.tsx";
+import { DEFAULT_SCHEDULE_FILTER, filterRemoteWorkflows, type ScheduleFilter } from "../lib/scheduleView.ts";
 import { TcpSelectionEditor } from "./TcpSelectionEditor.tsx";
 import { shortId, timeAgo } from "../lib/format.ts";
 import { WorkflowDetail } from "./WorkflowDetail.tsx";
@@ -127,6 +144,26 @@ const RUNNER_LABELS: Record<string, string> = {
 };
 
 const POLL_MS = 4000;
+
+/** Scheduling makes the hub run the workflow unattended, so the server requires both (D22). */
+const SCHEDULE_COMMAND = "workflow.set_schedule";
+/** A run in progress; the server refuses to change its schedule (409 remote_workflow_busy). */
+const SCHEDULE_BUSY_STATUSES = new Set(["running", "waiting", "paused", "deleting"]);
+
+/** Why scheduling cannot be used for `client`, or null when it can. */
+function scheduleUnavailableReason(
+	client: SyncClientRow | null,
+	permissions: { execute: boolean; manage: boolean },
+): string | null {
+	if (!permissions.execute || !permissions.manage) {
+		return "it needs both client.workflows.execute and client.workflows.manage.";
+	}
+	if (!client) return "pick a client first.";
+	if (!client.capabilities?.commands?.includes(SCHEDULE_COMMAND)) {
+		return "this client's Target hub does not support scheduled workflows yet — update it to schedule runs.";
+	}
+	return null;
+}
 const RUN_LIFECYCLE_COMMANDS = new Set(["workflow.start", "workflow.resume", "workflow.restart"]);
 
 /** Start only runs pending steps; completed/failed workflows or done steps need restart. */
@@ -272,6 +309,10 @@ export function RemoteWorkflowsPanel({
 	const [tcpDraft, setTcpDraft] = useState<TcpSelection[]>([]);
 	const [rciDraft, setRciDraft] = useState<ResourceSelection[]>([]);
 	const [catalogError, setCatalogError] = useState<string | null>(null);
+	const [createSchedule, setCreateSchedule] = useState<ScheduleDraft>(() => emptyScheduleDraft());
+	const [scheduleDraft, setScheduleDraft] = useState<ScheduleDraft>(() => emptyScheduleDraft());
+	const [scheduleErrors, setScheduleErrors] = useState<string[]>([]);
+	const [scheduleFilter, setScheduleFilter] = useState<ScheduleFilter>(DEFAULT_SCHEDULE_FILTER);
 
 	const activeClients = (clients ?? []).filter((c) => c.status === "active");
 	const createClient = activeClients.find((c) => c.id === clientId) ?? null;
@@ -291,6 +332,18 @@ export function RemoteWorkflowsPanel({
 	const { data: resourceSetsData } = useApi<ResourceSetsResponse>(
 		permissions.rciRead ? "/api/resource-sets" : null,
 	);
+	const { data: seriesData } = useApi<SyncScheduleSeriesResponse>("/api/sync/schedule-series", POLL_MS);
+	const allSeries = seriesData?.series ?? [];
+	const seriesById = useMemo(() => new Map(allSeries.map((s) => [s.id, s])), [allSeries]);
+	const visibleWorkflows = filterRemoteWorkflows(workflows ?? [], scheduleFilter);
+	const selectedSeries = seriesData?.series.find((s) => s.id === selected?.series_id) ?? null;
+	const liveSeries = selectedSeries && selectedSeries.state !== "cancelled" ? selectedSeries : null;
+	const createScheduleReason = scheduleUnavailableReason(createClient, permissions);
+	const selectedScheduleReason =
+		scheduleUnavailableReason(selectedClient, permissions) ??
+		(selected && SCHEDULE_BUSY_STATUSES.has(selected.status ?? "")
+			? `this workflow is ${selected.status}; its schedule can be changed once the run is over.`
+			: null);
 	const templates = templatesData?.templates ?? [];
 	const tcps = tcpsData?.tcps ?? [];
 	const resourceSets = resourceSetsData?.resourceSets ?? [];
@@ -317,7 +370,16 @@ export function RemoteWorkflowsPanel({
 		setRciDraft(selected?.resource_selections ?? []);
 		setAppendTemplateId("");
 		setCatalogError(null);
+		setScheduleErrors([]);
 	}, [selectedId]);
+
+	// Re-seed from the stored series when the workflow or its series changes — not on every poll refresh.
+	const seriesSignature = liveSeries
+		? `${liveSeries.id}:${liveSeries.updated_at}`
+		: (selected?.series_id ?? "none");
+	useEffect(() => {
+		setScheduleDraft(liveSeries ? draftFromSeries(liveSeries) : { ...emptyScheduleDraft(), enabled: true });
+	}, [selectedId, seriesSignature]);
 
 	const selectedStepKeysList = useMemo(() => [...selectedStepKeys], [selectedStepKeys]);
 	const allStepsSelected = steps.length > 0 && selectedStepKeys.size === steps.length;
@@ -362,6 +424,7 @@ export function RemoteWorkflowsPanel({
 					conversation_context?: string;
 					agent?: string;
 					template_id?: string;
+					schedule?: ScheduleBody;
 				} = {
 					client_id: clientId,
 					name,
@@ -370,6 +433,14 @@ export function RemoteWorkflowsPanel({
 				if (ctx) body.conversation_context = ctx;
 				if (agent) body.agent = agent;
 				if (templateId) body.template_id = templateId;
+				if (createSchedule.enabled && !createScheduleReason) {
+					const schedule = draftToBody(createSchedule);
+					if (!schedule) {
+						setErrors([{ field: "schedule", code: "invalid", message: "Complete the schedule before creating." }]);
+						return;
+					}
+					body.schedule = schedule;
+				}
 				const res = await createRemoteWorkflow(body);
 				if (!res.ok) {
 					setErrors(res.errors);
@@ -380,12 +451,13 @@ export function RemoteWorkflowsPanel({
 					? ` from template “${templates.find((t) => t.id === templateId)?.name ?? templateId}”`
 					: "";
 				setNotice(
-					`Created “${res.data.remote_workflow.name}” (${agentLabel}, docker)${fromTemplate} — workflow.create queued.`,
+					`Created “${res.data.remote_workflow.name}” (${agentLabel}, docker)${fromTemplate} — workflow.create queued${res.data.series ? " and scheduled" : ""}.`,
 				);
 				setName("");
 				setCreateContext("");
 				setAgent("");
 				setTemplateId("");
+				setCreateSchedule(emptyScheduleDraft());
 				setCreateOpen(false);
 				onSelect(res.data.remote_workflow.id);
 				onRefresh();
@@ -393,7 +465,7 @@ export function RemoteWorkflowsPanel({
 				setBusy(false);
 			}
 		},
-		[clientId, name, agent, createContext, templateId, templates, onRefresh, onSelect],
+		[clientId, name, agent, createContext, templateId, templates, createSchedule, createScheduleReason, onRefresh, onSelect],
 	);
 
 	const runCommand = useCallback(
@@ -445,6 +517,48 @@ export function RemoteWorkflowsPanel({
 			setBusy(false);
 		}
 	}, [selected, onRefresh, onSelect]);
+
+	const onSaveSchedule = useCallback(async () => {
+		if (!selected) return;
+		const schedule = draftToBody(scheduleDraft);
+		if (!schedule) {
+			setScheduleErrors(["Complete the schedule before saving."]);
+			return;
+		}
+		setBusy(true);
+		setNotice(null);
+		setScheduleErrors([]);
+		try {
+			const res = await setRemoteWorkflowSchedule(selected.id, schedule);
+			if (!res.ok) {
+				setScheduleErrors(res.errors.map((e) => (e.code === "remote_workflow_busy" ? "This workflow is running; try again once the run is over." : e.message)));
+				return;
+			}
+			setNotice(`Schedule saved — ${describeSchedule(schedule.spec, schedule.timezone)} (workflow.set_schedule queued).`);
+			onRefresh();
+		} finally {
+			setBusy(false);
+		}
+	}, [selected, scheduleDraft, onRefresh]);
+
+	const onCancelSchedule = useCallback(async () => {
+		if (!selected) return;
+		if (!window.confirm(`Cancel the schedule of “${selected.name ?? shortId(selected.id)}”? Runs already started are not affected.`)) return;
+		setBusy(true);
+		setNotice(null);
+		setScheduleErrors([]);
+		try {
+			const res = await cancelRemoteWorkflowSchedule(selected.id);
+			if (!res.ok) {
+				setScheduleErrors(res.errors.map((e) => e.message));
+				return;
+			}
+			setNotice("Schedule cancelled (workflow.cancel_schedule queued).");
+			onRefresh();
+		} finally {
+			setBusy(false);
+		}
+	}, [selected, onRefresh]);
 
 	const onAppendTemplate = useCallback(async () => {
 		if (!selected || !appendTemplateId) return;
@@ -758,6 +872,17 @@ export function RemoteWorkflowsPanel({
 							)}
 						</Field>
 					</fieldset>
+					{permissions.execute && permissions.manage ? (
+						<fieldset className="sync-create-group">
+							<legend>When it runs</legend>
+							<ScheduleEditor
+								value={createSchedule}
+								onChange={setCreateSchedule}
+								disabledReason={createScheduleReason}
+								serverErrors={fieldErrors(errors, "schedule").map((e) => e.message)}
+							/>
+						</fieldset>
+					) : null}
 					{formError ? (
 						<p className="msg msg--error" role="alert">
 							{formError}
@@ -775,6 +900,11 @@ export function RemoteWorkflowsPanel({
 			) : workflows.length === 0 ? (
 				<div className="empty">No remote workflows yet.</div>
 			) : (
+				<>
+				<ScheduleFilterBar value={scheduleFilter} onChange={setScheduleFilter} />
+				{visibleWorkflows.length === 0 ? (
+					<div className="empty">No remote workflows match this filter.</div>
+				) : (
 				<table>
 					<thead>
 						<tr>
@@ -790,9 +920,12 @@ export function RemoteWorkflowsPanel({
 						</tr>
 					</thead>
 					<tbody>
-						{workflows.map((w) => (
+						{visibleWorkflows.map((w) => (
 							<tr key={w.id} className={selectedId === w.id ? "sync-row--selected" : ""}>
-								<td>{w.name || <span className="badge badge--neutral">unnamed</span>}</td>
+								<td>
+									{w.name || <span className="badge badge--neutral">unnamed</span>}
+									<ScheduleBadges workflow={w} series={w.series_id ? seriesById.get(w.series_id) : null} />
+								</td>
 								<td className="mono" title={w.client_id}>
 									{shortId(w.client_id)}
 								</td>
@@ -824,6 +957,16 @@ export function RemoteWorkflowsPanel({
 						))}
 					</tbody>
 				</table>
+				)}
+				{allSeries.length > 0 ? (
+					<div className="series-list">
+						<h4>Scheduled series</h4>
+						{allSeries.map((series) => (
+							<SeriesView key={series.id} series={series} selectedId={selectedId} onOpen={onSelect} />
+						))}
+					</div>
+				) : null}
+				</>
 			)}
 
 			{selected ? (
@@ -835,6 +978,7 @@ export function RemoteWorkflowsPanel({
 						<AgentBadge agent={selected.agent} />
 						<SandboxBadge sandbox={selected.sandbox ?? "docker"} image={null} />
 						<span className="badge badge--neutral">{steps.length} step{steps.length === 1 ? "" : "s"}</span>
+						<ScheduleBadges workflow={selected} series={selected.series_id ? seriesById.get(selected.series_id) : null} />
 						{selected.local_id ? (
 							<span className="mono hint" title={selected.local_id}>
 								local {shortId(selected.local_id)}
@@ -943,6 +1087,64 @@ export function RemoteWorkflowsPanel({
 									Append template
 								</button>
 							</div>
+						</section>
+					) : null}
+
+					{permissions.execute && permissions.manage ? (
+						<section className="sync-section" aria-label="Schedule">
+							<div className="sync-section-head">
+								<h4>Schedule</h4>
+								{liveSeries ? (
+									<span className={`badge badge--${liveSeries.state === "broken" ? "danger" : "neutral"}`}>
+										{liveSeries.state}
+									</span>
+								) : null}
+							</div>
+							{liveSeries ? (
+								<p className="hint">
+									{describeSchedule(liveSeries.spec, liveSeries.timezone)}
+									{selected.next_run_at
+										? ` · next run ${formatInZone(new Date(selected.next_run_at), liveSeries.timezone)}`
+										: ""}
+								</p>
+							) : (
+								<p className="hint">Not scheduled. Each run is its own workflow, cloned from this one.</p>
+							)}
+							<ScheduleEditor
+								value={scheduleDraft}
+								onChange={setScheduleDraft}
+								showToggle={false}
+								disabledReason={selectedScheduleReason}
+								serverErrors={scheduleErrors}
+							/>
+							{selectedScheduleReason == null ? (
+								<div className="sync-schedule-actions">
+									<button
+										type="button"
+										className="btn btn--sm btn--on"
+										disabled={busy || draftToBody(scheduleDraft) == null}
+										onClick={() => void onSaveSchedule()}
+									>
+										{liveSeries ? "Save schedule" : "Schedule"}
+									</button>
+									{liveSeries ? (
+										<button
+											type="button"
+											className="btn btn--sm btn--danger"
+											disabled={busy}
+											onClick={() => void onCancelSchedule()}
+										>
+											Cancel schedule
+										</button>
+									) : null}
+								</div>
+							) : liveSeries ? (
+								<div className="sync-schedule-actions">
+									<button type="button" className="btn btn--sm btn--danger" disabled title={selectedScheduleReason}>
+										Cancel schedule
+									</button>
+								</div>
+							) : null}
 						</section>
 					) : null}
 
