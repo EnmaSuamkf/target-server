@@ -99,26 +99,8 @@ whole batch:
 | `workflow.archived` | sets `archived_at` (payload value, else receive time) | `archived_at` (optional); the workflow goes in the event `remote_id` |
 | `workflow.unarchived` | clears `archived_at` | none required; the workflow goes in the event `remote_id` |
 
-`schedule.instance_created` (the hub's event id is `instance-created:<remote_id>`)
-is checked BEFORE it is stored (D19). It is accepted when the series exists in
-the client's org, belongs to this client and is not cancelled, the event
-`remote_id` is new, and `previous_remote_id` is an instance of the same series.
-The server then creates the remote workflow (`created_by: "hub"`, `local_id`
-pending, `schedule_state: "armed"`), its steps under the given `step_key`s
-(already on the client) and its TCP/RCI selections, and marks the previous
-instance `fired`. A resend of an accepted announcement is idempotent: the
-event id comes back in `duplicates`. Otherwise it is rejected with one of these
-reasons and nothing is written:
-
-| Reason | When |
-| --- | --- |
-| `unknown_series` | no such series in this org |
-| `foreign_series` | the series belongs to another client |
-| `series_cancelled` | the series was cancelled on the server |
-| `foreign_remote_id` | the `remote_id` belongs to another client |
-| `remote_id_conflict` | the `remote_id` is this client's but not an instance of this series |
-| `invalid_previous_remote_id` | `previous_remote_id` missing or not an instance of the series |
-| `remote_id_required` / `invalid_payload` | no event `remote_id`; missing `series_id`/`name`, or empty/duplicate `step_key`s |
+`schedule.instance_created` is judged per event before it is stored; its
+rules and rejection reasons are in [Scheduled series](#scheduled-series).
 
 The `foreign_remote_id` check below still applies: one of these events whose
 `remote_id` belongs to another client is rejected.
@@ -328,6 +310,8 @@ Workflow controls remain under:
 - delete, set context, run-selection, pause, TCP/RCI selection and leftover
   plan mutations (`client.workflows.manage`)
 - start/resume/restart and step run/abort/continue (`client.workflows.execute`)
+- schedule a remote workflow (`client.workflows.execute` and
+  `client.workflows.manage`, see [Scheduled series](#scheduled-series))
 
 `GET` list and detail include `tcp_selections` and `resource_selections` on
 each remote workflow.
@@ -408,6 +392,130 @@ server does not store “context already injected”; the hub rejects
 See `test/remote-workflow-templates.test.mjs`,
 `test/remote-workflow-selections.test.mjs`, and
 `test/sync-e2e-smoke.test.mjs`.
+
+## Scheduled series
+
+A schedule is a **series**: every execution is its own remote workflow (an
+**instance**) pointing at it through `series_id`, and a series always has
+exactly one armed instance, the next execution. The hub runs the schedule
+(recurrence, grace window, missed/skipped runs); the server records what the
+operator decided and mirrors what the hub reports. A series created here is
+managed only by the server: the hub shows it read-only and answers local edits
+with `409 server_managed`.
+
+### Data
+
+- `remote_schedule_series`: `id`, `client_id`, `name`, `spec_json`,
+  `timezone`, `include_previous`, `state` (`active` | `cancelled` | `broken`),
+  `created_by`, `created_at`, `updated_at`.
+- `remote_workflows` gains `series_id`, `scheduled_for`, `schedule_state`
+  (`armed` | `fired` | `missed` | `cancelled` | `broken`, as the hub reports
+  it), `next_run_at`, `archived_at` and `created_by` (`server` for operator
+  rows, `hub` for instances the hub cloned). All are included in the list and
+  detail responses; the detail response also carries `series`.
+- `remote_schedule_notices`: missed/skipped runs reported by the hub.
+
+Migrations are additive and run on every organization database.
+
+### Schedule body
+
+```json
+{ "spec": { "kind": "weekly", "days": [1, 3, 5], "time": "21:30" }, "timezone": "Europe/Madrid", "include_previous": true }
+```
+
+Validation mirrors `hub/schedule.ts` exactly (the hub re-validates and acks the
+command `failed` on disagreement):
+
+| Field | Rule |
+| --- | --- |
+| `spec.kind` | `once`, `daily` or `weekly` |
+| `spec.at` | `once` only: local `YYYY-MM-DDTHH:mm` naming a real date (`2026-02-30` is refused) |
+| `spec.time` | `daily` / `weekly` only: `HH:mm`, `00:00`–`23:59` |
+| `spec.days` | `weekly` only: at least one, unique integers `0` (Sunday)–`6` |
+| `timezone` | an IANA zone in `Intl.supportedValuesOf("timeZone")`, or one Intl accepts and reports back verbatim (`UTC`, links like `Asia/Calcutta`); wrong case and `GMT` aliases are refused |
+| `include_previous` | boolean, default `true` |
+
+Keys belonging to another kind are refused, not stripped. A `once` in the past
+is not an error here: the hub reports it as missed.
+
+### Operator endpoints
+
+Scheduling requires **both** `client.workflows.execute` and
+`client.workflows.manage` (the create itself still needs
+`client.workflows.create`). Every endpoint is scoped to the caller's
+organization: another org's workflows, clients and series are `404` / absent.
+
+| Endpoint | Effect |
+| --- | --- |
+| `POST /api/sync/remote-workflows` with `schedule` | creates the series (`created_by: "server"`) and queues `workflow.set_schedule` **after** the create, context, step and selection commands; the response adds `series` and `schedule_command` |
+| `PUT /api/sync/remote-workflows/:id/schedule` | full replace. Updates the workflow's live series in place (a `broken` one goes back to `active`); with no series, or a cancelled one, starts a new series with this workflow as its first instance. Queues `workflow.set_schedule` |
+| `DELETE /api/sync/remote-workflows/:id/schedule` | queues `workflow.cancel_schedule` and marks the series `cancelled`; already cancelled → `200` with `command: null` |
+| `GET /api/sync/schedule-series?client_id=` | series (all clients of the org without the filter) with their `instances` (oldest first) and recent `notices` (`client.read`) |
+
+Errors, checked before anything is persisted:
+
+| Status | `error` | When |
+| --- | --- | --- |
+| `400` | `errors[]` | invalid schedule body (`schedule.spec.time`, `timezone`, …) |
+| `403` | `forbidden` | missing `client.workflows.execute` or `.manage` (`permission` names it) |
+| `404` | `remote_workflow_not_found` / `client_not_found` / `schedule_not_found` | unknown (or other-org) workflow or client; DELETE on a workflow with no series |
+| `409` | `remote_workflow_busy` | PUT while the workflow is `running`, `waiting` or `paused` (`status` included) |
+| `409` | `remote_workflow_deleting` | PUT while the workflow is being deleted |
+| `409` | `capability_unsupported` | the client does not list the command in `capabilities.commands`; `required: { command }` |
+| `422` | `use_schedule_endpoint` | `workflow.set_schedule` / `workflow.cancel_schedule` sent through `POST …/commands`, which would arm the hub with no series row |
+
+### Commands
+
+Both address the **series**, not a workflow: by the time the hub applies one,
+the instance the server last saw may already have fired and been replaced, so
+the hub applies it to the series' current live instance. `remote_id` is the
+workflow the operator acted on; for a new series it is the workflow that
+becomes the first armed instance.
+
+| Command | Payload |
+| --- | --- |
+| `workflow.set_schedule` | `series_id`, `spec`, `timezone`, `include_previous` |
+| `workflow.cancel_schedule` | `series_id` |
+
+### Events
+
+The hub only sends these when the server lists them in
+`server_capabilities.events`. See the table in
+[`server_capabilities.events`](#server_capabilitiesevents) for what each one
+mirrors.
+
+#### `schedule.instance_created`
+
+When an instance fires, the hub clones the next one under a `remote_id` it
+generates and announces it with the deterministic event id
+`instance-created:<remote_id>`, until the server confirms it.
+
+The event is checked BEFORE it is stored (D19). It is accepted when the series
+exists in the client's org, belongs to this client and is not cancelled, the event
+`remote_id` is new, and `previous_remote_id` is an instance of the same series.
+The server then creates the remote workflow (`created_by: "hub"`, `local_id`
+pending, `schedule_state: "armed"`), its steps under the given `step_key`s
+(already on the client) and its TCP/RCI selections, and marks the previous
+instance `fired`. A resend of an accepted announcement is idempotent: the
+event id comes back in `duplicates`. Otherwise it is rejected with one of these
+reasons and nothing is written:
+
+| Reason | When |
+| --- | --- |
+| `unknown_series` | no such series in this org |
+| `foreign_series` | the series belongs to another client |
+| `series_cancelled` | the series was cancelled on the server |
+| `foreign_remote_id` | the `remote_id` belongs to another client |
+| `remote_id_conflict` | the `remote_id` is this client's but not an instance of this series |
+| `invalid_previous_remote_id` | `previous_remote_id` missing or not an instance of the series |
+| `remote_id_required` / `invalid_payload` | no event `remote_id`; missing `series_id`/`name`, or empty/duplicate `step_key`s |
+
+The hub treats a rejection as fatal for the series: it marks it `broken` with
+a critical notice until the operator reschedules it.
+
+See `test/schedule-series-db.test.mjs`, `test/schedule-validation.test.mjs`,
+`test/remote-workflow-schedule.test.mjs`, `test/schedule-events.test.mjs` and
+the scheduled-series smoke in `test/sync-e2e-smoke.test.mjs`.
 
 ## Catalog pull (`catalog-sync/v1`)
 
