@@ -1,7 +1,8 @@
 /**
  * Schedule series / archive event types (D20): accepted and stored with their
- * payload intact, not mirrored yet, and advertised to the hub through
- * `server_capabilities.events` on register and heartbeat.
+ * payload intact, and advertised to the hub through `server_capabilities.events`
+ * on register and heartbeat. What each one mirrors, and the D19 judgement of
+ * schedule.instance_created, is covered in schedule-events.test.mjs.
  */
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -93,27 +94,6 @@ test("EVENT_TYPES includes the schedule and archive types", () => {
 test("one event of each new type is accepted and stored with its payload intact", async () => {
 	const events = [
 		{
-			id: "sched-instance",
-			type: "schedule.instance_created",
-			remote_id: hubRemote,
-			payload: {
-				series_id: "series-1",
-				previous_remote_id: "rwf_previous",
-				name: "Nightly report #3",
-				scheduled_for: "2026-09-30T02:00:00.000Z",
-				schedule: { kind: "cron", expr: "0 2 * * *", tz: "UTC" },
-				agent: "claude",
-				sandbox: "docker",
-				conversation_context: "Summarise yesterday's incidents.",
-				steps: [
-					{ step_key: "s1", description: "Collect incidents", acceptance_criteria: "List is non-empty" },
-					{ step_key: "s2", description: "Write report", max_retries: 2 },
-				],
-				tcp_selections: [{ tcp_id: "tcp-1", tool_names: ["search"] }],
-				resource_selections: [{ resource_set_id: "rs-1", resource_ids: ["r1"] }],
-			},
-		},
-		{
 			id: "sched-changed",
 			type: "workflow.schedule_changed",
 			payload: { series_id: "series-1", state: "paused", next_run_at: null },
@@ -152,9 +132,34 @@ test("one event of each new type is accepted and stored with its payload intact"
 		assert.equal(row.remote_id, event.remote_id ?? null);
 		assert.deepEqual(JSON.parse(row.payload_json), event.payload);
 	}
-	// Stored only: nothing is mirrored into the plan yet.
+	// None of them touches the workflow's run status.
 	const statusAfter = readDb((db) => db.prepare("SELECT status FROM remote_workflows WHERE id = ?").get(hubRemote).status);
 	assert.equal(statusAfter, statusBefore);
+});
+
+test("schedule.instance_created is judged per event: an unknown series is rejected and not stored", async () => {
+	const event = {
+		id: "sched-instance",
+		type: "schedule.instance_created",
+		remote_id: "rwf-announced-unknown",
+		payload: {
+			series_id: "series-1",
+			previous_remote_id: hubRemote,
+			name: "Nightly report #4",
+			scheduled_for: "2026-09-30T02:00:00.000Z",
+			steps: [{ step_key: "s1", description: "Collect incidents" }],
+		},
+	};
+	// Alongside an ordinary event: the refusal is per event, never a 400 batch.
+	const res = await postEvents(hub, [event, { id: "sched-skip-ok", type: "schedule.run_skipped", payload: { series_id: "series-1", reason: "busy" } }]);
+	assert.equal(res.status, 200);
+	assert.deepEqual(await res.json(), {
+		accepted: ["sched-skip-ok"],
+		rejected: [{ id: "sched-instance", reason: "unknown_series" }],
+		duplicates: [],
+	});
+	assert.equal(readDb((db) => db.prepare("SELECT id FROM sync_events WHERE id = 'sched-instance'").get()), undefined);
+	assert.equal(readDb((db) => db.prepare("SELECT id FROM remote_workflows WHERE id = 'rwf-announced-unknown'").get()), undefined);
 });
 
 test("a new-type event for another client's remote_id is still rejected", async () => {

@@ -519,6 +519,42 @@ function migrateSyncSchema(database) {
 	addColumn("remote_workflows", "resource_selections", "TEXT NOT NULL DEFAULT '[]'");
 	addColumn("remote_workflow_steps", "on_client", "INTEGER NOT NULL DEFAULT 0");
 	addColumn("remote_workflow_steps", "run_selected", "INTEGER NOT NULL DEFAULT 1");
+	// Scheduled series (D21). created_by DEFAULT 'server': every pre-existing
+	// remote workflow was created by an operator on this server; only instances
+	// a hub clones when a series fires are 'hub'.
+	addColumn("remote_workflows", "series_id", "TEXT");
+	addColumn("remote_workflows", "scheduled_for", "TEXT");
+	addColumn("remote_workflows", "schedule_state", "TEXT");
+	addColumn("remote_workflows", "next_run_at", "TEXT");
+	addColumn("remote_workflows", "archived_at", "TEXT");
+	addColumn("remote_workflows", "created_by", "TEXT NOT NULL DEFAULT 'server'");
+	database.exec(`
+		CREATE INDEX IF NOT EXISTS idx_remote_workflows_series ON remote_workflows(series_id);
+		CREATE TABLE IF NOT EXISTS remote_schedule_series (
+			id                TEXT PRIMARY KEY,
+			client_id         TEXT NOT NULL,
+			name              TEXT NOT NULL,
+			spec_json         TEXT NOT NULL,
+			timezone          TEXT NOT NULL,
+			include_previous  INTEGER NOT NULL DEFAULT 1,
+			state             TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active', 'cancelled', 'broken')),
+			created_by        TEXT,
+			created_at        TEXT NOT NULL,
+			updated_at        TEXT NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_remote_schedule_series_client ON remote_schedule_series(client_id);
+		CREATE TABLE IF NOT EXISTS remote_schedule_notices (
+			id                TEXT PRIMARY KEY,
+			client_id         TEXT NOT NULL,
+			series_id         TEXT NOT NULL,
+			remote_id         TEXT,
+			kind              TEXT NOT NULL CHECK (kind IN ('missed', 'skipped')),
+			reason            TEXT,
+			occurrences_json  TEXT NOT NULL DEFAULT '[]',
+			created_at        TEXT NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_remote_schedule_notices_series ON remote_schedule_notices(series_id, created_at);
+	`);
 	database.exec(`
 		CREATE TABLE IF NOT EXISTS remote_resources (
 			client_id     TEXT NOT NULL,
@@ -3074,6 +3110,12 @@ function rowToRemoteWorkflow(r) {
 		agent: r.agent ?? null,
 		tcpSelections: normalizeCatalogTcpSelections(parseRemoteSelectionJson(r.tcp_selections)),
 		resourceSelections: normalizeCatalogResourceSelections(parseRemoteSelectionJson(r.resource_selections)),
+		seriesId: r.series_id ?? null,
+		scheduledFor: r.scheduled_for ?? null,
+		scheduleState: r.schedule_state ?? null,
+		nextRunAt: r.next_run_at ?? null,
+		archivedAt: r.archived_at ?? null,
+		createdBy: r.created_by ?? "server",
 		createdAt: r.created_at,
 	};
 }
@@ -3781,9 +3823,10 @@ export function mirrorCommandToPlan({ remoteId, type, payload = {} }) {
 }
 
 /**
- * Apply client sync events to the mirrored plan (status only). Types without a
- * branch here (schedule.*, workflow.schedule_changed, workflow.(un)archived)
- * are stored only; mirroring arrives with the schedule series API (workflow 6).
+ * Apply client sync events to the mirrored plan (status only). Schedule and
+ * archive events are mirrored by mirrorScheduleSyncEvent (and
+ * schedule.instance_created applied before storage, by
+ * applyScheduleInstanceCreated); they have no branch here.
  */
 export function mirrorSyncEventToPlan({ remoteId, type, payload = {} }) {
 	if (!remoteId) return;
@@ -3945,6 +3988,356 @@ export function getRemoteWorkflowDetail(id) {
 		steps,
 		pendingCommands: listInFlightCommands(id),
 	};
+}
+
+// --- Scheduled series (D21) -------------------------------------------
+//
+// A schedule is a SERIES; every execution is its own remote workflow (an
+// instance) pointing at it through series_id. The series row holds what the
+// operator decided (spec, timezone, include_previous, cancelled or not); the
+// per-instance columns on remote_workflows mirror what the hub reports
+// (schedule_state, next_run_at, ...). The hub runs the schedule, so none of
+// this is recomputed here.
+
+/** Lifecycle of a series as the server sees it. */
+export const REMOTE_SERIES_STATES = Object.freeze(["active", "cancelled", "broken"]);
+/** Per-instance states, same vocabulary as the hub's SCHEDULE_STATES. */
+export const REMOTE_SCHEDULE_STATES = Object.freeze(["armed", "fired", "missed", "cancelled", "broken"]);
+/** Who created a remote workflow: an operator here, or the hub cloning a series instance (D16). */
+export const REMOTE_WORKFLOW_CREATORS = Object.freeze(["server", "hub"]);
+
+function seriesError(code, message) {
+	const err = new Error(message ?? code);
+	err.code = code;
+	return err;
+}
+
+function rowToSeries(r) {
+	if (!r) return null;
+	let spec = null;
+	try {
+		spec = JSON.parse(r.spec_json);
+	} catch {
+		// A corrupt spec reads as null rather than breaking every listing.
+	}
+	return {
+		id: r.id,
+		clientId: r.client_id,
+		name: r.name,
+		spec,
+		timezone: r.timezone,
+		includePrevious: r.include_previous !== 0,
+		state: r.state,
+		createdBy: r.created_by ?? null,
+		createdAt: r.created_at,
+		updatedAt: r.updated_at,
+	};
+}
+
+function assertSeriesState(state) {
+	if (!REMOTE_SERIES_STATES.includes(state)) throw seriesError("invalid_series_state", `invalid series state: ${state}`);
+}
+
+/** Insert a schedule series. `spec`/`timezone` are expected to be validated already (blueprint.mjs). */
+export function createSeries({
+	id = null,
+	clientId,
+	name,
+	spec,
+	timezone,
+	includePrevious = true,
+	state = "active",
+	createdBy = null,
+	createdAt = null,
+}) {
+	assertSeriesState(state);
+	const seriesId = id ?? randomUUID();
+	const now = createdAt ?? new Date().toISOString();
+	open()
+		.prepare(
+			`INSERT INTO remote_schedule_series
+			 (id, client_id, name, spec_json, timezone, include_previous, state, created_by, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		)
+		.run(seriesId, clientId, name, JSON.stringify(spec), timezone, includePrevious ? 1 : 0, state, createdBy, now, now);
+	return getSeries(seriesId);
+}
+
+/** Look up a series by id. */
+export function getSeries(id) {
+	return rowToSeries(open().prepare("SELECT * FROM remote_schedule_series WHERE id = ?").get(id));
+}
+
+/**
+ * Patch a series. Only the keys present in `patch` change; updated_at always
+ * moves. Returns the updated series, or null when it doesn't exist.
+ */
+export function updateSeries(id, patch = {}, { updatedAt = null } = {}) {
+	const sets = [];
+	const params = [];
+	if (patch.name !== undefined) {
+		sets.push("name = ?");
+		params.push(patch.name);
+	}
+	if (patch.spec !== undefined) {
+		sets.push("spec_json = ?");
+		params.push(JSON.stringify(patch.spec));
+	}
+	if (patch.timezone !== undefined) {
+		sets.push("timezone = ?");
+		params.push(patch.timezone);
+	}
+	if (patch.includePrevious !== undefined) {
+		sets.push("include_previous = ?");
+		params.push(patch.includePrevious ? 1 : 0);
+	}
+	if (patch.state !== undefined) {
+		assertSeriesState(patch.state);
+		sets.push("state = ?");
+		params.push(patch.state);
+	}
+	sets.push("updated_at = ?");
+	params.push(updatedAt ?? new Date().toISOString());
+	const info = open()
+		.prepare(`UPDATE remote_schedule_series SET ${sets.join(", ")} WHERE id = ?`)
+		.run(...params, id);
+	return info.changes > 0 ? getSeries(id) : null;
+}
+
+/** Series of one client (every client of the org when `clientId` is null), newest first. */
+export function listSeriesByClient(clientId = null) {
+	const sql = clientId
+		? "SELECT * FROM remote_schedule_series WHERE client_id = ? ORDER BY created_at DESC, rowid DESC"
+		: "SELECT * FROM remote_schedule_series ORDER BY created_at DESC, rowid DESC";
+	const stmt = open().prepare(sql);
+	return (clientId ? stmt.all(clientId) : stmt.all()).map(rowToSeries);
+}
+
+/** Remote workflows that are instances of a series, oldest first (execution order). */
+export function listSeriesInstances(seriesId) {
+	return open()
+		.prepare("SELECT * FROM remote_workflows WHERE series_id = ? ORDER BY created_at ASC, rowid ASC")
+		.all(seriesId)
+		.map(rowToRemoteWorkflow);
+}
+
+const REMOTE_SCHEDULE_FIELD_COLUMNS = Object.freeze({
+	seriesId: "series_id",
+	scheduledFor: "scheduled_for",
+	scheduleState: "schedule_state",
+	nextRunAt: "next_run_at",
+	archivedAt: "archived_at",
+	createdBy: "created_by",
+});
+
+/**
+ * Patch the schedule/archive columns of a remote workflow. Keys left undefined
+ * are untouched; null clears (except createdBy, which is never null).
+ */
+export function setRemoteWorkflowScheduleFields(id, fields = {}) {
+	if (fields.scheduleState != null && !REMOTE_SCHEDULE_STATES.includes(fields.scheduleState)) {
+		throw seriesError("invalid_schedule_state", `invalid schedule state: ${fields.scheduleState}`);
+	}
+	if (fields.createdBy !== undefined && !REMOTE_WORKFLOW_CREATORS.includes(fields.createdBy)) {
+		throw seriesError("invalid_created_by", `invalid created_by: ${fields.createdBy}`);
+	}
+	const sets = [];
+	const params = [];
+	for (const [key, column] of Object.entries(REMOTE_SCHEDULE_FIELD_COLUMNS)) {
+		if (fields[key] === undefined) continue;
+		sets.push(`${column} = ?`);
+		params.push(fields[key]);
+	}
+	if (sets.length === 0) return getRemoteWorkflowById(id);
+	const info = open()
+		.prepare(`UPDATE remote_workflows SET ${sets.join(", ")} WHERE id = ?`)
+		.run(...params, id);
+	return info.changes > 0 ? getRemoteWorkflowById(id) : null;
+}
+
+// --- Schedule events from the hub (D18–D20) ---------------------------------
+
+/**
+ * Validate and apply `schedule.instance_created` (D19): the hub cloned the next
+ * instance of a server series under a remote_id it minted (D16) and announces
+ * it. Returns `{ ok: true, created }` or `{ ok: false, reason }`; a refusal
+ * writes nothing and the hub marks its series broken.
+ *
+ * Checked, in order: the series exists in this org's DB (another org's series
+ * is simply unknown here), belongs to THIS client and isn't cancelled; the
+ * remote_id is new — or already this client's instance of the same series,
+ * which makes a resend idempotent; previous_remote_id is an instance of the
+ * series. The remote_id belonging to ANOTHER client is refused earlier, by the
+ * route's generic foreign_remote_id check.
+ */
+export function applyScheduleInstanceCreated({ clientId, remoteId, payload = {} }) {
+	if (!remoteId) return { ok: false, reason: "remote_id_required" };
+	const seriesId = typeof payload.series_id === "string" ? payload.series_id : "";
+	const name = typeof payload.name === "string" ? payload.name.trim() : "";
+	if (!seriesId || !name) return { ok: false, reason: "invalid_payload" };
+	const series = getSeries(seriesId);
+	if (!series) return { ok: false, reason: "unknown_series" };
+	if (series.clientId !== clientId) return { ok: false, reason: "foreign_series" };
+	if (series.state === "cancelled") return { ok: false, reason: "series_cancelled" };
+
+	const existing = getRemoteWorkflowById(remoteId);
+	if (existing) {
+		if (existing.clientId !== clientId) return { ok: false, reason: "foreign_remote_id" };
+		if (existing.seriesId !== series.id) return { ok: false, reason: "remote_id_conflict" };
+		return { ok: true, created: false, remoteWorkflow: existing };
+	}
+
+	const previousId = typeof payload.previous_remote_id === "string" ? payload.previous_remote_id : "";
+	const previous = previousId ? getRemoteWorkflowById(previousId) : null;
+	if (!previous || previous.clientId !== clientId || previous.seriesId !== series.id) {
+		return { ok: false, reason: "invalid_previous_remote_id" };
+	}
+
+	const steps = Array.isArray(payload.steps) ? payload.steps : [];
+	const stepKeys = steps.map((step) => (typeof step?.step_key === "string" ? step.step_key.trim() : ""));
+	if (stepKeys.some((key) => !key) || new Set(stepKeys).size !== stepKeys.length) {
+		return { ok: false, reason: "invalid_payload" };
+	}
+
+	const db = open();
+	db.exec("BEGIN IMMEDIATE");
+	try {
+		createRemoteWorkflow({
+			id: remoteId,
+			clientId,
+			name,
+			status: "pending",
+			conversationContext: typeof payload.conversation_context === "string" ? payload.conversation_context : null,
+			sandbox: payload.sandbox === "host" ? "host" : "docker",
+			agent: typeof payload.agent === "string" && payload.agent ? payload.agent : null,
+		});
+		// A clone is armed the moment it exists: the hub clones the next
+		// instance when the previous one FIRES (D3), which is why `previous`
+		// moves to `fired` here. workflow.schedule_changed refines both later.
+		setRemoteWorkflowScheduleFields(remoteId, {
+			seriesId: series.id,
+			scheduledFor: typeof payload.scheduled_for === "string" ? payload.scheduled_for : null,
+			scheduleState: "armed",
+			createdBy: "hub",
+		});
+		if (previous.scheduleState === "armed" || previous.scheduleState == null) {
+			setRemoteWorkflowScheduleFields(previous.id, { scheduleState: "fired", nextRunAt: null });
+		}
+		steps.forEach((step, index) => {
+			upsertRemoteStep({
+				remoteId,
+				stepKey: stepKeys[index],
+				orderIndex: index,
+				description: typeof step.description === "string" ? step.description : "",
+				acceptanceCriteria: typeof step.acceptance_criteria === "string" ? step.acceptance_criteria : null,
+				manualReview: step.manual_review === true,
+				useSubagent: step.use_subagent !== false,
+				maxRetries: Number.isInteger(step.max_retries) && step.max_retries >= 0 ? step.max_retries : 0,
+				retryIntervalSeconds:
+					Number.isInteger(step.retry_interval_seconds) && step.retry_interval_seconds >= 0 ? step.retry_interval_seconds : 0,
+			});
+			// The hub already has these steps: they came from the clone.
+			markRemoteStepOnClient(remoteId, stepKeys[index]);
+		});
+		setRemoteWorkflowSelections(remoteId, {
+			tcpSelections: normalizeCatalogTcpSelections(payload.tcp_selections),
+			resourceSelections: normalizeCatalogResourceSelections(payload.resource_selections),
+		});
+		db.exec("COMMIT");
+	} catch (err) {
+		db.exec("ROLLBACK");
+		throw err;
+	}
+	return { ok: true, created: true, remoteWorkflow: getRemoteWorkflowById(remoteId) };
+}
+
+function rowToScheduleNotice(r) {
+	return {
+		id: r.id,
+		clientId: r.client_id,
+		seriesId: r.series_id,
+		remoteId: r.remote_id ?? null,
+		kind: r.kind,
+		reason: r.reason ?? null,
+		occurrences: parseRemoteSelectionJson(r.occurrences_json),
+		createdAt: r.created_at,
+	};
+}
+
+/** Missed/skipped runs of a series, newest first (for display). */
+export function listScheduleNotices(seriesId, { limit = 20 } = {}) {
+	return open()
+		.prepare("SELECT * FROM remote_schedule_notices WHERE series_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?")
+		.all(seriesId, Math.min(200, Math.max(1, limit)))
+		.map(rowToScheduleNotice);
+}
+
+/**
+ * Mirror the schedule/archive events (D20) after `sync_events` accepted them.
+ * Only rows of THIS client are touched: the route already refuses a remote_id
+ * owned by another client, and a series_id is checked here. Returns whether
+ * anything was applied.
+ */
+export function mirrorScheduleSyncEvent({ clientId, eventId, remoteId, type, payload = {}, receivedAt = null }) {
+	const now = receivedAt ?? new Date().toISOString();
+	if (type === "workflow.archived" || type === "workflow.unarchived") {
+		const workflow = remoteId ? getRemoteWorkflowById(remoteId) : null;
+		if (!workflow || workflow.clientId !== clientId) return false;
+		const archivedAt =
+			type === "workflow.archived" ? (typeof payload.archived_at === "string" && payload.archived_at ? payload.archived_at : now) : null;
+		setRemoteWorkflowScheduleFields(workflow.id, { archivedAt });
+		return true;
+	}
+	if (!["workflow.schedule_changed", "schedule.run_missed", "schedule.run_skipped"].includes(type)) return false;
+	const series = typeof payload.series_id === "string" ? getSeries(payload.series_id) : null;
+	if (!series || series.clientId !== clientId) return false;
+	const workflow = remoteId ? getRemoteWorkflowById(remoteId) : null;
+	const instance = workflow && workflow.clientId === clientId && workflow.seriesId === series.id ? workflow : null;
+
+	if (type === "workflow.schedule_changed") {
+		const state = REMOTE_SCHEDULE_STATES.includes(payload.state) ? payload.state : null;
+		if (instance) {
+			setRemoteWorkflowScheduleFields(instance.id, {
+				scheduleState: state,
+				nextRunAt: typeof payload.next_run_at === "string" ? payload.next_run_at : null,
+			});
+		}
+		// The series follows its current instance, except that the server's own
+		// cancel is final: a stale "armed" racing workflow.cancel_schedule must
+		// not revive it.
+		let seriesState = null;
+		if (state === "broken") seriesState = "broken";
+		else if (state === "cancelled") seriesState = "cancelled";
+		else if (state && series.state === "broken") seriesState = "active";
+		if (seriesState && series.state !== "cancelled" && seriesState !== series.state) {
+			updateSeries(series.id, { state: seriesState });
+		}
+		return true;
+	}
+
+	const occurrences =
+		type === "schedule.run_missed"
+			? (Array.isArray(payload.occurrences) ? payload.occurrences : []).filter((o) => typeof o === "string")
+			: typeof payload.occurrence === "string"
+				? [payload.occurrence]
+				: [];
+	open()
+		.prepare(
+			`INSERT OR IGNORE INTO remote_schedule_notices
+			 (id, client_id, series_id, remote_id, kind, reason, occurrences_json, created_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		)
+		.run(
+			eventId ?? randomUUID(),
+			clientId,
+			series.id,
+			instance?.id ?? null,
+			type === "schedule.run_missed" ? "missed" : "skipped",
+			type === "schedule.run_skipped" && typeof payload.reason === "string" ? payload.reason : null,
+			JSON.stringify(occurrences),
+			now,
+		);
+	return true;
 }
 
 // --- Server catalog (templates, TCP packs, RCI resource sets) ---------
