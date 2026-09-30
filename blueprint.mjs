@@ -382,9 +382,10 @@ const EVENT_PAYLOADS = {
 	"event.tcp-tool.deleted": Joi.object({ resource_id: STRING.required() }),
 	"event.resource-set.upserted": Joi.object({ resource: Joi.object({ id: STRING.required(), name: STRING.required(), data: Joi.object().unknown(true).default({}) }).required() }),
 	"event.resource-set.deleted": Joi.object({ resource_id: STRING.required() }),
-	// Schedule series / archive events (D20) are stored but not mirrored yet, so
-	// their payloads stay permissive: the hub owns the shape until the schedule
-	// series API (workflow 6) reads them.
+	// Schedule series / archive events (D20) stay permissive at the batch level:
+	// a schema failure here would 400 the WHOLE batch and stall all sync, while
+	// db.mjs judges each one on its own (schedule.instance_created is refused
+	// per event with a reason; the mirrors ignore what they can't use).
 	"event.schedule.instance_created": PERMISSIVE_EVENT_PAYLOAD,
 	"event.workflow.schedule_changed": PERMISSIVE_EVENT_PAYLOAD,
 	"event.schedule.run_missed": PERMISSIVE_EVENT_PAYLOAD,

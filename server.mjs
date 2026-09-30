@@ -172,6 +172,9 @@ import {
 	listSeriesByClient,
 	listSeriesInstances,
 	setRemoteWorkflowScheduleFields,
+	applyScheduleInstanceCreated,
+	mirrorScheduleSyncEvent,
+	listScheduleNotices,
 } from "./db.mjs";
 import {
 	assertMultiOrgDeviceLinkingMode,
@@ -1809,6 +1812,18 @@ function seriesToApi(series) {
 	};
 }
 
+function scheduleNoticeToApi(notice) {
+	return {
+		id: notice.id,
+		series_id: notice.seriesId,
+		remote_id: notice.remoteId,
+		kind: notice.kind,
+		reason: notice.reason,
+		occurrences: notice.occurrences,
+		created_at: notice.createdAt,
+	};
+}
+
 // --- Scheduled series (D15–D22) -------------------------------------------
 //
 // The hub runs the schedule; the server only records what the operator
@@ -2277,6 +2292,22 @@ async function handleSyncRoute(req, res, pathname, url) {
 				log(`sync event rejected ${event.id}: foreign_remote_id (client ${client.id.slice(0, 8)})`);
 				continue;
 			}
+			// Validated and applied BEFORE the event is stored, so a refused
+			// announcement leaves no trace and a resend is judged afresh. A resend
+			// of an accepted one finds its own row (idempotent) and then comes back
+			// as a duplicate — both tell the hub the server knows the instance.
+			if (event.type === "schedule.instance_created") {
+				const applied = applyScheduleInstanceCreated({
+					clientId: client.id,
+					remoteId: event.remote_id || null,
+					payload: event.payload ?? {},
+				});
+				if (!applied.ok) {
+					rejected.push({ id: event.id, reason: applied.reason });
+					log(`sync event rejected ${event.id}: ${applied.reason} (client ${client.id.slice(0, 8)})`);
+					continue;
+				}
+			}
 			const outcome = insertSyncEvent({
 				id: event.id,
 				clientId: client.id,
@@ -2288,7 +2319,14 @@ async function handleSyncRoute(req, res, pathname, url) {
 			});
 			if (outcome === "inserted") {
 				accepted.push(event.id);
-				// Schedule/archive events are stored only; both mirrors ignore them.
+				mirrorScheduleSyncEvent({
+					clientId: client.id,
+					eventId: event.id,
+					remoteId: event.remote_id || null,
+					type: event.type,
+					payload: event.payload ?? {},
+					receivedAt: event.created_at,
+				});
 				mirrorSyncEventToPlan({
 					remoteId: event.remote_id || null,
 					type: event.type,
@@ -2840,6 +2878,7 @@ async function handleOperatorSyncRoute(req, res, pathname, url) {
 		const series = listSeriesByClient(clientId).map((s) => ({
 			...seriesToApi(s),
 			instances: listSeriesInstances(s.id).map(remoteWorkflowToApi),
+			notices: listScheduleNotices(s.id).map(scheduleNoticeToApi),
 		}));
 		return sendJson(res, 200, { series });
 	}

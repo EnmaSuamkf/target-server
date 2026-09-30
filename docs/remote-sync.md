@@ -85,19 +85,40 @@ of event types this server accepts on `POST /api/sync/events` (`EVENT_TYPES` in
 makes the whole batch fail with `400`, and since the hub retries that batch,
 all event sync for the client stalls. Older servers omit the field.
 
-Schedule series and archive events (D20) are accepted and stored in
-`sync_events` with their payload unchanged, but not mirrored into the plan
-yet; mirroring arrives with the schedule series API. Their payloads are
-permissive objects (unknown keys kept):
+Schedule series and archive events (D20) are stored in `sync_events` with their
+payload unchanged and mirrored as below. Their payloads are permissive objects
+at the batch level (unknown keys kept), so a malformed one never fails the
+whole batch:
 
-| Type | Status | Typical payload |
+| Type | Handling | Payload |
 | --- | --- | --- |
-| `schedule.instance_created` | stored; mirrored in a later version | `series_id`, `previous_remote_id`, `name`, `scheduled_for`, `schedule`, `agent`, `sandbox`, `conversation_context`, `steps[]`, `tcp_selections`, `resource_selections` |
-| `workflow.schedule_changed` | stored; mirrored in a later version | `series_id`, `state`, `next_run_at` |
-| `schedule.run_missed` | stored; mirrored in a later version | `series_id`, `occurrences[]` |
-| `schedule.run_skipped` | stored; mirrored in a later version | `series_id`, `reason` |
-| `workflow.archived` | stored; mirrored in a later version | `archived_at` (optional); the workflow goes in the event `remote_id` |
-| `workflow.unarchived` | stored; mirrored in a later version | none required; the workflow goes in the event `remote_id` |
+| `schedule.instance_created` | validated per event, then creates the instance (see below) | `series_id`, `previous_remote_id`, `name`, `scheduled_for`, `schedule`, `agent`, `sandbox`, `conversation_context`, `steps[]`, `tcp_selections`, `resource_selections` |
+| `workflow.schedule_changed` | instance `schedule_state` / `next_run_at`; series `broken` / back to `active` / `cancelled` (a server cancel is never revived) | `series_id`, `state`, `next_run_at` |
+| `schedule.run_missed` | stored as a series notice (listed on `GET /api/sync/schedule-series`) | `series_id`, `occurrences[]` |
+| `schedule.run_skipped` | stored as a series notice | `series_id`, `reason`, `occurrence` (optional) |
+| `workflow.archived` | sets `archived_at` (payload value, else receive time) | `archived_at` (optional); the workflow goes in the event `remote_id` |
+| `workflow.unarchived` | clears `archived_at` | none required; the workflow goes in the event `remote_id` |
+
+`schedule.instance_created` (the hub's event id is `instance-created:<remote_id>`)
+is checked BEFORE it is stored (D19). It is accepted when the series exists in
+the client's org, belongs to this client and is not cancelled, the event
+`remote_id` is new, and `previous_remote_id` is an instance of the same series.
+The server then creates the remote workflow (`created_by: "hub"`, `local_id`
+pending, `schedule_state: "armed"`), its steps under the given `step_key`s
+(already on the client) and its TCP/RCI selections, and marks the previous
+instance `fired`. A resend of an accepted announcement is idempotent: the
+event id comes back in `duplicates`. Otherwise it is rejected with one of these
+reasons and nothing is written:
+
+| Reason | When |
+| --- | --- |
+| `unknown_series` | no such series in this org |
+| `foreign_series` | the series belongs to another client |
+| `series_cancelled` | the series was cancelled on the server |
+| `foreign_remote_id` | the `remote_id` belongs to another client |
+| `remote_id_conflict` | the `remote_id` is this client's but not an instance of this series |
+| `invalid_previous_remote_id` | `previous_remote_id` missing or not an instance of the series |
+| `remote_id_required` / `invalid_payload` | no event `remote_id`; missing `series_id`/`name`, or empty/duplicate `step_key`s |
 
 The `foreign_remote_id` check below still applies: one of these events whose
 `remote_id` belongs to another client is rejected.
