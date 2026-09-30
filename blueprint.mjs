@@ -103,6 +103,12 @@ export const EVENT_TYPES = [
 	"tcp-tool.deleted",
 	"resource-set.upserted",
 	"resource-set.deleted",
+	"schedule.instance_created",
+	"workflow.schedule_changed",
+	"schedule.run_missed",
+	"schedule.run_skipped",
+	"workflow.archived",
+	"workflow.unarchived",
 ];
 
 const RESOURCE_CAPABILITIES = Joi.object({
@@ -221,6 +227,9 @@ const COMMAND_PAYLOADS = {
 	"command.resource-set.delete": Joi.object({ resource_id: STRING.required() }),
 };
 
+/** Any object, unknown keys kept even under `stripUnknown`. */
+const PERMISSIVE_EVENT_PAYLOAD = Joi.object().unknown(true);
+
 const EVENT_PAYLOADS = {
 	"event.client.heartbeat": Joi.object({
 		status: Joi.string().valid("idle", "busy").required(),
@@ -268,6 +277,15 @@ const EVENT_PAYLOADS = {
 	"event.tcp-tool.deleted": Joi.object({ resource_id: STRING.required() }),
 	"event.resource-set.upserted": Joi.object({ resource: Joi.object({ id: STRING.required(), name: STRING.required(), data: Joi.object().unknown(true).default({}) }).required() }),
 	"event.resource-set.deleted": Joi.object({ resource_id: STRING.required() }),
+	// Schedule series / archive events (D20) are stored but not mirrored yet, so
+	// their payloads stay permissive: the hub owns the shape until the schedule
+	// series API (workflow 6) reads them.
+	"event.schedule.instance_created": PERMISSIVE_EVENT_PAYLOAD,
+	"event.workflow.schedule_changed": PERMISSIVE_EVENT_PAYLOAD,
+	"event.schedule.run_missed": PERMISSIVE_EVENT_PAYLOAD,
+	"event.schedule.run_skipped": PERMISSIVE_EVENT_PAYLOAD,
+	"event.workflow.archived": PERMISSIVE_EVENT_PAYLOAD,
+	"event.workflow.unarchived": PERMISSIVE_EVENT_PAYLOAD,
 };
 
 const SYNC_EVENT_ITEM = Joi.object({

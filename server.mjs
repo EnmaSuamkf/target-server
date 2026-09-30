@@ -38,7 +38,7 @@ import {
 	setOAuthStateCookie,
 	verifyOAuthState,
 } from "./google-oauth.mjs";
-import { validate, validateSyncEventBatch } from "./blueprint.mjs";
+import { EVENT_TYPES, validate, validateSyncEventBatch } from "./blueprint.mjs";
 import {
 	DEFAULT_ADMIN_EMAIL,
 	DEFAULT_ADMIN_PASSWORD,
@@ -1997,6 +1997,13 @@ async function requireSyncClient(req, res) {
 	return client;
 }
 
+/**
+ * Event types this server accepts on POST /api/sync/events, returned on
+ * register and heartbeat. The hub may only emit a type listed here: one
+ * unknown type makes the whole batch fail with 400, which stalls all sync.
+ */
+const SERVER_SYNC_CAPABILITIES = Object.freeze({ events: Object.freeze([...EVENT_TYPES]) });
+
 async function handleSyncRoute(req, res, pathname, url) {
 	if (isOperatorSyncPath(pathname, req.method)) return false;
 
@@ -2030,6 +2037,7 @@ async function handleSyncRoute(req, res, pathname, url) {
 			...(clientToken ? { client_token: clientToken } : {}),
 			created_at: client.createdAt,
 			owner: ownerConnectionPayload(device?.ownerUserId ?? client.ownerUserId),
+			server_capabilities: SERVER_SYNC_CAPABILITIES,
 		});
 	}
 
@@ -2103,6 +2111,7 @@ async function handleSyncRoute(req, res, pathname, url) {
 			ok: true,
 			server_time: now,
 			owner: ownerConnectionPayload(client.ownerUserId),
+			server_capabilities: SERVER_SYNC_CAPABILITIES,
 		});
 	}
 
@@ -2160,8 +2169,14 @@ async function handleSyncRoute(req, res, pathname, url) {
 		const v = validateSyncEventBatch(body);
 		if (!v.ok) return sendJson(res, 400, { errors: v.errors });
 		const accepted = [];
+		const rejected = [];
 		const duplicates = [];
 		for (const event of v.value.events) {
+			if (syncEventTargetsForeignRemote(client, event)) {
+				rejected.push({ id: event.id, reason: "foreign_remote_id" });
+				log(`sync event rejected ${event.id}: foreign_remote_id (client ${client.id.slice(0, 8)})`);
+				continue;
+			}
 			const outcome = insertSyncEvent({
 				id: event.id,
 				clientId: client.id,
@@ -2173,6 +2188,7 @@ async function handleSyncRoute(req, res, pathname, url) {
 			});
 			if (outcome === "inserted") {
 				accepted.push(event.id);
+				// Schedule/archive events are stored only; both mirrors ignore them.
 				mirrorSyncEventToPlan({
 					remoteId: event.remote_id || null,
 					type: event.type,
@@ -2185,10 +2201,34 @@ async function handleSyncRoute(req, res, pathname, url) {
 				});
 			} else duplicates.push(event.id);
 		}
-		return sendJson(res, 200, { accepted, rejected: [], duplicates });
+		return sendJson(res, 200, { accepted, rejected, duplicates });
 	}
 
 	return false;
+}
+
+/**
+ * True when a client event would touch a remote workflow owned by another
+ * client. Events are mirrored into the plan by remote id alone, so without this
+ * any registered client could flip another hub's workflow or step status.
+ * `command.ack` is covered too: its mirror resolves the remote id from the
+ * command row, which can delete the workflow on a `workflow.delete` ack.
+ * Unknown remote ids stay accepted (clients report local-origin workflows).
+ * Lookups go through the request's org DB, so another org's rows are never
+ * visible here and a cross-org id is just "unknown" with nothing to mirror.
+ */
+function syncEventTargetsForeignRemote(client, event) {
+	const remoteIds = [];
+	if (event.remote_id) remoteIds.push(event.remote_id);
+	if (event.type === "command.ack" && typeof event.payload?.command_id === "string") {
+		const command = getCommandById(event.payload.command_id);
+		if (command && command.clientId !== client.id) return true;
+		if (command?.remoteId) remoteIds.push(command.remoteId);
+	}
+	return remoteIds.some((remoteId) => {
+		const workflow = getRemoteWorkflowById(remoteId);
+		return workflow != null && workflow.clientId !== client.id;
+	});
 }
 
 async function handleOperatorSyncRoute(req, res, pathname, url) {

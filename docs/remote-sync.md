@@ -34,7 +34,8 @@ in their own org. See [`docs/multi-org.md`](multi-org.md).
   "client_id": "client-id",
   "client_token": "sync_…",
   "created_at": "2026-09-21T21:00:00.000Z",
-  "owner": null
+  "owner": null,
+  "server_capabilities": { "events": ["client.heartbeat", "command.ack", "…"] }
 }
 ```
 
@@ -65,7 +66,8 @@ Linked register / heartbeat:
       ]
     },
     "granted": { "groups": [] }
-  }
+  },
+  "server_capabilities": { "events": ["client.heartbeat", "command.ack", "…"] }
 }
 ```
 
@@ -74,6 +76,31 @@ role. `owner.catalog` is `getPermissionCatalog()`. `owner.granted` is the same
 groups filtered to those ids. A role change is visible on the next heartbeat
 without re-register or a new device secret. Clients that ignore unknown fields
 keep working.
+
+### `server_capabilities.events`
+
+Register and heartbeat also return `server_capabilities.events`: the full list
+of event types this server accepts on `POST /api/sync/events` (`EVENT_TYPES` in
+`blueprint.mjs`). The hub must only emit types in this list. One unknown type
+makes the whole batch fail with `400`, and since the hub retries that batch,
+all event sync for the client stalls. Older servers omit the field.
+
+Schedule series and archive events (D20) are accepted and stored in
+`sync_events` with their payload unchanged, but not mirrored into the plan
+yet; mirroring arrives with the schedule series API. Their payloads are
+permissive objects (unknown keys kept):
+
+| Type | Status | Typical payload |
+| --- | --- | --- |
+| `schedule.instance_created` | stored; mirrored in a later version | `series_id`, `previous_remote_id`, `name`, `scheduled_for`, `schedule`, `agent`, `sandbox`, `conversation_context`, `steps[]`, `tcp_selections`, `resource_selections` |
+| `workflow.schedule_changed` | stored; mirrored in a later version | `series_id`, `state`, `next_run_at` |
+| `schedule.run_missed` | stored; mirrored in a later version | `series_id`, `occurrences[]` |
+| `schedule.run_skipped` | stored; mirrored in a later version | `series_id`, `reason` |
+| `workflow.archived` | stored; mirrored in a later version | `archived_at` (optional); the workflow goes in the event `remote_id` |
+| `workflow.unarchived` | stored; mirrored in a later version | none required; the workflow goes in the event `remote_id` |
+
+The `foreign_remote_id` check below still applies: one of these events whose
+`remote_id` belongs to another client is rejected.
 
 ## Client protocol
 
@@ -87,7 +114,14 @@ keep working.
    `POST /api/sync/commands/:commandId/ack`.
 5. Push events to `POST /api/sync/events`. Event `id` is per-client
    idempotency key: re-sending an already accepted id returns it in
-   `duplicates` and does not apply the mirror again.
+   `duplicates` and does not apply the mirror again. The response is
+   `{ accepted, rejected, duplicates }`. An event whose `remote_id` belongs
+   to another client, or a `command.ack` for another client's command or for
+   a command on another client's workflow, is neither
+   stored nor mirrored and comes back in `rejected` as
+   `{ "id": "…", "reason": "foreign_remote_id" }`. Unknown `remote_id`s are
+   still accepted. With `TARGET_MULTI_ORG=1` another org's remote workflows
+   live in a different DB file, so their ids are simply unknown to the caller.
 
 Commands are queued per `remote_id`. Resource commands use an internal
 per-client/per-domain channel, so changes in one resource domain remain
