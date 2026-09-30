@@ -38,7 +38,7 @@ import {
 	setOAuthStateCookie,
 	verifyOAuthState,
 } from "./google-oauth.mjs";
-import { validate, validateSyncEventBatch } from "./blueprint.mjs";
+import { EVENT_TYPES, validate, validateSyncEventBatch } from "./blueprint.mjs";
 import {
 	DEFAULT_ADMIN_EMAIL,
 	DEFAULT_ADMIN_PASSWORD,
@@ -1997,6 +1997,13 @@ async function requireSyncClient(req, res) {
 	return client;
 }
 
+/**
+ * Event types this server accepts on POST /api/sync/events, returned on
+ * register and heartbeat. The hub may only emit a type listed here: one
+ * unknown type makes the whole batch fail with 400, which stalls all sync.
+ */
+const SERVER_SYNC_CAPABILITIES = Object.freeze({ events: Object.freeze([...EVENT_TYPES]) });
+
 async function handleSyncRoute(req, res, pathname, url) {
 	if (isOperatorSyncPath(pathname, req.method)) return false;
 
@@ -2030,6 +2037,7 @@ async function handleSyncRoute(req, res, pathname, url) {
 			...(clientToken ? { client_token: clientToken } : {}),
 			created_at: client.createdAt,
 			owner: ownerConnectionPayload(device?.ownerUserId ?? client.ownerUserId),
+			server_capabilities: SERVER_SYNC_CAPABILITIES,
 		});
 	}
 
@@ -2103,6 +2111,7 @@ async function handleSyncRoute(req, res, pathname, url) {
 			ok: true,
 			server_time: now,
 			owner: ownerConnectionPayload(client.ownerUserId),
+			server_capabilities: SERVER_SYNC_CAPABILITIES,
 		});
 	}
 
@@ -2179,6 +2188,7 @@ async function handleSyncRoute(req, res, pathname, url) {
 			});
 			if (outcome === "inserted") {
 				accepted.push(event.id);
+				// Schedule/archive events are stored only; both mirrors ignore them.
 				mirrorSyncEventToPlan({
 					remoteId: event.remote_id || null,
 					type: event.type,

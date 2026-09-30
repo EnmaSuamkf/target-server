@@ -3780,7 +3780,11 @@ export function mirrorCommandToPlan({ remoteId, type, payload = {} }) {
 	}
 }
 
-/** Apply client sync events to the mirrored plan (status only). */
+/**
+ * Apply client sync events to the mirrored plan (status only). Types without a
+ * branch here (schedule.*, workflow.schedule_changed, workflow.(un)archived)
+ * are stored only; mirroring arrives with the schedule series API (workflow 6).
+ */
 export function mirrorSyncEventToPlan({ remoteId, type, payload = {} }) {
 	if (!remoteId) return;
 	if (type === "workflow.status_changed" && typeof payload.to === "string") {
@@ -3811,7 +3815,10 @@ export function mirrorSyncEventToPlan({ remoteId, type, payload = {} }) {
 	}
 }
 
-/** Apply a client resource event after `sync_events` has accepted its event id. */
+/**
+ * Apply a client resource event after `sync_events` has accepted its event id.
+ * Non-resource types (including the schedule/archive events) return false.
+ */
 export function mirrorResourceSyncEvent({ clientId, type, payload = {} }) {
 	const match = /^(template|tcp-tool|resource-set)\.(upserted|deleted)$/.exec(type);
 	if (!match) return false;
