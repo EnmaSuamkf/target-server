@@ -59,6 +59,92 @@ const RESOURCE_SELECTION = Joi.object({
 	skillNames: Joi.array().items(STRING).allow(null).optional(),
 }).or("resourceSetId", "skillSetId");
 
+// --- Schedules (mirror of hub/schedule.ts validateSchedule) -------------
+//
+// The hub re-validates every schedule it receives and acks the command failed
+// when it disagrees, so these rules must match hub/schedule.ts exactly: a
+// schedule the server accepts but the hub refuses is a series that silently
+// never arms.
+
+const SCHEDULE_TIME_RE = /^([01]\d|2[0-3]):([0-5]\d)$/;
+const SCHEDULE_AT_RE = /^(\d{4})-(\d{2})-(\d{2})T([01]\d|2[0-3]):([0-5]\d)$/;
+
+let supportedTimeZones = null;
+
+/**
+ * Same rule as the hub's isValidTimeZone: in Intl's canonical list, or accepted
+ * by Intl AND reported back verbatim. The second clause admits what a browser
+ * legitimately reports but the list leaves out ("UTC", links such as
+ * "Asia/Calcutta"), while rejecting what Intl merely tolerates (wrong case,
+ * "GMT" mapped to "UTC").
+ */
+export function isValidTimeZone(tz) {
+	if (typeof tz !== "string" || !tz) return false;
+	supportedTimeZones ??= new Set(Intl.supportedValuesOf("timeZone"));
+	if (supportedTimeZones.has(tz)) return true;
+	try {
+		return new Intl.DateTimeFormat("en-US", { timeZone: tz }).resolvedOptions().timeZone === tz;
+	} catch {
+		return false;
+	}
+}
+
+/** "YYYY-MM-DDTHH:mm" naming a calendar date that exists (not 2026-02-30). */
+function isValidLocalDateTime(at) {
+	const match = SCHEDULE_AT_RE.exec(at);
+	if (!match) return false;
+	const [y, m, d] = match.slice(1, 4).map(Number);
+	const check = new Date(Date.UTC(y, m - 1, d));
+	return check.getUTCFullYear() === y && check.getUTCMonth() === m - 1 && check.getUTCDate() === d;
+}
+
+const SCHEDULE_TIME = Joi.string().pattern(SCHEDULE_TIME_RE).messages({
+	"string.pattern.base": "time must be HH:mm (00:00–23:59)",
+});
+const SCHEDULE_AT = Joi.string()
+	.custom((value, helpers) => (isValidLocalDateTime(value) ? value : helpers.error("schedule.at")))
+	.messages({ "schedule.at": "at must be a valid local date and time, YYYY-MM-DDTHH:mm" });
+// Strict so "1" isn't converted into 1: the hub checks Number.isInteger.
+const SCHEDULE_DAYS = Joi.array()
+	.items(Joi.number().integer().min(0).max(6).strict())
+	.min(1)
+	.unique()
+	.messages({
+		"array.min": "days must list at least one day of the week",
+		"array.unique": "days must not repeat",
+		"number.base": "days must be integers from 0 (Sunday) to 6 (Saturday)",
+		"number.integer": "days must be integers from 0 (Sunday) to 6 (Saturday)",
+		"number.min": "days must be integers from 0 (Sunday) to 6 (Saturday)",
+		"number.max": "days must be integers from 0 (Sunday) to 6 (Saturday)",
+	});
+
+export const SCHEDULE_KINDS = ["once", "daily", "weekly"];
+
+/**
+ * once {at} | daily {time} | weekly {days, time}. Keys belonging to another kind
+ * are refused rather than stripped; with an unknown kind only `kind` is
+ * reported, as the hub does.
+ */
+const byKind = (schemas) =>
+	Joi.when("kind", {
+		switch: SCHEDULE_KINDS.map((kind) => ({ is: kind, then: schemas[kind] ?? Joi.forbidden() })),
+		otherwise: Joi.any(),
+	});
+
+export const SCHEDULE_SPEC = Joi.object({
+	kind: Joi.string()
+		.valid(...SCHEDULE_KINDS)
+		.required()
+		.messages({ "any.only": 'kind must be "once", "daily" or "weekly"' }),
+	at: byKind({ once: SCHEDULE_AT.required() }),
+	time: byKind({ daily: SCHEDULE_TIME.required(), weekly: SCHEDULE_TIME.required() }),
+	days: byKind({ weekly: SCHEDULE_DAYS.required() }),
+});
+
+export const SCHEDULE_TIMEZONE = Joi.string()
+	.custom((value, helpers) => (isValidTimeZone(value) ? value : helpers.error("schedule.timezone")))
+	.messages({ "schedule.timezone": "timezone must be a valid IANA time zone (e.g. Europe/Madrid)" });
+
 export const COMMAND_TYPES = [
 	"workflow.create",
 	"workflow.delete",
@@ -86,6 +172,8 @@ export const COMMAND_TYPES = [
 	"tcp-tool.delete",
 	"resource-set.upsert",
 	"resource-set.delete",
+	"workflow.set_schedule",
+	"workflow.cancel_schedule",
 ];
 
 export const EVENT_TYPES = [
@@ -225,6 +313,16 @@ const COMMAND_PAYLOADS = {
 		resource: Joi.object({ id: STRING.required(), name: STRING.required(), data: Joi.object().unknown(true).default({}) }).required(),
 	}),
 	"command.resource-set.delete": Joi.object({ resource_id: STRING.required() }),
+	// Schedule commands address the series, not a workflow (D17).
+	"command.workflow.set_schedule": Joi.object({
+		series_id: STRING.required(),
+		spec: SCHEDULE_SPEC.required(),
+		timezone: SCHEDULE_TIMEZONE.required(),
+		include_previous: Joi.boolean().strict().optional(),
+	}),
+	"command.workflow.cancel_schedule": Joi.object({
+		series_id: STRING.required(),
+	}),
 };
 
 /** Any object, unknown keys kept even under `stripUnknown`. */
@@ -497,6 +595,12 @@ export const BLUEPRINTS = {
 		conversation_context: OPTIONAL_STRING.optional(),
 		agent: Joi.string().valid("claude", "free-code", "cursor").optional(),
 		template_id: STRING.optional(),
+	}),
+	// Operator-facing schedule body (create with schedule, PUT schedule).
+	"sync.remote_workflow.schedule": Joi.object({
+		spec: SCHEDULE_SPEC.required(),
+		timezone: SCHEDULE_TIMEZONE.required(),
+		include_previous: Joi.boolean().default(true),
 	}),
 	"sync.remote_workflow.steps_from_template": Joi.object({
 		template_id: STRING.required(),
