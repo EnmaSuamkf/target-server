@@ -1370,3 +1370,26 @@ tbody tr.wf-row--selected, tbody tr.wf-row--selected:hover { background: var(--a
 	.catalog-layout { grid-template-columns: 1fr; }
 }
 
+
+/* Schedule editor — recurrence, timezone and next-run preview. */
+.schedule-editor { display: grid; gap: var(--space-3); }
+.schedule-editor__toggle { display: flex; gap: var(--space-2); align-items: center; font-size: var(--text-sm); }
+.schedule-editor__body { display: grid; gap: var(--space-3); }
+.schedule-editor__days { margin: 0; padding: 0; border: 0; }
+.schedule-editor__day-row { display: flex; flex-wrap: wrap; gap: var(--space-1); }
+.schedule-editor__preview { padding: var(--space-2) var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-md, 6px); }
+.schedule-editor__preview h5 { margin: 0 0 var(--space-1); font-size: var(--text-sm); }
+.schedule-editor__preview ol { margin: 0; padding-left: var(--space-4); }
+.schedule-editor__disabled { margin: 0; }
+.sync-schedule-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+
+/* Schedule badges, filters and series view. */
+.schedule-badges { display: inline-flex; flex-wrap: wrap; gap: var(--space-1); margin-left: var(--space-1); }
+.schedule-filters { display: flex; flex-wrap: wrap; gap: var(--space-1); margin-bottom: var(--space-2); }
+.series-view { display: grid; gap: var(--space-2); padding: var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-md, 6px); }
+.series-view__head { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
+.series-view__head h4 { margin: 0; }
+.series-notices { margin: 0; padding: 0; list-style: none; display: grid; gap: var(--space-1); }
+.series-notice { padding: var(--space-1) var(--space-2); border-left: 3px solid var(--warn-200); background: var(--warn-50); font-size: var(--text-sm); }
+.series-notice--danger { border-left-color: var(--danger-200); background: var(--danger-50); }
+.series-list { display: grid; gap: var(--space-3); }

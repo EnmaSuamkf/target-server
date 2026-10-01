@@ -38,7 +38,7 @@ import {
 	setOAuthStateCookie,
 	verifyOAuthState,
 } from "./google-oauth.mjs";
-import { validate, validateSyncEventBatch } from "./blueprint.mjs";
+import { EVENT_TYPES, validate, validateSyncEventBatch } from "./blueprint.mjs";
 import {
 	DEFAULT_ADMIN_EMAIL,
 	DEFAULT_ADMIN_PASSWORD,
@@ -166,6 +166,15 @@ import {
 	getJwtSecret,
 	isMultiOrg,
 	ensureIdentityCredentials,
+	createSeries,
+	getSeries,
+	updateSeries,
+	listSeriesByClient,
+	listSeriesInstances,
+	setRemoteWorkflowScheduleFields,
+	applyScheduleInstanceCreated,
+	mirrorScheduleSyncEvent,
+	listScheduleNotices,
 } from "./db.mjs";
 import {
 	assertMultiOrgDeviceLinkingMode,
@@ -1778,8 +1787,112 @@ function remoteWorkflowToApi(rwf) {
 		agent: rwf.agent ?? null,
 		tcp_selections: rwf.tcpSelections ?? [],
 		resource_selections: rwf.resourceSelections ?? [],
+		series_id: rwf.seriesId ?? null,
+		scheduled_for: rwf.scheduledFor ?? null,
+		schedule_state: rwf.scheduleState ?? null,
+		next_run_at: rwf.nextRunAt ?? null,
+		archived_at: rwf.archivedAt ?? null,
+		created_by: rwf.createdBy ?? "server",
 		created_at: rwf.createdAt,
 	};
+}
+
+function seriesToApi(series) {
+	return {
+		id: series.id,
+		client_id: series.clientId,
+		name: series.name,
+		spec: series.spec,
+		timezone: series.timezone,
+		include_previous: series.includePrevious,
+		state: series.state,
+		created_by: series.createdBy,
+		created_at: series.createdAt,
+		updated_at: series.updatedAt,
+	};
+}
+
+function scheduleNoticeToApi(notice) {
+	return {
+		id: notice.id,
+		series_id: notice.seriesId,
+		remote_id: notice.remoteId,
+		kind: notice.kind,
+		reason: notice.reason,
+		occurrences: notice.occurrences,
+		created_at: notice.createdAt,
+	};
+}
+
+// --- Scheduled series (D15–D22) -------------------------------------------
+//
+// The hub runs the schedule; the server only records what the operator
+// decided (the series row) and sends it as workflow.set_schedule /
+// workflow.cancel_schedule, both addressed to the SERIES so they still land
+// when the instance the server last saw has already fired (D17).
+
+/** Scheduling makes the hub run the workflow unattended, so it needs both (D22). */
+const SCHEDULE_PERMISSIONS = ["client.workflows.execute", "client.workflows.manage"];
+const SCHEDULE_COMMANDS = new Set(["workflow.set_schedule", "workflow.cancel_schedule"]);
+/** A run in progress; changing its schedule would race the hub's own fire (409). */
+const SCHEDULE_BUSY_STATUSES = new Set(["running", "waiting", "paused"]);
+
+async function requireScheduleCapabilities(req, res) {
+	for (const permission of SCHEDULE_PERMISSIONS) {
+		if (!(await requireCapability(req, res, permission))) return false;
+	}
+	return true;
+}
+
+/** Same 409 shape as the resource commands, checked before anything is persisted. */
+function scheduleCapabilityError(client, type) {
+	const commands = client?.capabilities?.commands;
+	if (Array.isArray(commands) && commands.includes(type)) return null;
+	return {
+		error: "capability_unsupported",
+		detail: `Client does not support ${type}`,
+		required: { command: type },
+	};
+}
+
+function setScheduleCommandPayload(seriesId, schedule) {
+	return {
+		series_id: seriesId,
+		spec: schedule.spec,
+		timezone: schedule.timezone,
+		include_previous: schedule.include_previous,
+	};
+}
+
+/**
+ * Point `remoteWorkflow` at a series (a new one, or its live one updated) and
+ * queue workflow.set_schedule for it. The command is enqueued before the rows
+ * change so a rejected payload leaves nothing half-written.
+ */
+function scheduleRemoteWorkflow({ remoteWorkflow, schedule }) {
+	const current = remoteWorkflow.seriesId ? getSeries(remoteWorkflow.seriesId) : null;
+	// A cancelled series is history: scheduling again starts a new series, as
+	// the hub does for a cancelled instance.
+	const live = current && current.state !== "cancelled" ? current : null;
+	const seriesId = live?.id ?? randomUUID();
+	const command = enqueueCommand({
+		clientId: remoteWorkflow.clientId,
+		remoteId: remoteWorkflow.id,
+		type: "workflow.set_schedule",
+		payload: setScheduleCommandPayload(seriesId, schedule),
+	});
+	const fields = { spec: schedule.spec, timezone: schedule.timezone, includePrevious: schedule.include_previous };
+	const series = live
+		? updateSeries(live.id, { ...fields, state: "active" })
+		: createSeries({
+				id: seriesId,
+				clientId: remoteWorkflow.clientId,
+				name: remoteWorkflow.name,
+				...fields,
+				createdBy: "server",
+			});
+	if (!live) setRemoteWorkflowScheduleFields(remoteWorkflow.id, { seriesId, scheduleState: null, nextRunAt: null });
+	return { series, command };
 }
 
 function capabilityUnsupportedBody(info, type) {
@@ -1962,6 +2075,8 @@ function isOperatorSyncPath(pathname, method) {
 	if (method === "PUT" && /^\/api\/sync\/remote-workflows\/[^/]+\/tcps$/.test(pathname)) return true;
 	if (method === "PUT" && /^\/api\/sync\/remote-workflows\/[^/]+\/resource-sets$/.test(pathname)) return true;
 	if (method === "DELETE" && /^\/api\/sync\/remote-workflows\/[^/]+$/.test(pathname)) return true;
+	if ((method === "PUT" || method === "DELETE") && /^\/api\/sync\/remote-workflows\/[^/]+\/schedule$/.test(pathname)) return true;
+	if (method === "GET" && pathname === "/api/sync/schedule-series") return true;
 	if (/^\/api\/sync\/clients\/[^/]+\/(templates|tcp-tools|resource-sets)(\/[^/]+)?$/.test(pathname)) return true;
 	return false;
 }
@@ -1997,6 +2112,13 @@ async function requireSyncClient(req, res) {
 	return client;
 }
 
+/**
+ * Event types this server accepts on POST /api/sync/events, returned on
+ * register and heartbeat. The hub may only emit a type listed here: one
+ * unknown type makes the whole batch fail with 400, which stalls all sync.
+ */
+const SERVER_SYNC_CAPABILITIES = Object.freeze({ events: Object.freeze([...EVENT_TYPES]) });
+
 async function handleSyncRoute(req, res, pathname, url) {
 	if (isOperatorSyncPath(pathname, req.method)) return false;
 
@@ -2030,6 +2152,7 @@ async function handleSyncRoute(req, res, pathname, url) {
 			...(clientToken ? { client_token: clientToken } : {}),
 			created_at: client.createdAt,
 			owner: ownerConnectionPayload(device?.ownerUserId ?? client.ownerUserId),
+			server_capabilities: SERVER_SYNC_CAPABILITIES,
 		});
 	}
 
@@ -2103,6 +2226,7 @@ async function handleSyncRoute(req, res, pathname, url) {
 			ok: true,
 			server_time: now,
 			owner: ownerConnectionPayload(client.ownerUserId),
+			server_capabilities: SERVER_SYNC_CAPABILITIES,
 		});
 	}
 
@@ -2160,8 +2284,30 @@ async function handleSyncRoute(req, res, pathname, url) {
 		const v = validateSyncEventBatch(body);
 		if (!v.ok) return sendJson(res, 400, { errors: v.errors });
 		const accepted = [];
+		const rejected = [];
 		const duplicates = [];
 		for (const event of v.value.events) {
+			if (syncEventTargetsForeignRemote(client, event)) {
+				rejected.push({ id: event.id, reason: "foreign_remote_id" });
+				log(`sync event rejected ${event.id}: foreign_remote_id (client ${client.id.slice(0, 8)})`);
+				continue;
+			}
+			// Validated and applied BEFORE the event is stored, so a refused
+			// announcement leaves no trace and a resend is judged afresh. A resend
+			// of an accepted one finds its own row (idempotent) and then comes back
+			// as a duplicate — both tell the hub the server knows the instance.
+			if (event.type === "schedule.instance_created") {
+				const applied = applyScheduleInstanceCreated({
+					clientId: client.id,
+					remoteId: event.remote_id || null,
+					payload: event.payload ?? {},
+				});
+				if (!applied.ok) {
+					rejected.push({ id: event.id, reason: applied.reason });
+					log(`sync event rejected ${event.id}: ${applied.reason} (client ${client.id.slice(0, 8)})`);
+					continue;
+				}
+			}
 			const outcome = insertSyncEvent({
 				id: event.id,
 				clientId: client.id,
@@ -2173,6 +2319,14 @@ async function handleSyncRoute(req, res, pathname, url) {
 			});
 			if (outcome === "inserted") {
 				accepted.push(event.id);
+				mirrorScheduleSyncEvent({
+					clientId: client.id,
+					eventId: event.id,
+					remoteId: event.remote_id || null,
+					type: event.type,
+					payload: event.payload ?? {},
+					receivedAt: event.created_at,
+				});
 				mirrorSyncEventToPlan({
 					remoteId: event.remote_id || null,
 					type: event.type,
@@ -2185,10 +2339,34 @@ async function handleSyncRoute(req, res, pathname, url) {
 				});
 			} else duplicates.push(event.id);
 		}
-		return sendJson(res, 200, { accepted, rejected: [], duplicates });
+		return sendJson(res, 200, { accepted, rejected, duplicates });
 	}
 
 	return false;
+}
+
+/**
+ * True when a client event would touch a remote workflow owned by another
+ * client. Events are mirrored into the plan by remote id alone, so without this
+ * any registered client could flip another hub's workflow or step status.
+ * `command.ack` is covered too: its mirror resolves the remote id from the
+ * command row, which can delete the workflow on a `workflow.delete` ack.
+ * Unknown remote ids stay accepted (clients report local-origin workflows).
+ * Lookups go through the request's org DB, so another org's rows are never
+ * visible here and a cross-org id is just "unknown" with nothing to mirror.
+ */
+function syncEventTargetsForeignRemote(client, event) {
+	const remoteIds = [];
+	if (event.remote_id) remoteIds.push(event.remote_id);
+	if (event.type === "command.ack" && typeof event.payload?.command_id === "string") {
+		const command = getCommandById(event.payload.command_id);
+		if (command && command.clientId !== client.id) return true;
+		if (command?.remoteId) remoteIds.push(command.remoteId);
+	}
+	return remoteIds.some((remoteId) => {
+		const workflow = getRemoteWorkflowById(remoteId);
+		return workflow != null && workflow.clientId !== client.id;
+	});
 }
 
 async function handleOperatorSyncRoute(req, res, pathname, url) {
@@ -2347,8 +2525,10 @@ async function handleOperatorSyncRoute(req, res, pathname, url) {
 		if (!(await requireCapability(req, res, "client.read"))) return true;
 		const detail = getRemoteWorkflowDetail(remoteDetailMatch[1]);
 		if (!detail) return sendJson(res, 404, { error: "remote_workflow_not_found" });
+		const series = detail.workflow.seriesId ? getSeries(detail.workflow.seriesId) : null;
 		return sendJson(res, 200, {
 			remote_workflow: remoteWorkflowToApi(detail.workflow),
+			series: series ? seriesToApi(series) : null,
 			steps: detail.steps.map(remoteStepToApi),
 			pending_commands: detail.pendingCommands.map(syncCommandToApi),
 		});
@@ -2393,6 +2573,8 @@ async function handleOperatorSyncRoute(req, res, pathname, url) {
 		if (!body) return true;
 		const v = validate("sync.remote_workflow.create", body);
 		if (!v.ok) return sendJson(res, 400, { errors: v.errors });
+		const schedule = v.value.schedule ?? null;
+		if (schedule && !(await requireScheduleCapabilities(req, res))) return true;
 		let template = null;
 		if (v.value.template_id) {
 			if (!(await requireCapability(req, res, "templates.read"))) return true;
@@ -2405,6 +2587,10 @@ async function handleOperatorSyncRoute(req, res, pathname, url) {
 		}
 		const agentError = validateClientAgent(client, v.value.agent);
 		if (agentError) return sendJson(res, 422, { errors: [agentError] });
+		if (schedule) {
+			const cap = scheduleCapabilityError(client, "workflow.set_schedule");
+			if (cap) return sendJson(res, 409, cap);
+		}
 		let templateTcpSelections = [];
 		let templateResourceSelections = [];
 		if (template) {
@@ -2435,6 +2621,7 @@ async function handleOperatorSyncRoute(req, res, pathname, url) {
 		let contextCommand = null;
 		let stepCommands = [];
 		let selectionCommands = [];
+		let scheduled = null;
 		try {
 			command = enqueueCommand({
 				clientId: client.id,
@@ -2465,6 +2652,9 @@ async function handleOperatorSyncRoute(req, res, pathname, url) {
 					});
 				}
 			}
+			// Last, so the hub has the workflow, its context, steps and selections
+			// before it arms it: the first instance is complete when it can fire.
+			if (schedule) scheduled = scheduleRemoteWorkflow({ remoteWorkflow: getRemoteWorkflowById(remoteId), schedule });
 		} catch (err) {
 			if (err.statusCode === 409 && err.body) return sendJson(res, 409, err.body);
 			if (err.statusCode === 400) return sendJson(res, 400, { errors: err.errors });
@@ -2477,6 +2667,8 @@ async function handleOperatorSyncRoute(req, res, pathname, url) {
 			context_command: contextCommand ? syncCommandToApi(contextCommand) : null,
 			step_commands: stepCommands.map(syncCommandToApi),
 			selection_commands: selectionCommands.map(syncCommandToApi),
+			series: scheduled ? seriesToApi(scheduled.series) : null,
+			schedule_command: scheduled ? syncCommandToApi(scheduled.command) : null,
 		});
 	}
 
@@ -2503,6 +2695,12 @@ async function handleOperatorSyncRoute(req, res, pathname, url) {
 		if (!body) return true;
 		const v = validate("sync.remote_workflow.enqueue_command", body);
 		if (!v.ok) return sendJson(res, 400, { errors: v.errors });
+		// A raw set_schedule here would arm the hub with no series row behind it.
+		if (SCHEDULE_COMMANDS.has(v.value.type)) {
+			return sendJson(res, 422, {
+				errors: [{ field: "type", code: "use_schedule_endpoint", message: "Use PUT/DELETE /api/sync/remote-workflows/:id/schedule" }],
+			});
+		}
 		const permission = workflowCommandPermission(v.value.type);
 		if (!(await requireCapability(req, res, permission))) return true;
 		const remoteWorkflow = getRemoteWorkflowById(commandMatch[1]);
@@ -2672,6 +2870,74 @@ async function handleOperatorSyncRoute(req, res, pathname, url) {
 			remote_workflow: remoteWorkflowToApi(detail.workflow),
 			commands: commands.map(syncCommandToApi),
 		});
+	}
+
+	if (req.method === "GET" && pathname === "/api/sync/schedule-series") {
+		if (!(await requireCapability(req, res, "client.read"))) return true;
+		const clientId = url.searchParams.get("client_id") || null;
+		const series = listSeriesByClient(clientId).map((s) => ({
+			...seriesToApi(s),
+			instances: listSeriesInstances(s.id).map(remoteWorkflowToApi),
+			notices: listScheduleNotices(s.id).map(scheduleNoticeToApi),
+		}));
+		return sendJson(res, 200, { series });
+	}
+
+	const scheduleMatch = pathname.match(/^\/api\/sync\/remote-workflows\/([^/]+)\/schedule$/);
+	if (req.method === "PUT" && scheduleMatch) {
+		if (!(await requireScheduleCapabilities(req, res))) return true;
+		const body = await readJson(req, res);
+		if (!body) return true;
+		const v = validate("sync.remote_workflow.schedule", body);
+		if (!v.ok) return sendJson(res, 400, { errors: v.errors });
+		const remoteWorkflow = getRemoteWorkflowById(scheduleMatch[1]);
+		if (!remoteWorkflow) return sendJson(res, 404, { error: "remote_workflow_not_found" });
+		if (SCHEDULE_BUSY_STATUSES.has(remoteWorkflow.status)) {
+			return sendJson(res, 409, { error: "remote_workflow_busy", status: remoteWorkflow.status });
+		}
+		if (remoteWorkflow.status === "deleting") return sendJson(res, 409, { error: "remote_workflow_deleting" });
+		const cap = scheduleCapabilityError(getClientById(remoteWorkflow.clientId), "workflow.set_schedule");
+		if (cap) return sendJson(res, 409, cap);
+		let scheduled;
+		try {
+			scheduled = scheduleRemoteWorkflow({ remoteWorkflow, schedule: v.value });
+		} catch (err) {
+			if (err.statusCode === 400) return sendJson(res, 400, { errors: err.errors });
+			throw err;
+		}
+		return sendJson(res, 200, {
+			remote_workflow: remoteWorkflowToApi(getRemoteWorkflowById(remoteWorkflow.id)),
+			series: seriesToApi(scheduled.series),
+			command: syncCommandToApi(scheduled.command),
+		});
+	}
+
+	if (req.method === "DELETE" && scheduleMatch) {
+		if (!(await requireScheduleCapabilities(req, res))) return true;
+		const remoteWorkflow = getRemoteWorkflowById(scheduleMatch[1]);
+		if (!remoteWorkflow) return sendJson(res, 404, { error: "remote_workflow_not_found" });
+		const series = remoteWorkflow.seriesId ? getSeries(remoteWorkflow.seriesId) : null;
+		if (!series) return sendJson(res, 404, { error: "schedule_not_found" });
+		// Already cancelled: nothing left to tell the hub.
+		if (series.state === "cancelled") {
+			return sendJson(res, 200, { series: seriesToApi(series), command: null });
+		}
+		const cap = scheduleCapabilityError(getClientById(remoteWorkflow.clientId), "workflow.cancel_schedule");
+		if (cap) return sendJson(res, 409, cap);
+		let command;
+		try {
+			command = enqueueCommand({
+				clientId: remoteWorkflow.clientId,
+				remoteId: remoteWorkflow.id,
+				type: "workflow.cancel_schedule",
+				payload: { series_id: series.id },
+			});
+		} catch (err) {
+			if (err.statusCode === 400) return sendJson(res, 400, { errors: err.errors });
+			throw err;
+		}
+		const cancelled = updateSeries(series.id, { state: "cancelled" });
+		return sendJson(res, 200, { series: seriesToApi(cancelled), command: syncCommandToApi(command) });
 	}
 
 	const deleteMatch = pathname.match(/^\/api\/sync\/remote-workflows\/([^/]+)$/);

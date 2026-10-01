@@ -392,7 +392,59 @@ export interface SyncRemoteWorkflowRow {
 	steps_pending_sync: number;
 	tcp_selections?: TcpSelection[];
 	resource_selections?: ResourceSelection[];
+	/** Scheduled series this workflow is an instance of (null when not scheduled). */
+	series_id?: string | null;
+	scheduled_for?: string | null;
+	schedule_state?: string | null;
+	next_run_at?: string | null;
+	archived_at?: string | null;
+	created_by?: "server" | "hub";
 	created_at: string;
+}
+
+/** Recurrence of a scheduled series; `at`/`time` are local wall-clock in the series timezone. */
+export type ScheduleSpec =
+	| { kind: "once"; at: string }
+	| { kind: "daily"; time: string }
+	| { kind: "weekly"; days: number[]; time: string };
+
+/** Body of create-with-schedule and PUT /api/sync/remote-workflows/:id/schedule. */
+export interface ScheduleBody {
+	spec: ScheduleSpec;
+	timezone: string;
+	include_previous: boolean;
+}
+
+export interface SyncScheduleSeries {
+	id: string;
+	client_id: string;
+	name: string;
+	spec: ScheduleSpec;
+	timezone: string;
+	include_previous: boolean;
+	state: "active" | "cancelled" | "broken";
+	created_by: string;
+	created_at: string;
+	updated_at: string;
+}
+
+export interface SyncScheduleNotice {
+	id: string;
+	series_id: string;
+	remote_id: string | null;
+	kind: string;
+	reason: string | null;
+	occurrences: string[] | null;
+	created_at: string;
+}
+
+export interface SyncScheduleSeriesRow extends SyncScheduleSeries {
+	instances: SyncRemoteWorkflowRow[];
+	notices: SyncScheduleNotice[];
+}
+
+export interface SyncScheduleSeriesResponse {
+	series: SyncScheduleSeriesRow[];
 }
 
 /** Planned step mirrored on the server (operator view). */
@@ -433,6 +485,8 @@ export interface SyncRemoteWorkflowsResponse {
 export interface SyncCreateRemoteWorkflowResponse {
 	remote_workflow: SyncRemoteWorkflowRow;
 	command: SyncCommand;
+	series?: SyncScheduleSeries | null;
+	schedule_command?: SyncCommand | null;
 }
 
 export interface SyncEventRow {
