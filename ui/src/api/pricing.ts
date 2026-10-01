@@ -1,5 +1,5 @@
 import { downloadJson } from "./sync.ts";
-import type { FieldError, PricingResponse, PricingRule, PricingRuleInput } from "./types.ts";
+import type { EstimateQuery, EstimateResponse, FieldError, PricingResponse, PricingRule, PricingRuleInput } from "./types.ts";
 
 const BASE = "/api/settings/pricing";
 
@@ -57,4 +57,16 @@ export async function exportPricing(): Promise<Result<{ filename: string }>> {
 export function importPricing(body: unknown, mode: "replace" | "merge") {
 	const file = typeof body === "object" && body !== null && !Array.isArray(body) ? body : { rules: body };
 	return send<{ rules: PricingRule[] }>(`${BASE}/import`, "POST", { ...file, mode });
+}
+
+/** `GET /api/pricing/estimate`: p50/p90 of past completed runs, or `insufficient_data`. */
+export async function loadEstimate(query: EstimateQuery): Promise<Result<EstimateResponse>> {
+	const params = new URLSearchParams();
+	if (query.templateId) params.set("templateId", query.templateId);
+	if (query.agent) params.set("agent", query.agent);
+	if (query.model) params.set("model", query.model);
+	if (query.steps && query.steps > 0) params.set("steps", String(Math.round(query.steps)));
+	const res = await fetch(`/api/pricing/estimate?${params}`, { credentials: "same-origin" });
+	if (!res.ok) return readError(res);
+	return { ok: true, data: (await res.json()) as EstimateResponse };
 }

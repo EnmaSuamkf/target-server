@@ -658,6 +658,7 @@ export function App({ user, catalog = null, onSignOut }: { user: AuthUser; catal
 									manage: canManageRemote,
 									execute: canExecuteRemote,
 									templatesRead: can("templates.read"),
+									pricingRead: can("pricing.read"),
 									tcpRead: can("tcp-tools.read"),
 									rciRead: can("rci.read"),
 								}}

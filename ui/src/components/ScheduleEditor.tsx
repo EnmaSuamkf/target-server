@@ -8,6 +8,8 @@ import {
 	type ScheduleDraft,
 	type ScheduleKind,
 } from "../lib/schedule.ts";
+import type { EstimateQuery } from "../api/types.ts";
+import { EstimateBadge } from "./EstimateBadge.tsx";
 import { Field } from "./Field.tsx";
 
 const KIND_LABELS: Record<ScheduleKind, string> = {
@@ -25,6 +27,11 @@ interface Props {
 	disabledReason?: string | null;
 	/** Server-side messages for the schedule (from a rejected request). */
 	serverErrors?: string[];
+	/**
+	 * What the run is being estimated for, shown as the cost per run beside the
+	 * recurrence. `enabled` is the viewer's `pricing.read`; without it nothing shows.
+	 */
+	estimate?: { enabled: boolean; query: EstimateQuery };
 	/** Clock for the preview — injectable so it can be tested. */
 	now?: Date;
 }
@@ -40,6 +47,7 @@ export function ScheduleEditor({
 	showToggle = true,
 	disabledReason = null,
 	serverErrors = [],
+	estimate,
 	now = new Date(),
 }: Props): React.JSX.Element {
 	const set = (patch: Partial<ScheduleDraft>) => onChange({ ...value, ...patch });
@@ -187,6 +195,7 @@ export function ScheduleEditor({
 							</p>
 						)}
 					</div>
+					{estimate ? <EstimateBadge enabled={estimate.enabled} query={estimate.query} perRun /> : null}
 					{serverErrors.map((message) => (
 						<p key={message} className="msg msg--error" role="alert">
 							{message}

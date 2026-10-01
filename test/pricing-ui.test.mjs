@@ -67,3 +67,36 @@ test("formatUsd follows the stated rules", async () => {
 	assert.equal(formatUsd(12.345), "$12.35");
 	assert.equal(formatUsd(1234.6), "$1,235");
 });
+
+test("the cost estimate is mounted in the create form and the schedule editor, gated on pricing.read", () => {
+	const app = read("../ui/src/App.tsx");
+	assert.match(app, /pricingRead: can\("pricing\.read"\)/);
+
+	const panel = read("../ui/src/components/RemoteWorkflowsPanel.tsx");
+	assert.match(panel, /<EstimateBadge enabled=\{permissions\.pricingRead\} query=\{createEstimateQuery\} \/>/);
+	// Both schedule editors (create form and selected workflow) get the estimate, behind the same flag.
+	assert.equal((panel.match(/enabled: permissions\.pricingRead/g) ?? []).length, 2);
+	assert.equal((panel.match(/estimate=\{/g) ?? []).length, 2);
+	assert.match(panel, /estimate=\{\{ enabled: permissions\.pricingRead, query: createEstimateQuery \}\}/);
+
+	const editor = read("../ui/src/components/ScheduleEditor.tsx");
+	assert.match(editor, /<EstimateBadge enabled=\{estimate\.enabled\} query=\{estimate\.query\} perRun \/>/);
+});
+
+test("EstimateBadge renders nothing without pricing.read, is debounced, and drops stale answers", () => {
+	const badge = read("../ui/src/components/EstimateBadge.tsx");
+	assert.match(badge, /const estimable = enabled && Boolean\(templateId \|\| agent\)/);
+	assert.match(badge, /if \(!estimable \|\| !hasRules \|\| state\.kind === "idle"\) return null/);
+	// No price table at all → nothing to show.
+	assert.match(badge, /rules\.length > 0/);
+	assert.match(badge, /ESTIMATE_DEBOUNCE_MS = 400/);
+	assert.match(badge, /setTimeout\(/);
+	assert.match(badge, /clearTimeout\(timer\)/);
+	assert.match(badge, /ticket !== latest\.current/);
+	assert.match(badge, /Not enough history to estimate/);
+	assert.match(badge, /based on \$\{e\.sampleSize\} past run/);
+	assert.match(badge, /formatUsd\(e\.p50\)} - \$\{formatUsd\(e\.p90\)/);
+	const api = read("../ui/src/api/pricing.ts");
+	assert.match(api, /export async function loadEstimate/);
+	assert.match(api, /\/api\/pricing\/estimate/);
+});

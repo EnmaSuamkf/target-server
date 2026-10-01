@@ -734,3 +734,23 @@ export interface PricingResponse {
 	rules: PricingRule[];
 	unpriced: UnpricedUsage[];
 }
+
+/** What a run is being estimated for; the server needs a template or an agent. */
+export interface EstimateQuery {
+	templateId?: string;
+	agent?: string;
+	model?: string;
+	steps?: number;
+}
+
+/** `GET /api/pricing/estimate`: a range, or too little history to give one. */
+export type EstimateResponse =
+	| {
+			p50: number;
+			p90: number;
+			sampleSize: number;
+			basis: "template" | "agent_model" | "agent";
+			perStep: { p50: number; p90: number } | null;
+			scaledBy: number | null;
+	  }
+	| { status: "insufficient_data"; sampleSize: number };
