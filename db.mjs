@@ -2202,7 +2202,7 @@ function eventFilterWhere({ kind = null, instanceId = null, workflowId = null, u
 		params.push(sandbox);
 	}
 	if (user) {
-		clauses.push("instance_id IN (SELECT instance_id FROM instances WHERE COALESCE(display_name, '') = ?)");
+		clauses.push(`instance_id IN (SELECT instance_id FROM instances WHERE ${INSTANCE_USER_SQL} = ?)`);
 		params.push(user);
 	}
 	if (from) {
@@ -2220,13 +2220,22 @@ function eventFilterWhere({ kind = null, instanceId = null, workflowId = null, u
 	return { where: clauses.length ? `WHERE ${clauses.join(" AND ")}` : "", params };
 }
 
+/**
+ * Effective reporting-user name of an `instances` row: its reported display
+ * name, else the email of the account that owns the (device-linked) instance.
+ * Device-linked instances never send a display name, so without the fallback
+ * every one of them showed up as "anonymous".
+ */
+const INSTANCE_USER_SQL =
+	"COALESCE(NULLIF(display_name, ''), (SELECT email FROM auth_users WHERE auth_users.id = instances.owner_user_id), '')";
+
 /** The distinct reporting users (instance display names) for the filter dropdown. */
 export function listUsers({ ownerUserId } = {}) {
 	const ownWhere = ownerUserId != null ? " WHERE owner_user_id = ?" : "";
 	const ownParams = ownerUserId != null ? [ownerUserId] : [];
 	return open()
 		.prepare(
-			`SELECT COALESCE(NULLIF(display_name, ''), 'anonymous') AS name,
+			`SELECT COALESCE(NULLIF(${INSTANCE_USER_SQL}, ''), 'anonymous') AS name,
 			        COUNT(*) AS instances,
 			        SUM(events_count) AS events,
 			        MAX(last_seen_at) AS last_seen_at
@@ -2303,7 +2312,7 @@ export function stats({ kind = null, instanceId = null, workflowId = null, user 
 		instParams.push(instanceId);
 	}
 	if (user) {
-		instClauses.push("COALESCE(display_name, '') = ?");
+		instClauses.push(`${INSTANCE_USER_SQL} = ?`);
 		instParams.push(user);
 	}
 	if (ownerUserId != null) {
@@ -3027,7 +3036,7 @@ function workflowAggregates({
 	const displayNames = new Map();
 	if (instIds.length > 0) {
 		for (const r of d
-			.prepare(`SELECT instance_id, display_name FROM instances WHERE instance_id IN (${instIds.map(() => "?").join(",")})`)
+			.prepare(`SELECT instance_id, ${INSTANCE_USER_SQL} AS display_name FROM instances WHERE instance_id IN (${instIds.map(() => "?").join(",")})`)
 			.all(...instIds)) {
 			displayNames.set(r.instance_id, r.display_name);
 		}
