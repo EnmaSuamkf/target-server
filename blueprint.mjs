@@ -549,7 +549,21 @@ const PRICING_IMPORT = Joi.object({
 		.required(),
 });
 
+/**
+ * `GET /api/pricing/estimate` query. Needs something to group history by (a
+ * template or an agent); `model` only narrows an agent, so it needs one.
+ */
+const PRICING_ESTIMATE_QUERY = Joi.object({
+	templateId: Joi.string().trim().min(1).max(200),
+	agent: Joi.string().trim().min(1).max(100),
+	model: Joi.string().trim().min(1).max(200),
+	steps: Joi.number().integer().min(1).max(10_000),
+})
+	.or("templateId", "agent")
+	.with("model", "agent");
+
 export const BLUEPRINTS = {
+	"pricing.estimate_query": PRICING_ESTIMATE_QUERY,
 	"pricing.rule": PRICING_RULE,
 	"pricing.import": PRICING_IMPORT,
 	"user.create": Joi.object({

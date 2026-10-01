@@ -39,6 +39,7 @@ import {
 	verifyOAuthState,
 } from "./google-oauth.mjs";
 import { EVENT_TYPES, validate, validateSyncEventBatch } from "./blueprint.mjs";
+import { estimate } from "./estimates.mjs";
 import {
 	DEFAULT_ADMIN_EMAIL,
 	DEFAULT_ADMIN_PASSWORD,
@@ -138,6 +139,7 @@ import {
 	listResourceSets,
 	getResourceSet,
 	createPricingRule,
+	estimateHistory,
 	createResourceSet,
 	deletePricingRule,
 	getPricingRule,
@@ -2621,6 +2623,7 @@ async function handleOperatorSyncRoute(req, res, pathname, url) {
 			conversationContext,
 			sandbox: "docker",
 			agent: v.value.agent ?? null,
+			templateId: template?.id ?? null,
 		});
 		const payload = { name: v.value.name, sandbox: "docker" };
 		if (v.value.agent) payload.agent = v.value.agent;
@@ -3445,6 +3448,20 @@ async function handleCatalogSyncRolesRoute(req, res) {
 }
 
 /**
+ * `GET /api/pricing/estimate?templateId=&agent=&model=&steps=`: what a run is
+ * likely to cost, from completed history (see estimates.mjs). `steps` scales
+ * the result by steps / median historical steps when both are known.
+ */
+async function handlePricingEstimateRoute(req, res) {
+	if (req.method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
+	if (!(await requireCapability(req, res, "pricing.read"))) return true;
+	const query = Object.fromEntries(new URL(req.url, "http://x").searchParams);
+	const v = validate("pricing.estimate_query", query);
+	if (!v.ok) return sendJson(res, 422, { errors: v.errors });
+	return sendJson(res, 200, estimate(estimateHistory(), v.value));
+}
+
+/**
  * `/api/settings/pricing`: the per-organization price table. Cost itself is
  * computed at read time (db.mjs), so none of these writes touch events.
  */
@@ -3655,6 +3672,11 @@ const server = createServer(async (req, res) => {
 
 		if (pathname === "/api/catalog/sync-roles") {
 			const handled = await handleCatalogSyncRolesRoute(req, res);
+			if (handled !== false) return;
+		}
+
+		if (pathname === "/api/pricing/estimate") {
+			const handled = await handlePricingEstimateRoute(req, res);
 			if (handled !== false) return;
 		}
 
