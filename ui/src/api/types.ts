@@ -59,7 +59,8 @@ export interface Stats {
 	/** Distinct values ever reported (unfiltered), for the filter dropdowns. */
 	agents: string[];
 	sandboxes: string[];
-	usage: { inputTokens: number; outputTokens: number };
+	/** `costUsd` is null when no session could be priced (never 0). */
+	usage: { inputTokens: number; outputTokens: number; costUsd: number | null; unpricedSessions: number };
 }
 
 /** Run state as the server derives it; anything else degrades to a neutral badge. */
@@ -84,6 +85,10 @@ export interface WorkflowRow {
 	/** Plan size the progress bar divides by (see `workflowAggregates`). */
 	stepsTotal: number;
 	tokens: { input: number; output: number };
+	/** Estimated spend; null when no session has a price rule. */
+	costUsd: number | null;
+	/** True when only some sessions were priced, so `costUsd` is a lower bound. */
+	costPartial: boolean;
 	status: WorkflowStatus;
 	/**
 	 * Whether this row's shape came from a `workflow.plan` snapshot. Without one
@@ -162,13 +167,17 @@ export interface UsageSession {
 	turns: number;
 	includesSubagents: boolean;
 	compacted: boolean;
+	/** Priced figure: the hub's own cost, a pricing rule, or null when neither applies. */
 	costUsd: number | null;
+	costSource?: "hub" | "pricing" | "unpriced";
 }
 
 /** A workflow's spend: the latest snapshot per session, plus their totals. */
 export interface WorkflowUsage {
 	inputTokens: number;
 	outputTokens: number;
+	costUsd?: number | null;
+	unpricedSessions?: number;
 	sessions: UsageSession[];
 }
 
@@ -689,4 +698,39 @@ export interface CatalogSyncRole {
 
 export interface CatalogSyncRolesResponse {
 	roles: CatalogSyncRole[];
+}
+
+/** One row of the per-organization price table (USD per million tokens). */
+export interface PricingRule {
+	id: number;
+	/** The runner (claude, free-code, cursor); `*` = any. */
+	agent: string;
+	/** Model name; `*` = any, a trailing `*` is a prefix glob. */
+	model: string;
+	inputPerMtok: number;
+	outputPerMtok: number;
+	/** Null falls back to the input rate. */
+	cacheReadPerMtok: number | null;
+	cacheWritePerMtok: number | null;
+	/** '' = always, else the ISO instant the rule starts applying. */
+	effectiveFrom: string;
+	createdAt: string;
+	updatedAt: string;
+}
+
+export type PricingRuleInput = Omit<PricingRule, "id" | "createdAt" | "updatedAt">;
+
+/** An (agent, model) pair that reported usage and matches no rule. */
+export interface UnpricedUsage {
+	agent: string | null;
+	model: string | null;
+	sessions: number;
+	inputTokens: number;
+	outputTokens: number;
+}
+
+/** `GET /api/settings/pricing`. */
+export interface PricingResponse {
+	rules: PricingRule[];
+	unpriced: UnpricedUsage[];
 }
