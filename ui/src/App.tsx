@@ -28,6 +28,7 @@ import { EventFeed } from "./components/EventFeed.tsx";
 import { FilterBar, RANGE_MS } from "./components/FilterBar.tsx";
 import { InstancesTable } from "./components/InstancesTable.tsx";
 import { Kpi } from "./components/Kpi.tsx";
+import { PricingPanel } from "./components/PricingPanel.tsx";
 import { Pagination } from "./components/Pagination.tsx";
 import { TargetMark } from "./components/TargetMark.tsx";
 import { RemoteWorkflowsPanel } from "./components/RemoteWorkflowsPanel.tsx";
@@ -41,12 +42,12 @@ import { WorkflowDetail } from "./components/WorkflowDetail.tsx";
 import { WorkflowsTable } from "./components/WorkflowsTable.tsx";
 import { useApi } from "./hooks/useApi.ts";
 import { hasPermission } from "./api/permissions.ts";
-import { compactNumber, localToIso } from "./lib/format.ts";
+import { compactNumber, formatUsd, localToIso } from "./lib/format.ts";
 
 const POLL_MS = 4000;
 const DEFAULT_PAGE_SIZE = 25;
 
-type DashboardTab = "activity" | "users" | "remote" | "library";
+type DashboardTab = "activity" | "users" | "remote" | "library" | "settings";
 
 function ChangePasswordButton() {
 	const rootRef = useRef<HTMLSpanElement>(null);
@@ -233,6 +234,7 @@ export function App({ user, catalog = null, onSignOut }: { user: AuthUser; catal
 	const rciActions = resourceActions("client.rci");
 	const canManageDevices = can("devices.manage");
 	const canSeeRemoteArea = canRemote || canManageDevices;
+	const canSettings = can("pricing.read");
 	const canLibrary = can("templates.read") || can("tcp-tools.read") || can("rci.read");
 	const availableTabs = useMemo<DashboardTab[]>(
 		() => [
@@ -240,8 +242,9 @@ export function App({ user, catalog = null, onSignOut }: { user: AuthUser; catal
 			...(canLibrary ? ["library" as const] : []),
 			...(canUsers ? ["users" as const] : []),
 			...(canSeeRemoteArea ? ["remote" as const] : []),
+			...(canSettings ? ["settings" as const] : []),
 		],
-		[canActivity, canLibrary, canUsers, canSeeRemoteArea],
+		[canActivity, canLibrary, canUsers, canSeeRemoteArea, canSettings],
 	);
 	const [tab, setTab] = useState<DashboardTab>(() => availableTabs[0] ?? "activity");
 	useEffect(() => {
@@ -462,6 +465,13 @@ export function App({ user, catalog = null, onSignOut }: { user: AuthUser; catal
 					>
 						Remote control
 					</button> : null}
+					{canSettings ? <button
+						type="button"
+						className={`dash-tab${tab === "settings" ? " dash-tab--active" : ""}`}
+						onClick={() => setTab("settings")}
+					>
+						Settings
+					</button> : null}
 				</nav>
 
 				{tab === "activity" ? (
@@ -517,6 +527,16 @@ export function App({ user, catalog = null, onSignOut }: { user: AuthUser; catal
 								label="Output tokens"
 								value={stats ? stats.usage.outputTokens.toLocaleString() : "..."}
 								hint={stats ? compactNumber(stats.usage.outputTokens) : null}
+							/>
+							{/* Null cost means nothing was priced, which is not the same as free. */}
+							<Kpi
+								label="Est. cost"
+								value={stats ? formatUsd(stats.usage.costUsd) : "..."}
+								hint={
+									stats && stats.usage.unpricedSessions > 0
+										? `${stats.usage.unpricedSessions} session${stats.usage.unpricedSessions === 1 ? "" : "s"} without a price rule`
+										: null
+								}
 							/>
 						</div>
 
@@ -592,6 +612,16 @@ export function App({ user, catalog = null, onSignOut }: { user: AuthUser; catal
 						</p>
 						<LibraryPanel user={user} />
 					</>
+				) : tab === "settings" ? (
+					<>
+						<h1 className="page-title">Settings</h1>
+						<p className="page-sub">Token prices used to estimate what each workflow cost.</p>
+						<PricingPanel
+							canEdit={can("pricing.edit")}
+							canImport={can("pricing.import")}
+							canExport={can("pricing.export")}
+						/>
+					</>
 				) : (
 					<>
 						<h1 className="page-title">Remote control</h1>
@@ -628,6 +658,7 @@ export function App({ user, catalog = null, onSignOut }: { user: AuthUser; catal
 									manage: canManageRemote,
 									execute: canExecuteRemote,
 									templatesRead: can("templates.read"),
+									pricingRead: can("pricing.read"),
 									tcpRead: can("tcp-tools.read"),
 									rciRead: can("rci.read"),
 								}}

@@ -1,5 +1,5 @@
 import type { UsageSession } from "../api/types.ts";
-import { compactNumber, shortId } from "../lib/format.ts";
+import { compactNumber, formatUsd, shortId } from "../lib/format.ts";
 
 /**
  * How full the context window is, as a percentage. The window is the one the
@@ -55,6 +55,11 @@ export function UsageMeter({ usage }: { usage: UsageSession }) {
 			<p className="usage__totals">
 				{`${usage.turns} turns · in ${compactNumber(usage.inputTokens)} · out ${compactNumber(usage.outputTokens)}`}
 				{usage.includesSubagents ? " · incl. subagents" : ""}
+			</p>
+			<p className="usage__totals" data-usage-cost>
+				{usage.costUsd == null
+					? "Cost: no pricing rule"
+					: `Cost ${formatUsd(usage.costUsd)} · ${usage.costSource === "hub" ? "reported by hub" : "est."}`}
 			</p>
 			<p className="usage__parts">
 				{usage.sessionId ? <span className="mono usage__session">{shortId(usage.sessionId)}</span> : null}

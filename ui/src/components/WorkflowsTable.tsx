@@ -1,12 +1,12 @@
 import { useState } from "react";
 import type { SyncRemoteWorkflowRow, SyncScheduleSeriesRow, WorkflowRow } from "../api/types.ts";
-import { compactTokens, shortId, timeAgo } from "../lib/format.ts";
+import { compactTokens, formatUsd, shortId, timeAgo } from "../lib/format.ts";
 import { DEFAULT_SCHEDULE_FILTER, matchesScheduleFilter, type ScheduleFilter } from "../lib/scheduleView.ts";
 import { AgentBadge, SandboxBadge, StatusBadge } from "./Badges.tsx";
 import { ScheduleBadges } from "./ScheduleBadges.tsx";
 import { ScheduleFilterBar } from "./ScheduleFilterBar.tsx";
 
-const COLUMNS = ["Workflow", "User", "Agent", "Sandbox", "Status", "Steps", "Tokens (in / out)", "Last activity"];
+const COLUMNS = ["Workflow", "User", "Agent", "Sandbox", "Status", "Steps", "Tokens (in / out)", "Est. cost", "Last activity"];
 
 /** Steps cell: `done/total` plus the hub's thin progress bar. */
 export function StepsProgress({ workflow: w }: { workflow: WorkflowRow }) {
@@ -93,6 +93,18 @@ export function WorkflowsTable({ workflows, selectedId, onSelect, remoteWorkflow
 								<StepsProgress workflow={w} />
 							</td>
 							<td className="mono">{`${compactTokens(w.tokens.input)} / ${compactTokens(w.tokens.output)}`}</td>
+							<td
+								className="mono"
+								title={
+									w.costUsd == null
+										? "No pricing rule matches this workflow's usage. Add one in Settings."
+										: w.costPartial
+											? "Lower bound: some sessions have no pricing rule and are not included."
+											: "Estimated from the pricing table, or the hub's own cost when it reports one."
+								}
+							>
+								{w.costUsd == null ? "-" : `${w.costPartial ? ">=" : ""}${formatUsd(w.costUsd)}`}
+							</td>
 							<td className="mono">{timeAgo(w.lastActivityAt)}</td>
 						</tr>
 					);

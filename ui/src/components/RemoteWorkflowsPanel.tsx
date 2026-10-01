@@ -44,6 +44,8 @@ import { Field } from "./Field.tsx";
 import { Modal } from "./Modal.tsx";
 import { ResourceSelectionEditor } from "./ResourceSelectionEditor.tsx";
 import { ScheduleBadges } from "./ScheduleBadges.tsx";
+import type { EstimateQuery } from "../api/types.ts";
+import { EstimateBadge } from "./EstimateBadge.tsx";
 import { ScheduleEditor } from "./ScheduleEditor.tsx";
 import { ScheduleFilterBar } from "./ScheduleFilterBar.tsx";
 import { SeriesView } from "./SeriesView.tsx";
@@ -262,6 +264,8 @@ interface WorkflowPermissions {
 	manage: boolean;
 	execute: boolean;
 	templatesRead: boolean;
+	/** `pricing.read`: gates every cost estimate. */
+	pricingRead: boolean;
 	tcpRead: boolean;
 	rciRead: boolean;
 }
@@ -345,6 +349,13 @@ export function RemoteWorkflowsPanel({
 			? `this workflow is ${selected.status}; its schedule can be changed once the run is over.`
 			: null);
 	const templates = templatesData?.templates ?? [];
+	// What the create form would run: the picked template's step count is the
+	// best guess at the new workflow's size (only when a template is chosen).
+	const createEstimateQuery: EstimateQuery = {};
+	if (templateId) createEstimateQuery.templateId = templateId;
+	if (agent) createEstimateQuery.agent = agent;
+	const templateSteps = templates.find((t) => t.id === templateId)?.steps.length ?? 0;
+	if (templateId && templateSteps > 0) createEstimateQuery.steps = templateSteps;
 	const tcps = tcpsData?.tcps ?? [];
 	const resourceSets = resourceSetsData?.resourceSets ?? [];
 	const canSaveTcps = permissions.manage && permissions.tcpRead;
@@ -856,6 +867,7 @@ export function RemoteWorkflowsPanel({
 								)}
 							</Field>
 						) : null}
+						<EstimateBadge enabled={permissions.pricingRead} query={createEstimateQuery} />
 						<Field
 							label="Conversation context"
 							hint="Optional. Delivered before every step on the client — same as a Target hub conversation context."
@@ -880,6 +892,7 @@ export function RemoteWorkflowsPanel({
 								onChange={setCreateSchedule}
 								disabledReason={createScheduleReason}
 								serverErrors={fieldErrors(errors, "schedule").map((e) => e.message)}
+								estimate={{ enabled: permissions.pricingRead, query: createEstimateQuery }}
 							/>
 						</fieldset>
 					) : null}
@@ -1116,6 +1129,13 @@ export function RemoteWorkflowsPanel({
 								showToggle={false}
 								disabledReason={selectedScheduleReason}
 								serverErrors={scheduleErrors}
+								estimate={{
+									enabled: permissions.pricingRead,
+									query: {
+										...(selected?.agent ? { agent: selected.agent } : {}),
+										...(steps.length > 0 ? { steps: steps.length } : {}),
+									},
+								}}
 							/>
 							{selectedScheduleReason == null ? (
 								<div className="sync-schedule-actions">

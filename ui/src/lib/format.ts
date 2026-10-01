@@ -57,3 +57,16 @@ export function localToIso(value: string): string | null {
 export function shortId(id: string): string {
 	return id.slice(0, 8);
 }
+
+/**
+ * Money, USD only. A dash means "no tariff" — null is never shown as $0.00,
+ * because zero would read as "free". Crumbs collapse to `<$0.01`, then cents up
+ * to $100, whole dollars beyond (cents are noise on a four-figure bill).
+ */
+export function formatUsd(n: number | null | undefined): string {
+	if (n == null || !Number.isFinite(n)) return "-";
+	if (n === 0) return "$0.00";
+	if (n < 0.01) return "<$0.01";
+	if (n < 100) return `$${n.toFixed(2)}`;
+	return `$${Math.round(n).toLocaleString("en-US")}`;
+}

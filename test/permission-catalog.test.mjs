@@ -64,6 +64,12 @@ test("every catalogue entry carries a closed id, scope and group", () => {
 		assert.equal(entry.scope, "server");
 		assert.ok(entry.group === "server.templates" || entry.group === "server.tcp" || entry.group === "server.rci");
 	}
+	for (const id of ["pricing.read", "pricing.edit", "pricing.import", "pricing.export"]) {
+		const entry = PERMISSION_CATALOG.find((item) => item.id === id);
+		assert.ok(entry, `missing ${id}`);
+		assert.equal(entry.scope, "server");
+		assert.equal(entry.group, "server.pricing");
+	}
 	for (const removed of REMOVED_RESOURCE_MANAGE) {
 		assert.equal(PERMISSIONS.includes(removed), false);
 	}
@@ -83,6 +89,7 @@ test("getPermissionCatalog groups the closed vocabulary by server and client sco
 		"server.templates",
 		"server.tcp",
 		"server.rci",
+		"server.pricing",
 		"client.remote",
 		"client.workflows",
 		"client.templates",
