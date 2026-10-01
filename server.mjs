@@ -137,7 +137,14 @@ import {
 	deleteTcp,
 	listResourceSets,
 	getResourceSet,
+	createPricingRule,
 	createResourceSet,
+	deletePricingRule,
+	getPricingRule,
+	importPricingRules,
+	listPricingRules,
+	unpricedUsage,
+	updatePricingRule,
 	updateResourceSet,
 	deleteResourceSet,
 	catalogTemplateBundle,
@@ -3437,6 +3444,80 @@ async function handleCatalogSyncRolesRoute(req, res) {
 	});
 }
 
+/**
+ * `/api/settings/pricing`: the per-organization price table. Cost itself is
+ * computed at read time (db.mjs), so none of these writes touch events.
+ */
+async function handlePricingRoute(req, res, pathname) {
+	const match = pathname.match(/^\/api\/settings\/pricing(?:\/([^/]+))?$/);
+	if (!match) return false;
+	const part = match[1];
+
+	if (!part) {
+		if (req.method === "GET") {
+			if (!(await requireCapability(req, res, "pricing.read"))) return true;
+			return sendJson(res, 200, { rules: listPricingRules(), unpriced: unpricedUsage() });
+		}
+		if (req.method === "POST") {
+			if (!(await requireCapability(req, res, "pricing.edit"))) return true;
+			const body = await readJson(req, res);
+			if (!body) return true;
+			const v = validate("pricing.rule", body);
+			if (!v.ok) return sendJson(res, 422, { errors: v.errors });
+			try {
+				return sendJson(res, 201, { rule: createPricingRule(v.value) });
+			} catch (err) {
+				if (err.code === "duplicate_rule") return sendJson(res, 409, { error: "duplicate_rule" });
+				throw err;
+			}
+		}
+		return sendJson(res, 405, { error: "method not allowed" });
+	}
+
+	if (part === "export") {
+		if (req.method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
+		if (!(await requireCapability(req, res, "pricing.export"))) return true;
+		const rules = listPricingRules().map(({ id, createdAt, updatedAt, ...rule }) => rule);
+		return sendJson(res, 200, { kind: "target.pricing", rules }, catalogAttachment("pricing-export.json"));
+	}
+
+	if (part === "import") {
+		if (req.method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
+		if (!(await requireCapability(req, res, "pricing.import"))) return true;
+		const body = await readJson(req, res);
+		if (!body) return true;
+		const v = validate("pricing.import", body);
+		if (!v.ok) return sendJson(res, 422, { errors: v.errors });
+		importPricingRules(v.value.rules, v.value.mode);
+		return sendJson(res, 201, { rules: listPricingRules() });
+	}
+
+	const id = /^\d+$/.test(part) ? Number(part) : null;
+	if (req.method === "PUT" || req.method === "PATCH") {
+		if (!(await requireCapability(req, res, "pricing.edit"))) return true;
+		const body = await readJson(req, res);
+		if (!body) return true;
+		const existing = id == null ? null : getPricingRule(id);
+		if (!existing) return sendJson(res, 404, { error: "not_found" });
+		// PATCH sends only the changed fields; PUT is validated as given.
+		const merged = req.method === "PATCH" ? { ...existing, ...body } : body;
+		const v = validate("pricing.rule", merged);
+		if (!v.ok) return sendJson(res, 422, { errors: v.errors });
+		try {
+			return sendJson(res, 200, { rule: updatePricingRule(id, v.value) });
+		} catch (err) {
+			if (err.code === "duplicate_rule") return sendJson(res, 409, { error: "duplicate_rule" });
+			throw err;
+		}
+	}
+	if (req.method === "DELETE") {
+		if (!(await requireCapability(req, res, "pricing.edit"))) return true;
+		if (id == null || !deletePricingRule(id)) return sendJson(res, 404, { error: "not_found" });
+		return sendJson(res, 200, { ok: true });
+	}
+	return sendJson(res, 405, { error: "method not allowed" });
+}
+
 async function handleCatalogRoute(req, res, pathname) {
 	const match = pathname.match(/^\/api\/(templates|tcps|resource-sets)(?:\/([^/]+))?(?:\/([^/]+))?$/);
 	if (!match) return false;
@@ -3574,6 +3655,11 @@ const server = createServer(async (req, res) => {
 
 		if (pathname === "/api/catalog/sync-roles") {
 			const handled = await handleCatalogSyncRolesRoute(req, res);
+			if (handled !== false) return;
+		}
+
+		if (pathname.startsWith("/api/settings/pricing")) {
+			const handled = await handlePricingRoute(req, res, pathname);
 			if (handled !== false) return;
 		}
 

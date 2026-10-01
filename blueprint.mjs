@@ -523,7 +523,35 @@ const RESOURCE_SET_IMPORT = Joi.alternatives()
 	)
 	.required();
 
+const PRICE = Joi.number().min(0).max(1_000_000);
+const PRICING_RULE = Joi.object({
+	agent: Joi.string().trim().min(1).max(100).default("*"),
+	model: Joi.string().trim().min(1).max(200).default("*"),
+	inputPerMtok: PRICE.required(),
+	outputPerMtok: PRICE.required(),
+	cacheReadPerMtok: PRICE.allow(null).default(null),
+	cacheWritePerMtok: PRICE.allow(null).default(null),
+	// '' = always; otherwise the instant the tariff starts applying.
+	effectiveFrom: Joi.alternatives().try(Joi.string().valid(""), ISO_TIME).default(""),
+});
+/**
+ * A pricing file. The (agent, model, effectiveFrom) triple is the table's
+ * unique key, so a file repeating it is ambiguous and is rejected up front
+ * rather than silently letting the last row win.
+ */
+const PRICING_IMPORT = Joi.object({
+	kind: Joi.string().valid("target.pricing").optional(),
+	mode: Joi.string().valid("replace", "merge").default("replace"),
+	rules: Joi.array()
+		.items(PRICING_RULE)
+		.max(500)
+		.unique((a, b) => a.agent === b.agent && a.model === b.model && a.effectiveFrom === b.effectiveFrom)
+		.required(),
+});
+
 export const BLUEPRINTS = {
+	"pricing.rule": PRICING_RULE,
+	"pricing.import": PRICING_IMPORT,
 	"user.create": Joi.object({
 		email: EMAIL,
 		role_id: Joi.string().trim().min(1).required(),
