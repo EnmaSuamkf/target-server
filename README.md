@@ -115,6 +115,9 @@ database is opened. Resource domains use `create` / `edit` / `delete` /
 Linked hubs pull a role-filtered catalog through `GET /api/sync/catalog`
 (`catalog-sync/v1`); see [Catalog pull](docs/remote-sync.md#catalog-pull-catalog-syncv1).
 
+Token cost reporting (per-organization price table, estimated cost per workflow,
+Settings tab) is documented in [`docs/pricing.md`](docs/pricing.md).
+
 First run on a fresh database seeds `admin@admin.com`. Invite additional
 operators from the **Users** panel. Local/CI defaults write `.mail-outbox/*.eml`
 instead of using SMTP (or use Resend/SMTP in production).
