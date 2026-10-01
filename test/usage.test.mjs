@@ -195,5 +195,5 @@ test("separate sessions of one workflow ARE summed, newest session first", async
 test("a workflow with no snapshots reports an empty usage block, not a crash", async () => {
 	await post([{ id: "n-1", kind: "workflow.created", workflow_id: "wf-none", created_at: new Date().toISOString(), data: { name: "quiet" } }]);
 	const detail = await (await fetch(`${base}/api/workflows/wf-none`, { headers: { cookie } })).json();
-	assert.deepEqual(detail.usage, { inputTokens: 0, outputTokens: 0, sessions: [] });
+	assert.deepEqual(detail.usage, { inputTokens: 0, outputTokens: 0, costUsd: null, unpricedSessions: 0, sessions: [] });
 });

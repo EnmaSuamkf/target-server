@@ -15,6 +15,7 @@ import { randomBytes, randomUUID, scryptSync } from "node:crypto";
 import { resolve as resolvePath } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { validateCommand } from "./blueprint.mjs";
+import { priceSession, sumCosts } from "./pricing.mjs";
 import {
 	DEFAULT_ORG_ID,
 	adoptJwtSecretFromOrgHandle,
@@ -93,6 +94,7 @@ export const PERMISSION_GROUPS = Object.freeze([
 	{ id: "server.templates", scope: "server", label: "Templates", description: "Manage workflow templates stored on this dashboard server" },
 	{ id: "server.tcp", scope: "server", label: "TCP tools", description: "Manage TCP packs stored on this dashboard server" },
 	{ id: "server.rci", scope: "server", label: "RCI", description: "Manage RCI resource sets stored on this dashboard server" },
+	{ id: "server.pricing", scope: "server", label: "Pricing", description: "Manage the token price table used to cost workflow usage" },
 	{ id: "client.remote", scope: "client", label: "Clients", description: "View connected Target hubs and their client state" },
 	{ id: "client.workflows", scope: "client", label: "Workflows", description: "Create, edit and run workflows on a connected Target hub" },
 	{ id: "client.templates", scope: "client", label: "Templates", description: "Manage templates on a connected Target hub" },
@@ -130,6 +132,10 @@ export const PERMISSION_CATALOG = Object.freeze([
 	{ id: "rci.delete", label: "Delete RCI resources", description: "Delete RCI resource sets stored on this server", scope: "server", group: "server.rci" },
 	{ id: "rci.import", label: "Import RCI resources", description: "Import RCI resource sets stored on this server", scope: "server", group: "server.rci" },
 	{ id: "rci.export", label: "Export RCI resources", description: "Export RCI resource sets stored on this server", scope: "server", group: "server.rci" },
+	{ id: "pricing.read", label: "View pricing", description: "View the token price table and cost estimates", scope: "server", group: "server.pricing" },
+	{ id: "pricing.edit", label: "Edit pricing", description: "Add, change and delete token price rules", scope: "server", group: "server.pricing" },
+	{ id: "pricing.import", label: "Import pricing", description: "Import a token price table", scope: "server", group: "server.pricing" },
+	{ id: "pricing.export", label: "Export pricing", description: "Export the token price table", scope: "server", group: "server.pricing" },
 	{ id: "client.read", label: "View clients", description: "View connected clients and their state", scope: "client", group: "client.remote" },
 	{ id: "client.workflows.create", label: "Create workflows", description: "Create client workflows", scope: "client", group: "client.workflows" },
 	{ id: "client.workflows.steps.add", label: "Add workflow steps", description: "Add steps to client workflows", scope: "client", group: "client.workflows" },
@@ -498,6 +504,7 @@ function openOrgFile(dbPath) {
 	migrateRbacSchema(db);
 	migrateDeviceLinkSchema(db);
 	migrateCatalogSchema(db);
+	migratePricingSchema(db);
 	adoptJwtSecretFromOrgHandle(db);
 	seedAuth(db);
 	return db;
@@ -621,6 +628,30 @@ function migrateCatalogSchema(database) {
 		);
 		CREATE INDEX IF NOT EXISTS idx_catalog_sync_roles_role
 			ON catalog_sync_roles(role_id);
+	`);
+}
+
+/**
+ * Additive per-organization price table. Cost is computed at read time from
+ * these rules (see pricing.mjs) and never stored on events, so editing a rule
+ * reprices history. `'*'` means "any" for agent and model; `effective_from` ''
+ * means "always".
+ */
+function migratePricingSchema(database) {
+	database.exec(`
+		CREATE TABLE IF NOT EXISTS pricing_rules (
+			id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+			agent                 TEXT NOT NULL DEFAULT '*',
+			model                 TEXT NOT NULL DEFAULT '*',
+			input_per_mtok        REAL NOT NULL,
+			output_per_mtok       REAL NOT NULL,
+			cache_read_per_mtok   REAL,
+			cache_write_per_mtok  REAL,
+			effective_from        TEXT NOT NULL DEFAULT '',
+			created_at            TEXT NOT NULL,
+			updated_at            TEXT NOT NULL,
+			UNIQUE (agent, model, effective_from)
+		);
 	`);
 }
 
@@ -2327,6 +2358,9 @@ export function stats({ kind = null, instanceId = null, workflowId = null, user 
 	// Last snapshot per session, summed — see `latestUsageTotals` for why summing
 	// the snapshots themselves multiplies the real spend.
 	const usage = latestUsageTotals(and("kind = 'usage.snapshot'"), ev.params);
+	const cost = sumCosts(
+		pricedLatestSessions(and("kind = 'usage.snapshot'"), ev.params, ownerUserId).map((x) => x.priced),
+	);
 	return {
 		totalEvents,
 		totalInstances,
@@ -2336,7 +2370,7 @@ export function stats({ kind = null, instanceId = null, workflowId = null, user 
 		byVersion,
 		agents,
 		sandboxes,
-		usage: { inputTokens: usage.input, outputTokens: usage.output },
+		usage: { inputTokens: usage.input, outputTokens: usage.output, costUsd: cost.costUsd, unpricedSessions: cost.unpricedSessions },
 	};
 }
 
@@ -2523,20 +2557,230 @@ export function workflowUsage(workflowId, ownerUserId = null) {
 			 ORDER BY t.received_at DESC`,
 		)
 		.all(workflowId, ...own.params);
+	const rules = listPricingRules();
+	const fallbackAgent = latestWorkflowAgents([workflowId], ownerUserId).get(workflowId) ?? null;
 	const sessions = rows.map((r) => {
-		let data = {};
-		try {
-			data = JSON.parse(r.data ?? "{}");
-		} catch {
-			data = {};
-		}
-		return { sessionId: r.sessionId ?? null, receivedAt: r.receivedAt, ...normalizeUsageSnapshot(data) };
+		const data = parseJson(r.data);
+		const usage = normalizeUsageSnapshot(data);
+		const priced = priceSession(rules, { agent: snapshotAgent(data) ?? fallbackAgent, at: r.receivedAt, usage });
+		// `costUsd` is the PRICED figure: it replaces the hub's raw value, which
+		// only survives through priceSession (source "hub").
+		return { sessionId: r.sessionId ?? null, receivedAt: r.receivedAt, ...usage, costUsd: priced.costUsd, costSource: priced.source };
 	});
+	const total = sumCosts(sessions);
 	return {
 		inputTokens: sessions.reduce((n, s) => n + s.inputTokens, 0),
 		outputTokens: sessions.reduce((n, s) => n + s.outputTokens, 0),
+		costUsd: total.costUsd,
+		unpricedSessions: total.unpricedSessions,
 		sessions,
 	};
+}
+
+/** Tolerant JSON.parse for stored event payloads. */
+function parseJson(text) {
+	try {
+		return JSON.parse(text ?? "{}") ?? {};
+	} catch {
+		return {};
+	}
+}
+
+/** The agent a snapshot names itself, when the hub sends one. */
+function snapshotAgent(data) {
+	return typeof data?.agent === "string" && data.agent ? data.agent : null;
+}
+
+/** The latest agent each workflow's events announced (the RUNNER, not the LLM). */
+function latestWorkflowAgents(workflowIds, ownerUserId = null) {
+	if (workflowIds.length === 0) return new Map();
+	const own = ownerScope(ownerUserId);
+	const rows = open()
+		.prepare(
+			`SELECT workflow_id AS wf, agent FROM (
+			   SELECT workflow_id, json_extract(data, '$.agent') AS agent,
+			          ROW_NUMBER() OVER (PARTITION BY workflow_id ORDER BY received_at DESC, rowid DESC) AS rn
+			   FROM events
+			   WHERE json_extract(data, '$.agent') IS NOT NULL
+			     AND workflow_id IN (${workflowIds.map(() => "?").join(",")})${own.and}
+			 ) WHERE rn = 1`,
+		)
+		.all(...workflowIds, ...own.params);
+	return new Map(rows.map((r) => [r.wf, r.agent]));
+}
+
+/**
+ * The LAST usage.snapshot of each (workflow, session), priced. Same
+ * ROW_NUMBER partition as `latestUsageTotals`: snapshots are cumulative, so
+ * pricing more than the last one of a session would multiply the spend.
+ * `extraWhere`/`params` scope it like the token totals do.
+ */
+function pricedLatestSessions(extraWhere, params, ownerUserId = null) {
+	const rows = open()
+		.prepare(
+			`SELECT t.workflow_id AS workflowId, t.session_id AS sessionId, t.data AS data, t.received_at AS receivedAt
+			 FROM (
+			   SELECT workflow_id, session_id, data, received_at,
+			          ROW_NUMBER() OVER (
+			            PARTITION BY workflow_id, COALESCE(session_id, '')
+			            ORDER BY received_at DESC, rowid DESC
+			          ) AS rn
+			   FROM events
+			   ${extraWhere}
+			 ) t
+			 WHERE t.rn = 1`,
+		)
+		.all(...params);
+	const rules = listPricingRules();
+	const agents = latestWorkflowAgents([...new Set(rows.map((r) => r.workflowId).filter(Boolean))], ownerUserId);
+	return rows.map((r) => {
+		const data = parseJson(r.data);
+		const usage = normalizeUsageSnapshot(data);
+		const agent = snapshotAgent(data) ?? agents.get(r.workflowId) ?? null;
+		return { workflowId: r.workflowId, agent, usage, priced: priceSession(rules, { agent, at: r.receivedAt, usage }) };
+	});
+}
+
+/**
+ * (agent, model) pairs that reported usage and match no pricing rule, most
+ * sessions first — the list the operator fills the price table from.
+ */
+export function unpricedUsage(ownerUserId = null) {
+	const groups = new Map();
+	for (const s of pricedLatestSessions("WHERE kind = 'usage.snapshot'", [], ownerUserId)) {
+		if (s.priced.source !== "unpriced") continue;
+		const key = `${s.agent ?? ""}\u0000${s.usage.model ?? ""}`;
+		const g = groups.get(key) ?? { agent: s.agent, model: s.usage.model, sessions: 0, inputTokens: 0, outputTokens: 0 };
+		g.sessions++;
+		g.inputTokens += s.usage.inputTokens;
+		g.outputTokens += s.usage.outputTokens;
+		groups.set(key, g);
+	}
+	return [...groups.values()].sort((a, b) => b.sessions - a.sessions || String(a.agent).localeCompare(String(b.agent)));
+}
+
+/**
+ * Per-workflow cost, same counting rule as `usageByWorkflow`. `partial` marks
+ * a lower bound: some, but not all, sessions had no tariff.
+ */
+function costByWorkflow(workflowIds, ownerUserId = null) {
+	if (workflowIds.length === 0) return new Map();
+	const own = ownerScope(ownerUserId);
+	const sessions = pricedLatestSessions(
+		`WHERE kind = 'usage.snapshot' AND workflow_id IN (${workflowIds.map(() => "?").join(",")})${own.and}`,
+		[...workflowIds, ...own.params],
+		ownerUserId,
+	);
+	const byWf = new Map();
+	for (const s of sessions) {
+		if (!byWf.has(s.workflowId)) byWf.set(s.workflowId, []);
+		byWf.get(s.workflowId).push(s.priced);
+	}
+	return new Map(
+		[...byWf].map(([wf, list]) => {
+			const t = sumCosts(list);
+			return [wf, { costUsd: t.costUsd, costPartial: t.costUsd != null && t.unpricedSessions > 0 }];
+		}),
+	);
+}
+
+// --- Pricing rules (storage) -------------------------------------------------
+
+const PRICING_COLUMNS = `id, agent, model, input_per_mtok AS inputPerMtok, output_per_mtok AS outputPerMtok,
+	cache_read_per_mtok AS cacheReadPerMtok, cache_write_per_mtok AS cacheWritePerMtok,
+	effective_from AS effectiveFrom, created_at AS createdAt, updated_at AS updatedAt`;
+
+function duplicateRuleError(err) {
+	if (/UNIQUE constraint failed/i.test(String(err?.message))) {
+		const e = new Error("A pricing rule for this agent, model and effective date already exists");
+		e.statusCode = 409;
+		e.code = "duplicate_rule";
+		return e;
+	}
+	return err;
+}
+
+export function listPricingRules() {
+	return open().prepare(`SELECT ${PRICING_COLUMNS} FROM pricing_rules ORDER BY agent, model, effective_from`).all();
+}
+
+export function getPricingRule(id) {
+	return open().prepare(`SELECT ${PRICING_COLUMNS} FROM pricing_rules WHERE id = ?`).get(id) ?? null;
+}
+
+function ruleParams(r) {
+	return [
+		r.agent ?? "*",
+		r.model ?? "*",
+		r.inputPerMtok,
+		r.outputPerMtok,
+		r.cacheReadPerMtok ?? null,
+		r.cacheWritePerMtok ?? null,
+		r.effectiveFrom ?? "",
+	];
+}
+
+export function createPricingRule(rule) {
+	const now = new Date().toISOString();
+	try {
+		const info = open()
+			.prepare(
+				`INSERT INTO pricing_rules (agent, model, input_per_mtok, output_per_mtok, cache_read_per_mtok, cache_write_per_mtok, effective_from, created_at, updated_at)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			)
+			.run(...ruleParams(rule), now, now);
+		return getPricingRule(Number(info.lastInsertRowid));
+	} catch (err) {
+		throw duplicateRuleError(err);
+	}
+}
+
+/** Returns the updated rule, or null when `id` does not exist. */
+export function updatePricingRule(id, rule) {
+	try {
+		const info = open()
+			.prepare(
+				`UPDATE pricing_rules SET agent = ?, model = ?, input_per_mtok = ?, output_per_mtok = ?,
+				        cache_read_per_mtok = ?, cache_write_per_mtok = ?, effective_from = ?, updated_at = ?
+				 WHERE id = ?`,
+			)
+			.run(...ruleParams(rule), new Date().toISOString(), id);
+		return info.changes ? getPricingRule(id) : null;
+	} catch (err) {
+		throw duplicateRuleError(err);
+	}
+}
+
+export function deletePricingRule(id) {
+	return open().prepare("DELETE FROM pricing_rules WHERE id = ?").run(id).changes > 0;
+}
+
+/**
+ * Bulk load. `replace` swaps the whole table in ONE transaction (a bad row
+ * leaves the old table intact); `merge` upserts on (agent, model,
+ * effective_from). Returns the number of rules written.
+ */
+export function importPricingRules(rules, mode = "merge") {
+	const d = open();
+	const now = new Date().toISOString();
+	d.exec("BEGIN IMMEDIATE");
+	try {
+		if (mode === "replace") d.exec("DELETE FROM pricing_rules");
+		const upsert = d.prepare(
+			`INSERT INTO pricing_rules (agent, model, input_per_mtok, output_per_mtok, cache_read_per_mtok, cache_write_per_mtok, effective_from, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 ON CONFLICT(agent, model, effective_from) DO UPDATE SET
+			   input_per_mtok = excluded.input_per_mtok, output_per_mtok = excluded.output_per_mtok,
+			   cache_read_per_mtok = excluded.cache_read_per_mtok, cache_write_per_mtok = excluded.cache_write_per_mtok,
+			   updated_at = excluded.updated_at`,
+		);
+		for (const r of rules) upsert.run(...ruleParams(r), now, now);
+		d.exec("COMMIT");
+		return rules.length;
+	} catch (err) {
+		d.exec("ROLLBACK");
+		throw duplicateRuleError(err);
+	}
 }
 
 /** Per-workflow token totals, same counting rule as `latestUsageTotals`. */
@@ -2718,6 +2962,7 @@ function workflowAggregates({
 
 	const plans = latestPlans(rows.map((r) => r.workflowId), ownerUserId);
 	const usage = usageByWorkflow(rows.map((r) => r.workflowId), ownerUserId);
+	const costs = costByWorkflow(rows.map((r) => r.workflowId), ownerUserId);
 
 	return rows.map((r) => {
 		const plan = plans.get(r.workflowId) ?? null;
@@ -2758,6 +3003,8 @@ function workflowAggregates({
 				? planSteps.length
 				: Math.max(r.stepsAdded, (r.maxOrder ?? -1) + 1, perStep.size, stepsDone + stepsFailed),
 			tokens: usage.get(r.workflowId) ?? { input: 0, output: 0 },
+			costUsd: costs.get(r.workflowId)?.costUsd ?? null,
+			costPartial: costs.get(r.workflowId)?.costPartial ?? false,
 			// The snapshot is the present tense and wins outright: the hub emits it
 			// after the status transition it reflects, so it is never staler.
 			status: plan
