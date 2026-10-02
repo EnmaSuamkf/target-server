@@ -617,7 +617,7 @@ X-Target-Version: 0.2.0
         <table>
           <thead><tr><th><code>kind</code></th><th>Campos de <code>data</code></th></tr></thead>
           <tbody>
-            <tr><td><code>workflow.created</code></td><td><code>name</code>, <code>agent_name</code>, <code>agent</code> (runner: <code>claude|free-code</code>), <code>sandbox</code> (<code>host|docker</code>), <code>image</code> (imagen docker o null), <code>step_count</code></td></tr>
+            <tr><td><code>workflow.created</code></td><td><code>name</code>, <code>agent_name</code>, <code>agent</code> (runner: <code>claude|free-code|cursor|copilot</code>), <code>sandbox</code> (<code>host|docker</code>), <code>image</code> (imagen docker o null), <code>step_count</code></td></tr>
             <tr><td><code>workflow.updated</code></td><td><code>name</code>, <code>agent_name</code>, <code>agent</code>, <code>sandbox</code>, <code>image</code> — rename o cambio de runtime; también se emite al arrancar el hub para re-anunciar los workflows conocidos (rellena filas de workflows creados antes de que existieran estos campos)</td></tr>
             <tr><td><code>workflow.renamed</code></td><td><code>from</code>, <code>to</code></td></tr>
             <tr><td><code>workflow.removed</code></td><td><code>name</code></td></tr>
@@ -653,6 +653,15 @@ X-Target-Version: 0.2.0
           <code>input_tokens</code> ya es el total, se pasa tal cual; si no,
           el total es <code>input_tokens + cache_creation + cache_read</code>.
           Sumar las partes al formato nuevo contaría ~16M dos veces.
+        </p>
+        <p>
+          Con el runner <code>copilot</code> el hub envía <code>cost_usd</code>
+          a <code>null</code> (Copilot factura por token, 1 crédito de IA =
+          0,01&nbsp;USD, y no devuelve un importe en dólares), así que el servidor
+          calcula el coste por tokens con las reglas del agente
+          <code>copilot</code> (<code>docs/copilot-pricing-rules.json</code>). En
+          cuentas con el plan antiguo por peticiones premium la cifra es una
+          estimación.
         </p>
         <p>
           Los snapshots son <strong>acumulativos</strong> por sesión (el hub

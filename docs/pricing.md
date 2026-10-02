@@ -57,7 +57,7 @@ Prices are **USD per million tokens**. USD is the only currency.
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `id` | integer | Assigned by the server. |
-| `agent` | string, default `*` | The **runner** (`claude`, `free-code`, `cursor`), not the LLM. `*` = any. |
+| `agent` | string, default `*` | The **runner** (`claude`, `free-code`, `cursor`, `copilot`), not the LLM. `*` = any. |
 | `model` | string, default `*` | Model name. `*` = any; a **trailing** `*` is a prefix glob (`claude-opus-*`). |
 | `inputPerMtok` | number 0..1,000,000, required | Uncached input rate. |
 | `outputPerMtok` | number 0..1,000,000, required | Output rate. |
@@ -133,6 +133,46 @@ your usual model's prices. Once the hub reports `model` (and `agent`), more
 specific rules such as `claude` / `claude-opus-*` take over automatically, with
 no migration. The "Unpriced usage" list in Settings shows which `(agent, model)`
 pairs still have no rule.
+
+### GitHub Copilot (`copilot`)
+
+Copilot bills per token (1 AI credit = $0.01), so the usual `(agent, model)` rules
+fit. `docs/copilot-pricing-rules.json` is a ready-to-import file with agent
+`copilot`, one exact-model rule per priced row of the official table
+(<https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing>,
+read 2026-10-02). It ships with `"mode": "merge"`, so importing it keeps your
+other rules; it only upserts the `copilot` ones.
+
+- **Import:** Settings → Pricing → Import, or
+  `POST /api/settings/pricing/import` with the file as the body (see
+  [Export and import](#export-and-import)). Needs `pricing.import`.
+- **Model naming:** the id is what Copilot writes to its events (dotted, lower
+  case): `Claude Haiku 4.5` → `claude-haiku-4.5`, `GPT-5.4 nano` → `gpt-5.4-nano`.
+  Rules are exact, with no globs, so `claude-sonnet-4` does not catch
+  `claude-sonnet-4.6`. A model without a rule stays "unpriced" (null), never $0.
+  Observed ids (seen in real runs): `claude-haiku-4.5`, `claude-sonnet-4.6`,
+  `gpt-5-mini`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.4-nano`, `mai-code-1.1-flash`.
+  **All the others are inferred** from the display name by the same rule and
+  should be confirmed on first use.
+- **Cache write:** `null` where the table says "Not applicable" (OpenAI before
+  GPT-5.6, Gemini, Grok, Kimi, MAI), so cache creation falls back to the input rate.
+- **Tiers:** models with a Long context tier (GPT-5.4, GPT-5.5, GPT-5.6, GPT-6.x,
+  Grok 4.x) only get the **Default tier** rule. A session whose input goes
+  beyond the threshold (200K or 272K input tokens, per model) is billed at the
+  higher Long context rate by GitHub, so it is **under-estimated** here.
+- **Skipped:** `Claude Opus 4.8 (fast mode) (preview)` (10.00 / 1.00 / 12.50 /
+  50.00) has no known model id, and a guess could mis-price regular Opus 4.8, so
+  it has no rule and shows as unpriced. The "Fine-tuned (GitHub)" table is empty.
+  Code completions are not billed in AI credits.
+- **Gemini 3.6/3.7/3.8 Flash** carry the promotional price (0.75 / 0.075 / 3.75)
+  through 2026-12-31; update the rules after that date.
+- **Legacy request-based plan:** accounts still on the request-based plan
+  (annual Copilot Pro / Pro+) are billed in **premium requests** with model
+  multipliers, not per token (their sessions report `totalNanoAiu` 0). On those
+  accounts the dashboard figure is an **estimate** of what the tokens would cost,
+  not the amount billed.
+- The hub reports `cost_usd` as null for Copilot, so the server always prices by
+  tokens.
 
 ## HTTP API
 

@@ -380,3 +380,46 @@ test("operator sync: workflow mutations check action-level permissions", async (
 	});
 	assert.equal(deleted.status, 200);
 });
+
+test("operator sync: copilot runner is accepted, unknown agents rejected, uninstalled copilot refused", async () => {
+	const cookie = await login(base);
+	const register = async (copilotInstalled) => {
+		const reg = await fetch(`${base}/api/sync/register`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				name: `Copilot Client ${copilotInstalled}`,
+				capabilities: {
+					commands: ["workflow.create"],
+					runners: [
+						{ id: "claude", installed: true },
+						{ id: "copilot", installed: copilotInstalled },
+					],
+				},
+			}),
+		});
+		assert.equal(reg.status, 201);
+		return (await reg.json()).client_id;
+	};
+	const create = (client_id, agent) =>
+		fetch(`${base}/api/sync/remote-workflows`, {
+			method: "POST",
+			headers: { ...authed(cookie), "content-type": "application/json" },
+			body: JSON.stringify({ client_id, name: `wf ${agent}`, agent }),
+		});
+
+	const installedId = await register(true);
+	const ok = await create(installedId, "copilot");
+	assert.ok(ok.status >= 200 && ok.status < 300, `copilot create status ${ok.status}`);
+	const okBody = await ok.json();
+	assert.equal(okBody.remote_workflow.agent, "copilot");
+	assert.equal(okBody.command.payload.agent, "copilot");
+
+	const unknown = await create(installedId, "nope");
+	assert.equal(unknown.status, 400);
+
+	const missingId = await register(false);
+	const refused = await create(missingId, "copilot");
+	assert.equal(refused.status, 422);
+	assert.equal((await refused.json()).errors[0].code, "runner_not_installed");
+});
