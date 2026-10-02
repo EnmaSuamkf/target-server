@@ -2,6 +2,7 @@ import { KIND_INFO, kindLabel, kindTip } from "../api/kinds.ts";
 import type { Filters, InstanceRow, RangeId, UserRow, WorkflowRow } from "../api/types.ts";
 import { EMPTY_FILTERS } from "../api/types.ts";
 import { shortId } from "../lib/format.ts";
+import { Combobox } from "./Combobox.tsx";
 
 export const RANGES: { id: RangeId; label: string }[] = [
 	{ id: "all", label: "All time" },
@@ -108,16 +109,16 @@ export function FilterBar({ filters, onChange, users, instances, workflows, kind
 
 				<div className="field">
 					<TipLabel htmlFor="f-user" text="User" tip={FILTER_TIPS.user} />
-					<select id="f-user" className="select" value={filters.user} onChange={(e) => set({ user: e.target.value })}>
-						<option value="">All users</option>
-						{users
+					<Combobox
+						id="f-user"
+						allLabel="All users"
+						placeholder="Search users..."
+						value={filters.user}
+						onChange={(user) => set({ user })}
+						options={users
 							.filter((u) => u.name !== "anonymous")
-							.map((u) => (
-								<option key={u.name} value={u.name}>
-									{`${u.name} (${u.events} events)`}
-								</option>
-							))}
-					</select>
+							.map((u) => ({ value: u.name, label: `${u.name} (${u.events} events)`, searchText: u.name }))}
+					/>
 				</div>
 
 				<div className="field">
@@ -158,14 +159,18 @@ export function FilterBar({ filters, onChange, users, instances, workflows, kind
 
 				<div className="field">
 					<TipLabel htmlFor="f-workflow" text="Workflow" tip={FILTER_TIPS.workflow} />
-					<select id="f-workflow" className="select" value={filters.workflow} onChange={(e) => set({ workflow: e.target.value })}>
-						<option value="">All workflows</option>
-						{workflows.map((w) => (
-							<option key={w.workflowId} value={w.workflowId}>
-								{`${w.name} · ${shortId(w.workflowId)}`}
-							</option>
-						))}
-					</select>
+					<Combobox
+						id="f-workflow"
+						allLabel="All workflows"
+						placeholder="Search workflows..."
+						value={filters.workflow}
+						onChange={(workflow) => set({ workflow })}
+						options={workflows.map((w) => ({
+							value: w.workflowId,
+							label: `${w.name} · ${shortId(w.workflowId)}`,
+							searchText: `${w.name} ${w.workflowId}`,
+						}))}
+					/>
 				</div>
 
 				<div className="field">
