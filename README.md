@@ -455,7 +455,7 @@ All `GET /api/*` routes below require a session unless noted.
 - `GET /api/instances` — the reporting fleet.
 - `GET /api/users` — distinct reporting users (instance display names) with event counts.
 - `GET /api/events?limit=&kind=&instance=&workflow=&user=&agent=&sandbox=&from=&to=` — recent events.
-  `agent` (runner: `claude`, `free-code`, …) and `sandbox` (`host`|`docker`) match the workflows
+  `agent` (runner: `claude`, `free-code`, `cursor`, `copilot`) and `sandbox` (`host`|`docker`) match the workflows
   that reported those values in `workflow.created`/`workflow.updated`; instance-level events
   (heartbeats) belong to no workflow and drop out while either filter is on.
 - `GET /api/workflows?limit=&offset=&user=&instance=&agent=&sandbox=&from=&to=` — one aggregate row per workflow: name

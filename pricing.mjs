@@ -8,7 +8,7 @@
  *
  * A rule is `{id, agent, model, inputPerMtok, outputPerMtok, cacheReadPerMtok,
  * cacheWritePerMtok, effectiveFrom}` (USD per million tokens). `agent` is the
- * RUNNER (claude | free-code | cursor), not the LLM, so the real key is
+ * RUNNER (claude | free-code | cursor | copilot), not the LLM, so the real key is
  * (agent, model) with `*` as "any". `usage` is what `normalizeUsageSnapshot`
  * in db.mjs returns.
  *

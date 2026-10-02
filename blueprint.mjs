@@ -643,7 +643,7 @@ export const BLUEPRINTS = {
 		client_id: STRING.required(),
 		name: STRING.required(),
 		conversation_context: OPTIONAL_STRING.optional(),
-		agent: Joi.string().valid("claude", "free-code", "cursor").optional(),
+		agent: Joi.string().valid("claude", "free-code", "cursor", "copilot").optional(),
 		template_id: STRING.optional(),
 		schedule: REMOTE_SCHEDULE.optional(),
 	}),

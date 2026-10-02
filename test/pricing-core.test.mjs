@@ -134,3 +134,29 @@ test("sumCosts: null when nothing priced, partial counts unpriced", () => {
 	assert.deepEqual(sumCosts([{ costUsd: 1.5 }, { costUsd: null }, { costUsd: 0 }]), { costUsd: 1.5, unpricedSessions: 1 });
 	assert.deepEqual(sumCosts([{ costUsd: 0 }]), { costUsd: 0, unpricedSessions: 0 });
 });
+
+test("docs/copilot-pricing-rules.json passes the import schema and prices copilot models", async () => {
+	const { readFileSync } = await import("node:fs");
+	const { validate } = await import("../blueprint.mjs");
+	const file = JSON.parse(readFileSync(new URL("../docs/copilot-pricing-rules.json", import.meta.url), "utf8"));
+	const v = validate("pricing.import", file);
+	assert.equal(v.ok, true, JSON.stringify(v.errors));
+	const rules = v.value.rules;
+	assert.ok(rules.length > 0 && rules.every((r) => r.agent === "copilot"));
+
+	const haiku = resolveRule(rules, { agent: "copilot", model: "claude-haiku-4.5" });
+	assert.equal(haiku.inputPerMtok, 1);
+	assert.equal(haiku.cacheReadPerMtok, 0.1);
+	assert.equal(haiku.cacheWritePerMtok, 1.25);
+	assert.equal(haiku.outputPerMtok, 5);
+
+	const gpt = resolveRule(rules, { agent: "copilot", model: "gpt-5.4" });
+	assert.deepEqual(
+		[gpt.inputPerMtok, gpt.cacheReadPerMtok, gpt.cacheWritePerMtok, gpt.outputPerMtok],
+		[2.5, 0.25, null, 15],
+	);
+
+	// unknown model, and another runner with the same model name: unpriced (null), not zero
+	assert.equal(resolveRule(rules, { agent: "copilot", model: "some-future-model" }), null);
+	assert.equal(resolveRule(rules, { agent: "claude", model: "claude-haiku-4.5" }), null);
+});

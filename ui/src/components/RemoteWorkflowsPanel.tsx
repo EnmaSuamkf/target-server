@@ -142,6 +142,7 @@ interface StepFormState {
 const RUNNER_LABELS: Record<string, string> = {
 	claude: "Claude",
 	"free-code": "Free Code",
+	"copilot": "GitHub Copilot",
 	cursor: "Cursor",
 };
 
