@@ -1,0 +1,14 @@
+# Dashboard provider for the compose stack. The Prometheus (uid "prometheus") and
+# Tempo (uid "tempo") datasources the dashboard uses are already provisioned by
+# the grafana/otel-lgtm image, so no datasource file is needed here.
+apiVersion: 1
+
+providers:
+  - name: "Target Server"
+    type: file
+    orgId: 1
+    folder: "Target Server"
+    allowUiUpdates: false
+    options:
+      path: /otel-lgtm/target-server-dashboards
+      foldersFromFilesStructure: false

@@ -1,0 +1,161 @@
+{
+	"resourceSpans": [
+		{
+			"resource": {
+				"attributes": [
+					{
+						"key": "service.name",
+						"value": {
+							"stringValue": "target-server"
+						}
+					}
+				]
+			},
+			"scopeSpans": [
+				{
+					"scope": {
+						"name": "probe"
+					},
+					"spans": [
+						{
+							"traceId": "7d0a11199b25a325f48bd855a35be82e",
+							"spanId": "aaaa000000000001",
+							"name": "A gen_ai only (chat, CLIENT)",
+							"kind": 3,
+							"startTimeUnixNano": "1790000000000000000",
+							"endTimeUnixNano": "1790000001000000000",
+							"attributes": [
+								{
+									"key": "gen_ai.operation.name",
+									"value": {
+										"stringValue": "chat"
+									}
+								},
+								{
+									"key": "gen_ai.request.model",
+									"value": {
+										"stringValue": "claude-sonnet-4-5"
+									}
+								},
+								{
+									"key": "gen_ai.usage.input_tokens",
+									"value": {
+										"intValue": "1200"
+									}
+								},
+								{
+									"key": "gen_ai.usage.output_tokens",
+									"value": {
+										"intValue": "340"
+									}
+								}
+							],
+							"status": {
+								"code": 1
+							}
+						},
+						{
+							"traceId": "7d0a11199b25a325f48bd855a35be82e",
+							"spanId": "aaaa000000000002",
+							"name": "B langfuse type+model only",
+							"kind": 1,
+							"startTimeUnixNano": "1790000000000000000",
+							"endTimeUnixNano": "1790000001000000000",
+							"attributes": [
+								{
+									"key": "langfuse.observation.type",
+									"value": {
+										"stringValue": "generation"
+									}
+								},
+								{
+									"key": "langfuse.observation.model.name",
+									"value": {
+										"stringValue": "claude-sonnet-4-5"
+									}
+								}
+							],
+							"status": {
+								"code": 1
+							}
+						},
+						{
+							"traceId": "7d0a11199b25a325f48bd855a35be82e",
+							"spanId": "aaaa000000000003",
+							"name": "C langfuse usage+cost json",
+							"kind": 1,
+							"startTimeUnixNano": "1790000000000000000",
+							"endTimeUnixNano": "1790000001000000000",
+							"attributes": [
+								{
+									"key": "langfuse.observation.type",
+									"value": {
+										"stringValue": "generation"
+									}
+								},
+								{
+									"key": "langfuse.observation.model.name",
+									"value": {
+										"stringValue": "claude-sonnet-4-5"
+									}
+								},
+								{
+									"key": "langfuse.observation.usage_details",
+									"value": {
+										"stringValue": "{\"input\":1200,\"output\":340}"
+									}
+								},
+								{
+									"key": "langfuse.observation.cost_details",
+									"value": {
+										"stringValue": "{\"total\":0.0123}"
+									}
+								}
+							],
+							"status": {
+								"code": 1
+							}
+						},
+						{
+							"traceId": "7d0a11199b25a325f48bd855a35be82e",
+							"spanId": "aaaa000000000004",
+							"name": "D gen_ai.usage.cost",
+							"kind": 3,
+							"startTimeUnixNano": "1790000000000000000",
+							"endTimeUnixNano": "1790000001000000000",
+							"attributes": [
+								{
+									"key": "gen_ai.operation.name",
+									"value": {
+										"stringValue": "chat"
+									}
+								},
+								{
+									"key": "gen_ai.request.model",
+									"value": {
+										"stringValue": "claude-sonnet-4-5"
+									}
+								},
+								{
+									"key": "gen_ai.usage.input_tokens",
+									"value": {
+										"intValue": "10"
+									}
+								},
+								{
+									"key": "gen_ai.usage.cost",
+									"value": {
+										"stringValue": "0.5"
+									}
+								}
+							],
+							"status": {
+								"code": 1
+							}
+						}
+					]
+				}
+			]
+		}
+	]
+}

@@ -1,0 +1,44 @@
+# Collector in front of Datadog for target-server exports (OTLP/HTTP in, OTLP/HTTP out).
+# Based on https://docs.datadoghq.com/opentelemetry/setup/collector_exporter.md
+# (the "otlp_http" exporter to https://otlp.${DD_SITE} with a dd-api-key header),
+# trimmed to what target-server needs: no host metrics, no logs, no span metrics.
+#
+#   DD_SITE=datadoghq.com DD_API_KEY=<key> otelcol-contrib --config datadog-otlp-http.collector.yaml
+#
+# target-server sends DELTA metrics, which is the only temporality Datadog's
+# OTLP metrics intake accepts
+# (https://docs.datadoghq.com/opentelemetry/setup/otlp_ingest/metrics.md), so
+# there is no cumulativetodelta processor here. Add one only for cumulative sources.
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch: {}
+
+exporters:
+  otlp_http:
+    endpoint: https://otlp.${env:DD_SITE}
+    headers:
+      dd-api-key: ${env:DD_API_KEY}
+    compression: zstd
+    compression_params:
+      level: 3 # the Datadog page says this must be set explicitly for zstd
+    sending_queue:
+      batch:
+        sizer: bytes
+        min_size: 2097152 # start flushing at 2 MiB (Datadog intake limits: 512 KiB compressed metrics, 15 MiB traces)
+        max_size: 4194304
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp_http]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp_http]

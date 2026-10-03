@@ -8,9 +8,11 @@ import test from "node:test";
 
 const read = (rel) => fs.readFileSync(new URL(rel, import.meta.url), "utf8");
 
-test("the Settings tab is gated on pricing.read", () => {
+test("the Settings tab is gated on pricing.read or telemetry.read, and the pricing panel on pricing.read", () => {
 	const app = read("../ui/src/App.tsx");
-	assert.match(app, /const canSettings = can\("pricing\.read"\)/);
+	assert.match(app, /const canPricing = can\("pricing\.read"\)/);
+	assert.match(app, /const canSettings = canPricing \|\| canTelemetry/);
+	assert.match(app, /\{canPricing \? \(\s*<PricingPanel/);
 	assert.match(app, /\.\.\.\(canSettings \? \["settings" as const\] : \[\]\)/);
 	assert.match(app, /\{canSettings \? <button[\s\S]*?Settings\s*<\/button> : null\}/);
 	assert.match(app, /tab === "settings"/);

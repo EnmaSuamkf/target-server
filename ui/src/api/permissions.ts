@@ -30,6 +30,8 @@ export const PERMISSION_CATALOG = [
 	{ id: "pricing.edit", label: "Edit pricing", description: "Add, change and delete token price rules." },
 	{ id: "pricing.import", label: "Import pricing", description: "Import a token price table." },
 	{ id: "pricing.export", label: "Export pricing", description: "Export the token price table." },
+	{ id: "telemetry.read", label: "View telemetry export", description: "View the OpenTelemetry export settings and status (header values stay masked)." },
+	{ id: "telemetry.write", label: "Manage telemetry export", description: "Configure, test and delete the OpenTelemetry export destination and its credentials." },
 	{ id: "client.read", label: "View clients", description: "View connected clients and their state." },
 	{ id: "client.workflows.create", label: "Create workflows", description: "Create client workflows." },
 	{ id: "client.workflows.steps.add", label: "Add workflow steps", description: "Add steps to client workflows." },

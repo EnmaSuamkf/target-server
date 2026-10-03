@@ -1,0 +1,224 @@
+{
+	"resourceSpans": [
+		{
+			"resource": {
+				"attributes": [
+					{
+						"key": "service.name",
+						"value": {
+							"stringValue": "target-server"
+						}
+					},
+					{
+						"key": "target.org",
+						"value": {
+							"stringValue": "demo-org"
+						}
+					}
+				]
+			},
+			"scopeSpans": [
+				{
+					"scope": {
+						"name": "target-server.otel",
+						"version": "0.1.0"
+					},
+					"spans": [
+						{
+							"traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa03",
+							"spanId": "eee19b7ec3c1b174",
+							"name": "invoke_workflow demo",
+							"kind": 1,
+							"startTimeUnixNano": 1790000000000000000,
+							"endTimeUnixNano": 1790000005000000000,
+							"attributes": [
+								{
+									"key": "gen_ai.operation.name",
+									"value": {
+										"stringValue": "invoke_workflow"
+									}
+								},
+								{
+									"key": "gen_ai.provider.name",
+									"value": {
+										"stringValue": "anthropic"
+									}
+								},
+								{
+									"key": "gen_ai.conversation.id",
+									"value": {
+										"stringValue": "session-demo-1"
+									}
+								},
+								{
+									"key": "langfuse.user.id",
+									"value": {
+										"stringValue": "alice@example.com"
+									}
+								},
+								{
+									"key": "langfuse.session.id",
+									"value": {
+										"stringValue": "session-demo-1"
+									}
+								},
+								{
+									"key": "langfuse.trace.name",
+									"value": {
+										"stringValue": "invoke_workflow demo"
+									}
+								},
+								{
+									"key": "target.cost.usd",
+									"value": {
+										"doubleValue": 0.0123
+									}
+								}
+							],
+							"status": {
+								"code": 1
+							}
+						},
+						{
+							"traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa03",
+							"spanId": "eee19b7ec3c1b175",
+							"parentSpanId": "eee19b7ec3c1b174",
+							"name": "invoke_agent step-1",
+							"kind": 1,
+							"startTimeUnixNano": 1790000000500000000,
+							"endTimeUnixNano": 1790000003000000000,
+							"attributes": [
+								{
+									"key": "gen_ai.operation.name",
+									"value": {
+										"stringValue": "invoke_agent"
+									}
+								},
+								{
+									"key": "gen_ai.provider.name",
+									"value": {
+										"stringValue": "anthropic"
+									}
+								},
+								{
+									"key": "gen_ai.request.model",
+									"value": {
+										"stringValue": "claude-sonnet-4-5"
+									}
+								},
+								{
+									"key": "gen_ai.conversation.id",
+									"value": {
+										"stringValue": "session-demo-1"
+									}
+								},
+								{
+									"key": "gen_ai.usage.input_tokens",
+									"value": {
+										"intValue": "1200"
+									}
+								},
+								{
+									"key": "gen_ai.usage.output_tokens",
+									"value": {
+										"intValue": "340"
+									}
+								},
+								{
+									"key": "gen_ai.usage.cache_read.input_tokens",
+									"value": {
+										"intValue": "800"
+									}
+								},
+								{
+									"key": "gen_ai.usage.cache_write.input_tokens",
+									"value": {
+										"intValue": "100"
+									}
+								},
+								{
+									"key": "langfuse.observation.type",
+									"value": {
+										"stringValue": "generation"
+									}
+								},
+								{
+									"key": "langfuse.observation.model.name",
+									"value": {
+										"stringValue": "claude-sonnet-4-5"
+									}
+								},
+								{
+									"key": "langfuse.observation.usage_details",
+									"value": {
+										"stringValue": "{\"input\":1200,\"output\":340,\"cache_read_input_tokens\":800,\"cache_creation_input_tokens\":100}"
+									}
+								},
+								{
+									"key": "langfuse.observation.cost_details",
+									"value": {
+										"stringValue": "{\"total\":0.0123}"
+									}
+								},
+								{
+									"key": "target.cost.usd",
+									"value": {
+										"doubleValue": 0.0123
+									}
+								}
+							],
+							"status": {
+								"code": 1
+							}
+						},
+						{
+							"traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa03",
+							"spanId": "eee19b7ec3c1b176",
+							"parentSpanId": "eee19b7ec3c1b174",
+							"name": "execute_tool Bash",
+							"kind": 1,
+							"startTimeUnixNano": 1790000003000000000,
+							"endTimeUnixNano": 1790000004500000000,
+							"attributes": [
+								{
+									"key": "gen_ai.operation.name",
+									"value": {
+										"stringValue": "execute_tool"
+									}
+								},
+								{
+									"key": "gen_ai.tool.name",
+									"value": {
+										"stringValue": "Bash"
+									}
+								},
+								{
+									"key": "gen_ai.conversation.id",
+									"value": {
+										"stringValue": "session-demo-1"
+									}
+								},
+								{
+									"key": "gen_ai.usage.input_tokens",
+									"value": {
+										"intValue": "0"
+									}
+								},
+								{
+									"key": "target.cost.usd",
+									"value": {
+										"doubleValue": 0
+									}
+								}
+							],
+							"status": {
+								"code": 2,
+								"message": "tool exited with code 1"
+							}
+						}
+					]
+				}
+			]
+		}
+	]
+}

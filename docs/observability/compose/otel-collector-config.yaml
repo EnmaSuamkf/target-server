@@ -1,0 +1,29 @@
+# Receives OTLP/HTTP from target-server and forwards to the otel-lgtm container.
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  # target-server sends DELTA sums/histograms; Prometheus (inside otel-lgtm)
+  # drops them silently, so convert to cumulative first.
+  deltatocumulative: {}
+  batch: {}
+
+exporters:
+  otlphttp/lgtm:
+    endpoint: http://lgtm:4318
+  debug:
+    verbosity: basic
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlphttp/lgtm, debug]
+    metrics:
+      receivers: [otlp]
+      processors: [deltatocumulative, batch]
+      exporters: [otlphttp/lgtm, debug]

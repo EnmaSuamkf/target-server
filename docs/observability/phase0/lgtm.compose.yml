@@ -1,0 +1,8 @@
+# Throwaway Grafana LGTM stack (Collector + Tempo + Prometheus + Loki + Grafana) for the OTEL 0 spike.
+name: phase0-lgtm
+services:
+  lgtm:
+    image: grafana/otel-lgtm:latest
+    ports:
+      - "3000:3000"   # Grafana (admin/admin)
+      - "4318:4318"   # OTLP HTTP

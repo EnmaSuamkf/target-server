@@ -83,6 +83,12 @@ Configuration (env vars):
 | `TARGET_MULTI_ORG` | `0` | `1` enables db-per-org isolation (`TARGET_DEVICE_LINKING_MODE=required` is then mandatory). See [`docs/multi-org.md`](docs/multi-org.md). |
 | `TARGET_SUPERUSER_EMAIL` | _(empty)_ | If set, creates a pending control-plane Superuser (idempotent) and emails a one-time setup link. Never seeds a Superuser password. Local file mail vs Render Resend: [`docs/multi-org.md`](docs/multi-org.md#superuser-bootstrap-local-vs-render). |
 | `TARGET_DEFAULT_ORG_SLUG` | `default` | Slug for organization id `default` on first boot only |
+| `TARGET_SECRETS_KEY` | _(empty)_ | 64 hex characters (32 bytes) that encrypt stored secrets (OTLP export headers) with AES-256-GCM. Generate with `openssl rand -hex 32`. **Never commit it and keep it different from `TARGET_AUTH_SECRET`.** Without it the OpenTelemetry export cannot be enabled and secrets are not saved. See [`docs/otel-export.md`](docs/otel-export.md). |
+| `TARGET_SECRETS_KEY_PREVIOUS` | _(empty)_ | The old key during a rotation; used only to decrypt values written before the switch |
+| `TARGET_SECRETS_DEV_KEY` | `0` | `1` generates a key file (`.target-secrets.key`, mode 0600) next to the database when `TARGET_SECRETS_KEY` is unset. Loopback binds only; ignored on a public bind |
+| `TARGET_OTEL_ALLOW_PRIVATE` | `0` | `1` lets an organization's OTLP endpoint use `http` and localhost/private addresses (local Langfuse, otel-lgtm). Off by default to block SSRF |
+| `TARGET_OTEL_INTERVAL_SECONDS` | `10` | How often the OTLP export worker drains the outbox; `0` turns the timer off |
+| `TARGET_OTEL_OUTBOX_MAX_AGE_DAYS` | `7` | Outbox rows older than this are dropped, whatever their status |
 
 ## Authentication
 
@@ -268,6 +274,7 @@ The repo includes [`render.yaml`](render.yaml) (Blueprint). To deploy:
    - `TARGET_SEED_ADMIN_PASSWORD` — non-default password for `admin@admin.com` (used only on first boot of an empty database)
    - `TARGET_AUTH_SECRET` — optional; generated on first boot if omitted
    - `TARGET_INGEST_TOKEN` — optional; protects `POST /ingest`
+   - `TARGET_SECRETS_KEY` — required only to use the OpenTelemetry export: 64 hex characters from `openssl rand -hex 32`, set as a secret (`sync: false`), never in the repo. Losing it makes stored export headers unreadable. See [`docs/otel-export.md`](docs/otel-export.md).
    - `TARGET_GOOGLE_CLIENT_ID` / `TARGET_GOOGLE_CLIENT_SECRET` — optional; enable Google sign-in (set in Environment; see checklist doc)
    - `TARGET_SUPERUSER_EMAIL` — optional; your mailbox. Boot emails a one-time Superuser setup link via Resend (no `.eml`, no seeded password). See [`docs/multi-org.md`](docs/multi-org.md#superuser-bootstrap-local-vs-render).
 4. Deploy. The public URL is **https://targetworkflows.com** (custom domain; `TARGET_PUBLIC_URL` in the Blueprint). The Render hostname `https://target-server-okjn.onrender.com` remains as a fallback.
@@ -495,6 +502,10 @@ canvas (status dots down a vertical rail) with that workflow's recent events.
 `node:sqlite` with two tables: `instances` (identity + version + last seen) and
 `events` (one row per activity event; `id` is the PRIMARY KEY, which is what makes
 ingest idempotent). See `db.mjs`.
+
+## Observability (OpenTelemetry export)
+
+Each organization can export workflow traces and metrics (tokens, cost, step duration, retries, outcomes) to Grafana, Langfuse, Datadog or any OTLP backend. Overview, destination guides, a local Grafana stack and a ready-made dashboard: [`docs/observability/README.md`](docs/observability/README.md).
 
 ## Test
 

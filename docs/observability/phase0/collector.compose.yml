@@ -1,0 +1,16 @@
+# otel-lgtm + a plain contrib Collector in front of it (OTEL 0 spike, part b).
+name: phase0-collector
+services:
+  lgtm:
+    image: grafana/otel-lgtm:latest
+    ports:
+      - "3000:3000"   # Grafana (admin/admin)
+  collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./collector-config.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      - "4319:4318"   # Collector OTLP HTTP (host 4319 -> container 4318)
+    depends_on:
+      - lgtm

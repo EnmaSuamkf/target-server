@@ -754,3 +754,62 @@ export type EstimateResponse =
 			scaledBy: number | null;
 	  }
 	| { status: "insufficient_data"; sampleSize: number };
+
+/** The two OTLP signals an organization can export. */
+export type OtelSignal = "traces" | "metrics";
+
+/** A stored header: the name plus `••••` and the last 4 characters; the value never leaves the server. */
+export interface OtelMaskedHeader {
+	name: string;
+	masked: string;
+}
+
+/** `config` of `GET /api/settings/otel`. */
+export interface OtelConfig {
+	enabled: boolean;
+	endpoint: string;
+	headers: OtelMaskedHeader[];
+	signals: OtelSignal[];
+	sendContent: boolean;
+	langfuseAttrs: boolean;
+	updatedAt: string | null;
+}
+
+/** `status` of `GET /api/settings/otel`; `lastOkAt` / `lastError` come from the export worker. */
+export interface OtelStatus {
+	enabled: boolean;
+	enabledAt: string | null;
+	lastOkAt: string | null;
+	lastError: string | null;
+	outbox: { pending: number; sent: number; dead: number };
+}
+
+/** `GET /api/settings/otel`, and the reply to `PUT`. */
+export interface OtelSettings {
+	/** The current organization; `name` is the id when the organization has no name. Absent on an old server. */
+	organization?: { id: string; name: string };
+	config: OtelConfig;
+	secretsAvailable: boolean;
+	allowPrivateEndpoints: boolean;
+	status: OtelStatus;
+}
+
+/**
+ * Body of `PUT /api/settings/otel`; every field is optional and an omitted one keeps its stored value.
+ * `headers` is the full set (name -> value): `""` or `null` keeps the stored secret, an unlisted name is removed.
+ */
+export interface OtelSettingsInput {
+	enabled?: boolean;
+	endpoint?: string;
+	headers?: Record<string, string | null>;
+	signals?: OtelSignal[];
+	sendContent?: boolean;
+	langfuseAttrs?: boolean;
+}
+
+/** `POST /api/settings/otel/test`: a failed delivery is still HTTP 200 with `ok: false`. */
+export interface OtelTestResult {
+	ok: boolean;
+	status: number | null;
+	error: string | null;
+}

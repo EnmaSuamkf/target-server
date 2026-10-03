@@ -1,0 +1,71 @@
+{
+	"resourceMetrics": [
+		{
+			"resource": {
+				"attributes": [
+					{
+						"key": "service.name",
+						"value": {
+							"stringValue": "target-server"
+						}
+					},
+					{
+						"key": "target.org",
+						"value": {
+							"stringValue": "demo-org"
+						}
+					}
+				]
+			},
+			"scopeMetrics": [
+				{
+					"scope": {
+						"name": "target-server.otel",
+						"version": "0.1.0"
+					},
+					"metrics": [
+						{
+							"name": "target.step.duration",
+							"description": "Duration of workflow steps",
+							"unit": "s",
+							"histogram": {
+								"aggregationTemporality": 2,
+								"dataPoints": [
+									{
+										"attributes": [
+											{
+												"key": "step.status",
+												"value": {
+													"stringValue": "done"
+												}
+											}
+										],
+										"startTimeUnixNano": "1790000000000000000",
+										"timeUnixNano": "1790000060000000000",
+										"count": "3",
+										"sum": 12.5,
+										"min": 2.5,
+										"max": 6,
+										"bucketCounts": [
+											"0",
+											"1",
+											"1",
+											"1",
+											"0"
+										],
+										"explicitBounds": [
+											1,
+											5,
+											10,
+											30
+										]
+									}
+								]
+							}
+						}
+					]
+				}
+			]
+		}
+	]
+}

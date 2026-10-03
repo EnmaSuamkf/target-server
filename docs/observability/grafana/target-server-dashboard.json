@@ -1,0 +1,622 @@
+{
+ "uid": "target-server-otel",
+ "title": "Target Server - OTEL export",
+ "description": "Cost, tokens, workflow outcomes, step duration and retries exported by target-server (target.* metrics) plus recent workflow traces.",
+ "tags": [
+  "target-server",
+  "opentelemetry"
+ ],
+ "schemaVersion": 39,
+ "version": 1,
+ "editable": true,
+ "graphTooltip": 1,
+ "timezone": "browser",
+ "time": {
+  "from": "now-1h",
+  "to": "now"
+ },
+ "refresh": "30s",
+ "annotations": {
+  "list": []
+ },
+ "templating": {
+  "list": [
+   {
+    "name": "org",
+    "label": "Organization",
+    "type": "query",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "prometheus"
+    },
+    "query": {
+     "query": "query_result(count by (target_org, org_name) (label_replace(last_over_time(target_workflow_completed_total{target_org_name!=\"\"}[$__range]), \"org_name\", \"$1\", \"target_org_name\", \"(.+)\")) or (count by (target_org, org_name) (label_replace(last_over_time(target_workflow_completed_total{target_org_name=\"\"}[$__range]), \"org_name\", \"$1\", \"target_org\", \"(.+)\")) unless on (target_org) count by (target_org) (last_over_time(target_workflow_completed_total{target_org_name!=\"\"}[$__range]))))",
+     "refId": "vorg",
+     "qryType": 3
+    },
+    "definition": "query_result(count by (target_org, org_name) (label_replace(last_over_time(target_workflow_completed_total{target_org_name!=\"\"}[$__range]), \"org_name\", \"$1\", \"target_org_name\", \"(.+)\")) or (count by (target_org, org_name) (label_replace(last_over_time(target_workflow_completed_total{target_org_name=\"\"}[$__range]), \"org_name\", \"$1\", \"target_org\", \"(.+)\")) unless on (target_org) count by (target_org) (last_over_time(target_workflow_completed_total{target_org_name!=\"\"}[$__range]))))",
+    "refresh": 2,
+    "sort": 1,
+    "multi": true,
+    "includeAll": true,
+    "allValue": ".*",
+    "current": {
+     "selected": true,
+     "text": "All",
+     "value": "$__all"
+    },
+    "regex": "/org_name=\"(?<text>[^\"]*)\",target_org=\"(?<value>[^\"]*)\"/",
+    "description": "Shows the organization name (target.org.name, sent when the organization's Send content is on) and falls back to the id for series without it. The value used in queries is always the id (target_org)."
+   },
+   {
+    "name": "runner",
+    "label": "Runner",
+    "type": "query",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "prometheus"
+    },
+    "query": {
+     "query": "label_values(target_workflow_completed_total{target_org=~\"$org\"}, target_runner)",
+     "refId": "vrunner",
+     "qryType": 1
+    },
+    "definition": "label_values(target_workflow_completed_total{target_org=~\"$org\"}, target_runner)",
+    "refresh": 2,
+    "sort": 1,
+    "multi": true,
+    "includeAll": true,
+    "allValue": ".*",
+    "current": {
+     "selected": true,
+     "text": "All",
+     "value": "$__all"
+    }
+   },
+   {
+    "name": "window",
+    "label": "Rate window",
+    "type": "custom",
+    "query": "5m,15m,30m,1h",
+    "multi": false,
+    "includeAll": false,
+    "current": {
+     "selected": true,
+     "text": "15m",
+     "value": "15m"
+    },
+    "options": [
+     {
+      "selected": false,
+      "text": "5m",
+      "value": "5m"
+     },
+     {
+      "selected": true,
+      "text": "15m",
+      "value": "15m"
+     },
+     {
+      "selected": false,
+      "text": "30m",
+      "value": "30m"
+     },
+     {
+      "selected": false,
+      "text": "1h",
+      "value": "1h"
+     }
+    ],
+    "description": "Window of increase()/rate(). Use a longer window when exports are infrequent."
+   }
+  ]
+ },
+ "panels": [
+  {
+   "id": 1,
+   "type": "bargauge",
+   "title": "Cost (USD) by org and runner",
+   "description": "Exported cost over the selected time range, from target_cost_usd_USD_total (priced at the moment each snapshot was exported; unpriced runners have no cost series).",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 0,
+    "w": 12,
+    "h": 8
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "sum by (org, target_runner) (label_replace(label_replace((increase(target_cost_usd_USD_total{target_org=~\"$org\", target_runner=~\"$runner\"}[$__range]) or (target_cost_usd_USD_total{target_org=~\"$org\", target_runner=~\"$runner\"} unless (target_cost_usd_USD_total{target_org=~\"$org\", target_runner=~\"$runner\"} offset $__range))), \"org\", \"$1\", \"target_org\", \"(.+)\"), \"org\", \"$1\", \"target_org_name\", \"(.+)\"))",
+     "legendFormat": "{{org}} / {{target_runner}}",
+     "range": false,
+     "instant": true
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "currencyUSD",
+     "decimals": 2,
+     "min": 0,
+     "color": {
+      "mode": "continuous-GrYlRd"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "displayMode": "gradient",
+    "orientation": "horizontal",
+    "showUnfilled": true,
+    "valueMode": "color",
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "values": false,
+     "fields": ""
+    },
+    "legend": {
+     "showLegend": false
+    }
+   }
+  },
+  {
+   "id": 2,
+   "type": "stat",
+   "title": "Workflow failure rate",
+   "description": "failed / (completed + failed) over the selected time range, from target_workflow_failed_total and target_workflow_completed_total.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 0,
+    "w": 4,
+    "h": 8
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "(sum((increase(target_workflow_failed_total{target_org=~\"$org\", target_runner=~\"$runner\"}[$__range]) or (target_workflow_failed_total{target_org=~\"$org\", target_runner=~\"$runner\"} unless (target_workflow_failed_total{target_org=~\"$org\", target_runner=~\"$runner\"} offset $__range)))) or vector(0)) / ((sum((increase(target_workflow_completed_total{target_org=~\"$org\", target_runner=~\"$runner\"}[$__range]) or (target_workflow_completed_total{target_org=~\"$org\", target_runner=~\"$runner\"} unless (target_workflow_completed_total{target_org=~\"$org\", target_runner=~\"$runner\"} offset $__range)))) or vector(0)) + (sum((increase(target_workflow_failed_total{target_org=~\"$org\", target_runner=~\"$runner\"}[$__range]) or (target_workflow_failed_total{target_org=~\"$org\", target_runner=~\"$runner\"} unless (target_workflow_failed_total{target_org=~\"$org\", target_runner=~\"$runner\"} offset $__range)))) or vector(0)))",
+     "legendFormat": "failure rate",
+     "range": false,
+     "instant": true
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "decimals": 1,
+     "min": 0,
+     "max": 1,
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "orange",
+        "value": 0.1
+       },
+       {
+        "color": "red",
+        "value": 0.25
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "values": false,
+     "fields": ""
+    },
+    "colorMode": "value",
+    "graphMode": "area",
+    "textMode": "auto"
+   }
+  },
+  {
+   "id": 3,
+   "type": "timeseries",
+   "title": "Workflows completed vs failed",
+   "description": "Workflows that reached a terminal status per window, from target_workflow_completed_total and target_workflow_failed_total.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 16,
+    "y": 0,
+    "w": 8,
+    "h": 8
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "sum(increase(target_workflow_completed_total{target_org=~\"$org\", target_runner=~\"$runner\"}[$window]))",
+     "legendFormat": "completed",
+     "range": true,
+     "instant": false
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "B",
+     "expr": "sum(increase(target_workflow_failed_total{target_org=~\"$org\", target_runner=~\"$runner\"}[$window]))",
+     "legendFormat": "failed",
+     "range": true,
+     "instant": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "custom": {
+      "drawStyle": "bars",
+      "lineWidth": 2,
+      "fillOpacity": 60,
+      "showPoints": "auto",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "normal",
+       "group": "A"
+      }
+     }
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "completed"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "green"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "failed"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "red"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "sum"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   }
+  },
+  {
+   "id": 4,
+   "type": "timeseries",
+   "title": "Tokens per hour by token type",
+   "description": "Tokens added per hour, from target_tokens_total. input is uncached input; the four types are disjoint.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 8,
+    "w": 12,
+    "h": 8
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "sum by (token_type) (increase(target_tokens_total{target_org=~\"$org\", target_runner=~\"$runner\"}[1h]))",
+     "legendFormat": "{{token_type}}",
+     "range": true,
+     "instant": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 15,
+      "showPoints": "auto",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   }
+  },
+  {
+   "id": 5,
+   "type": "timeseries",
+   "title": "Step duration p50 / p95",
+   "description": "Step duration quantiles from target_step_duration_seconds_bucket (histogram bounds 1s to 3600s, so quantiles are interpolated inside a bucket).",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 8,
+    "w": 12,
+    "h": 8
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "histogram_quantile(0.5, sum by (le) (rate(target_step_duration_seconds_bucket{target_org=~\"$org\", target_runner=~\"$runner\"}[$window])))",
+     "legendFormat": "p50",
+     "range": true,
+     "instant": false
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "B",
+     "expr": "histogram_quantile(0.95, sum by (le) (rate(target_step_duration_seconds_bucket{target_org=~\"$org\", target_runner=~\"$runner\"}[$window])))",
+     "legendFormat": "p95",
+     "range": true,
+     "instant": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 10,
+      "showPoints": "auto",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   }
+  },
+  {
+   "id": 6,
+   "type": "timeseries",
+   "title": "Step retries",
+   "description": "Retries consumed by steps that finished, from target_step_retries_total, per runner.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 16,
+    "w": 12,
+    "h": 8
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "refId": "A",
+     "expr": "sum by (target_runner) (increase(target_step_retries_total{target_org=~\"$org\", target_runner=~\"$runner\"}[$window]))",
+     "legendFormat": "{{target_runner}}",
+     "range": true,
+     "instant": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "custom": {
+      "drawStyle": "bars",
+      "lineWidth": 2,
+      "fillOpacity": 60,
+      "showPoints": "auto",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "normal",
+       "group": "A"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "sum"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   }
+  },
+  {
+   "id": 7,
+   "type": "table",
+   "title": "Recent workflows (traces)",
+   "description": "Root spans (invoke_workflow) from Tempo, newest first. Organization shows the organization name when it was exported (Send content on) and the id otherwise. Click a trace id to open the span tree. (The Organization column takes the last non-empty of target.org and target.org.name, in the order Tempo returns them.)",
+   "datasource": {
+    "type": "tempo",
+    "uid": "tempo"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 16,
+    "w": 12,
+    "h": 8
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "tempo",
+      "uid": "tempo"
+     },
+     "refId": "A",
+     "queryType": "traceql",
+     "query": "{ resource.service.name = \"target-server\" && name =~ \"invoke_workflow.*\" && resource.target.org =~ \"${org:regex}\" && span.target.runner =~ \"${runner:regex}\" } | select(resource.target.org.name, resource.target.org)",
+     "limit": 20,
+     "tableType": "spans",
+     "spss": 1
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {},
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "name"
+      },
+      "properties": [
+       {
+        "id": "links",
+        "value": [
+         {
+          "title": "Open trace",
+          "url": "/explore?schemaVersion=1&panes=%7B%22a%22%3A%7B%22datasource%22%3A%22tempo%22%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22datasource%22%3A%7B%22type%22%3A%22tempo%22%2C%22uid%22%3A%22tempo%22%7D%2C%22queryType%22%3A%22traceql%22%2C%22query%22%3A%22${__data.fields.traceIdHidden}%22%7D%5D%7D%7D&orgId=1"
+         }
+        ]
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "showHeader": true
+   },
+   "transformations": [
+    {
+     "id": "calculateField",
+     "options": {
+      "mode": "reduceRow",
+      "reduce": {
+       "reducer": "lastNotNull",
+       "include": [
+        "target.org.name",
+        "target.org"
+       ]
+      },
+      "alias": "Organization",
+      "replaceFields": false
+     }
+    },
+    {
+     "id": "organize",
+     "options": {
+      "excludeByName": {
+       "traceService": true,
+       "traceName": true,
+       "spanID": true,
+       "service.name": true,
+       "target.org.name": true,
+       "target.org": true
+      },
+      "renameByName": {
+       "name": "Workflow",
+       "target.runner": "Runner",
+       "time": "Start",
+       "duration": "Duration"
+      }
+     }
+    }
+   ]
+  }
+ ]
+}

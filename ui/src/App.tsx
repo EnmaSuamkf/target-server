@@ -28,6 +28,7 @@ import { EventFeed } from "./components/EventFeed.tsx";
 import { FilterBar, RANGE_MS } from "./components/FilterBar.tsx";
 import { InstancesTable } from "./components/InstancesTable.tsx";
 import { Kpi } from "./components/Kpi.tsx";
+import { OtelPanel } from "./components/OtelPanel.tsx";
 import { PricingPanel } from "./components/PricingPanel.tsx";
 import { Pagination } from "./components/Pagination.tsx";
 import { TargetMark } from "./components/TargetMark.tsx";
@@ -234,7 +235,9 @@ export function App({ user, catalog = null, onSignOut }: { user: AuthUser; catal
 	const rciActions = resourceActions("client.rci");
 	const canManageDevices = can("devices.manage");
 	const canSeeRemoteArea = canRemote || canManageDevices;
-	const canSettings = can("pricing.read");
+	const canPricing = can("pricing.read");
+	const canTelemetry = can("telemetry.read");
+	const canSettings = canPricing || canTelemetry;
 	const canLibrary = can("templates.read") || can("tcp-tools.read") || can("rci.read");
 	const availableTabs = useMemo<DashboardTab[]>(
 		() => [
@@ -615,12 +618,21 @@ export function App({ user, catalog = null, onSignOut }: { user: AuthUser; catal
 				) : tab === "settings" ? (
 					<>
 						<h1 className="page-title">Settings</h1>
-						<p className="page-sub">Token prices used to estimate what each workflow cost.</p>
-						<PricingPanel
-							canEdit={can("pricing.edit")}
-							canImport={can("pricing.import")}
-							canExport={can("pricing.export")}
-						/>
+						<p className="page-sub">
+							{canPricing && canTelemetry
+								? "Token prices used to estimate what each workflow cost, and where telemetry is exported."
+								: canPricing
+									? "Token prices used to estimate what each workflow cost."
+									: "Where this organization exports OpenTelemetry traces and metrics."}
+						</p>
+						{canPricing ? (
+							<PricingPanel
+								canEdit={can("pricing.edit")}
+								canImport={can("pricing.import")}
+								canExport={can("pricing.export")}
+							/>
+						) : null}
+						{canTelemetry ? <OtelPanel canEdit={can("telemetry.write")} /> : null}
 					</>
 				) : (
 					<>

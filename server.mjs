@@ -139,6 +139,12 @@ import {
 	listResourceSets,
 	getResourceSet,
 	createPricingRule,
+	deleteOtelConfig,
+	enqueueOtelEvent,
+	otelEnqueueGate,
+	getOtelConfig,
+	otelOutboxCounts,
+	saveOtelConfig,
 	estimateHistory,
 	createResourceSet,
 	deletePricingRule,
@@ -169,6 +175,7 @@ import {
 	listSyncableCatalog,
 	DEFAULT_ORG_ID,
 	currentOrgId,
+	currentOrganization,
 	runWithOrg,
 	backfillDefaultOrganization,
 	migrateAllOrgDatabases,
@@ -219,6 +226,11 @@ import {
 import { initMailer, isDeliveringTransport, mailTransportName, sendMail } from "./mailer.mjs";
 import { inviteMail, resetMail, withToken } from "./mail-templates.mjs";
 import { isLoopbackHost } from "./boot-guards.mjs";
+import { sendOtlp } from "./otel-client.mjs";
+import { OTEL_EXPORT_KINDS, createOtelWorker } from "./otel-worker.mjs";
+import { allowPrivateEndpoints, noRedirectFetch, validateOtelEndpoint } from "./otel-endpoint.mjs";
+import { buildTestPayloads } from "./otel-test-payload.mjs";
+import { initDevKey, secretsAvailable } from "./secrets.mjs";
 
 const PORT = Number.parseInt(process.env.PORT ?? "8900", 10);
 const HOST = process.env.HOST ?? "127.0.0.1";
@@ -545,6 +557,14 @@ async function handleIngest(req, res) {
 	const now = new Date().toISOString();
 	upsertInstance(batch, now, device);
 
+	// One single-row read per batch. Null (the common case) means no outbox work at all.
+	let otelEnabledAt = null;
+	try {
+		otelEnabledAt = otelEnqueueGate();
+	} catch (err) {
+		log(`otel: enqueue gate failed: ${err?.code ?? err?.name ?? "error"}`);
+	}
+
 	const incomingOwner = device?.ownerUserId ?? null;
 	const batchOwners = new Map();
 	const accepted = [];
@@ -574,6 +594,14 @@ async function handleIngest(req, res) {
 			accepted.push(event.id);
 			if (result === "inserted") {
 				added++;
+				// Never allowed to fail or alter the ingest response; only events received since the exporter was enabled.
+				if (otelEnabledAt && now >= otelEnabledAt && OTEL_EXPORT_KINDS.has(event.kind)) {
+					try {
+						enqueueOtelEvent(event.id, event.kind, now);
+					} catch (err) {
+						log(`otel: enqueue failed for ${event.id}: ${err?.code ?? err?.name ?? "error"}`);
+					}
+				}
 				if (typeof event.workflow_id === "string" && event.workflow_id && !batchOwners.has(event.workflow_id)) {
 					const stored = workflowOwner(event.workflow_id);
 					batchOwners.set(event.workflow_id, stored.exists ? stored : { exists: true, ownerUserId: incomingOwner });
@@ -3535,6 +3563,116 @@ async function handlePricingRoute(req, res, pathname) {
 	return sendJson(res, 405, { error: "method not allowed" });
 }
 
+/**
+ * `/api/settings/otel`: the per-organization OTLP export destination. Header
+ * values are encrypted at rest and never returned: a GET shows header names and
+ * the last 4 characters only. Everything is scoped to the current organization.
+ */
+const OTEL_DEFAULTS = Object.freeze({
+	enabled: false,
+	endpoint: "",
+	headers: [],
+	signals: ["traces", "metrics"],
+	sendContent: true, // default for an organization that never saved a config; stored values are never changed
+	langfuseAttrs: false,
+	enabledAt: null,
+	lastOkAt: null,
+	lastError: null,
+	updatedAt: null,
+});
+
+function otelSettingsBody() {
+	const config = { ...OTEL_DEFAULTS, ...(getOtelConfig() ?? {}) };
+	const { enabledAt, lastOkAt, lastError, ...settings } = config;
+	return {
+		organization: currentOrganization(),
+		config: settings,
+		secretsAvailable: secretsAvailable(),
+		allowPrivateEndpoints: allowPrivateEndpoints(),
+		status: { enabled: config.enabled, enabledAt, lastOkAt, lastError, outbox: otelOutboxCounts() },
+	};
+}
+
+function sendOtelEndpointError(res, check) {
+	return sendJson(res, 422, { error: check.code, message: check.message });
+}
+
+async function handleOtelRoute(req, res, pathname) {
+	const match = pathname.match(/^\/api\/settings\/otel(?:\/(test))?$/);
+	if (!match) return false;
+
+	if (match[1] === "test") {
+		if (req.method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
+		if (!(await requireCapability(req, res, "telemetry.write"))) return true;
+		const config = getOtelConfig({ includeSecrets: true });
+		if (!config?.endpoint) return sendJson(res, 409, { error: "not_configured", message: "Save an endpoint before testing" });
+		const storedHeaders = getOtelConfig().headers.length;
+		if (Object.keys(config.headers).length < storedHeaders) {
+			return sendJson(res, 409, { error: "secrets_unavailable", message: "Stored headers cannot be decrypted with the configured key" });
+		}
+		const check = await validateOtelEndpoint(config.endpoint);
+		if (!check.ok) return sendOtelEndpointError(res, check);
+		const payloads = buildTestPayloads({ orgId: currentOrgId() });
+		let failure = null;
+		let status = null;
+		for (const signal of config.signals) {
+			const sent = await sendOtlp({
+				endpoint: check.url,
+				signal,
+				body: payloads[signal],
+				headers: config.headers,
+				maxAttempts: 1,
+				timeoutMs: 8_000,
+				fetchImpl: noRedirectFetch,
+			});
+			status = sent.status;
+			if (!sent.ok) {
+				failure = `${signal}: ${sent.error}`;
+				break;
+			}
+		}
+		return sendJson(res, 200, { ok: failure === null, status, error: failure });
+	}
+
+	if (req.method === "GET") {
+		if (!(await requireCapability(req, res, "telemetry.read"))) return true;
+		return sendJson(res, 200, otelSettingsBody());
+	}
+	if (req.method === "PUT") {
+		if (!(await requireCapability(req, res, "telemetry.write"))) return true;
+		const body = await readJson(req, res);
+		if (!body) return true;
+		const v = validate("otel.settings", body);
+		if (!v.ok) return sendJson(res, 422, { errors: v.errors });
+		const input = v.value;
+		const writesSecret = Object.values(input.headers ?? {}).some((value) => typeof value === "string" && value !== "");
+		if (!secretsAvailable() && (input.enabled === true || writesSecret || (input.enabled === undefined && getOtelConfig()?.enabled))) {
+			return sendJson(res, 409, {
+				error: "secrets_unavailable",
+				message: "TARGET_SECRETS_KEY is not configured; the exporter cannot be enabled and credentials cannot be saved",
+			});
+		}
+		if (input.endpoint) {
+			const check = await validateOtelEndpoint(input.endpoint);
+			if (!check.ok) return sendOtelEndpointError(res, check);
+		}
+		try {
+			saveOtelConfig(input);
+		} catch (err) {
+			if (err.code === "header_value_required") return sendJson(res, 422, { error: err.code, message: err.message });
+			if (err.code === "secrets_unavailable") return sendJson(res, 409, { error: err.code, message: "TARGET_SECRETS_KEY is not configured" });
+			throw err;
+		}
+		return sendJson(res, 200, otelSettingsBody());
+	}
+	if (req.method === "DELETE") {
+		if (!(await requireCapability(req, res, "telemetry.write"))) return true;
+		deleteOtelConfig();
+		return sendJson(res, 200, { ok: true });
+	}
+	return sendJson(res, 405, { error: "method not allowed" });
+}
+
 async function handleCatalogRoute(req, res, pathname) {
 	const match = pathname.match(/^\/api\/(templates|tcps|resource-sets)(?:\/([^/]+))?(?:\/([^/]+))?$/);
 	if (!match) return false;
@@ -3685,6 +3823,11 @@ const server = createServer(async (req, res) => {
 			if (handled !== false) return;
 		}
 
+		if (pathname.startsWith("/api/settings/otel")) {
+			const handled = await handleOtelRoute(req, res, pathname);
+			if (handled !== false) return;
+		}
+
 		if (pathname.startsWith("/api/templates") || pathname.startsWith("/api/tcps") || pathname.startsWith("/api/resource-sets")) {
 			const handled = await handleCatalogRoute(req, res, pathname);
 			if (handled !== false) return;
@@ -3763,6 +3906,12 @@ const server = createServer(async (req, res) => {
 	}
 });
 
+/** Background OTLP exporter; the timer is unref'd and stops with the server. */
+export const otelWorker = createOtelWorker({ log });
+server.on("close", () => {
+	void otelWorker.stop();
+});
+
 async function start() {
 	try {
 		assertMultiOrgDeviceLinkingMode();
@@ -3778,6 +3927,11 @@ async function start() {
 		log("WARNING: TARGET_AUTH_DISABLED=1 — /api/* is unauthenticated");
 	}
 	await initMailer();
+	// Opt-in dev convenience: a generated key file next to the DB, loopback binds only.
+	if (process.env.TARGET_SECRETS_DEV_KEY === "1" && !process.env.TARGET_SECRETS_KEY) {
+		if (initDevKey({ host: HOST, dbPath: defaultOrgDbPath() })) log("secrets:    using a generated dev key file (TARGET_SECRETS_DEV_KEY=1, loopback only)");
+		else log("WARNING: TARGET_SECRETS_DEV_KEY=1 ignored on a non-loopback bind; set TARGET_SECRETS_KEY");
+	}
 	try {
 		await runWithOrg(DEFAULT_ORG_ID, () => {
 			backfillDefaultOrganization();
@@ -3796,6 +3950,7 @@ async function start() {
 			log(`ingest:     POST http://${HOST}:${PORT}/ingest`);
 			log(INGEST_TOKEN ? "ingest auth: Bearer token REQUIRED" : "ingest auth: open (set TARGET_INGEST_TOKEN to require one)");
 			log(`mail:       ${mailTransportName()}`);
+			if (otelWorker.start()) log("otel:       export worker running");
 			if (!dashboardIsBuilt()) log("WARNING: dashboard not built — run `npm run ui:install`");
 			else if (dashboardIsStale()) log("WARNING: dashboard bundle is older than ui/ — run `npm run build`");
 		});

@@ -5,6 +5,7 @@ node_modules/
 *.log
 .env
 .mail-outbox/
+.target-secrets.key
 
 # Built dashboard (produced by `npm run build`; sources live in ui/src).
 public/dist/

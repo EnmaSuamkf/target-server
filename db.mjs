@@ -17,6 +17,7 @@ import { DatabaseSync } from "node:sqlite";
 import { validateCommand } from "./blueprint.mjs";
 import { stepCostDeltas } from "./estimates.mjs";
 import { priceSession, sumCosts } from "./pricing.mjs";
+import { decryptSecret, encryptSecret, maskSecret, SecretsError, secretsAvailable } from "./secrets.mjs";
 import {
 	DEFAULT_ORG_ID,
 	adoptJwtSecretFromOrgHandle,
@@ -96,6 +97,7 @@ export const PERMISSION_GROUPS = Object.freeze([
 	{ id: "server.tcp", scope: "server", label: "TCP tools", description: "Manage TCP packs stored on this dashboard server" },
 	{ id: "server.rci", scope: "server", label: "RCI", description: "Manage RCI resource sets stored on this dashboard server" },
 	{ id: "server.pricing", scope: "server", label: "Pricing", description: "Manage the token price table used to cost workflow usage" },
+	{ id: "server.telemetry", scope: "server", label: "Telemetry", description: "Configure OpenTelemetry (OTLP) export of workflow traces and metrics" },
 	{ id: "client.remote", scope: "client", label: "Clients", description: "View connected Target hubs and their client state" },
 	{ id: "client.workflows", scope: "client", label: "Workflows", description: "Create, edit and run workflows on a connected Target hub" },
 	{ id: "client.templates", scope: "client", label: "Templates", description: "Manage templates on a connected Target hub" },
@@ -137,6 +139,8 @@ export const PERMISSION_CATALOG = Object.freeze([
 	{ id: "pricing.edit", label: "Edit pricing", description: "Add, change and delete token price rules", scope: "server", group: "server.pricing" },
 	{ id: "pricing.import", label: "Import pricing", description: "Import a token price table", scope: "server", group: "server.pricing" },
 	{ id: "pricing.export", label: "Export pricing", description: "Export the token price table", scope: "server", group: "server.pricing" },
+	{ id: "telemetry.read", label: "View telemetry export", description: "View the OpenTelemetry export settings and status (header values stay masked)", scope: "server", group: "server.telemetry" },
+	{ id: "telemetry.write", label: "Manage telemetry export", description: "Configure, test and delete the OpenTelemetry export destination and its credentials", scope: "server", group: "server.telemetry" },
 	{ id: "client.read", label: "View clients", description: "View connected clients and their state", scope: "client", group: "client.remote" },
 	{ id: "client.workflows.create", label: "Create workflows", description: "Create client workflows", scope: "client", group: "client.workflows" },
 	{ id: "client.workflows.steps.add", label: "Add workflow steps", description: "Add steps to client workflows", scope: "client", group: "client.workflows" },
@@ -257,6 +261,21 @@ export function defaultOrgDbPath() {
 
 export function currentOrgId() {
 	return orgContext.getStore()?.orgId ?? processDefaultOrg?.orgId ?? null;
+}
+
+/**
+ * The current organization as `{id, name}` for display and export. Read-only;
+ * the name falls back to the id when the control lookup fails or the name is empty.
+ */
+export function currentOrganization() {
+	const id = currentOrgId();
+	let name = null;
+	try {
+		name = getOrganization(id)?.name ?? null;
+	} catch {
+		// control database unreadable: use the id
+	}
+	return { id, name: typeof name === "string" && name.trim() !== "" ? name : id };
 }
 
 /**
@@ -506,6 +525,7 @@ function openOrgFile(dbPath) {
 	migrateDeviceLinkSchema(db);
 	migrateCatalogSchema(db);
 	migratePricingSchema(db);
+	migrateOtelSchema(db);
 	adoptJwtSecretFromOrgHandle(db);
 	seedAuth(db);
 	return db;
@@ -654,6 +674,50 @@ function migratePricingSchema(database) {
 			created_at            TEXT NOT NULL,
 			updated_at            TEXT NOT NULL,
 			UNIQUE (agent, model, effective_from)
+		);
+	`);
+}
+
+/**
+ * Additive per-organization OpenTelemetry export storage: one config row
+ * (`id = 1`), the outbox of events still to export, and the cumulative
+ * tokens/cost already exported per session (the base for metric deltas).
+ */
+function migrateOtelSchema(database) {
+	database.exec(`
+		CREATE TABLE IF NOT EXISTS otel_exports (
+			id             INTEGER PRIMARY KEY CHECK (id = 1),
+			enabled        INTEGER NOT NULL DEFAULT 0,
+			endpoint       TEXT NOT NULL DEFAULT '',
+			headers_enc    TEXT NOT NULL DEFAULT '{}',
+			signals        TEXT NOT NULL DEFAULT 'traces,metrics',
+			send_content   INTEGER NOT NULL DEFAULT 0,
+			langfuse_attrs INTEGER NOT NULL DEFAULT 0,
+			enabled_at     TEXT,
+			last_ok_at     TEXT,
+			last_error     TEXT,
+			updated_at     TEXT NOT NULL
+		);
+		CREATE TABLE IF NOT EXISTS otel_outbox (
+			id              INTEGER PRIMARY KEY AUTOINCREMENT,
+			event_id        TEXT NOT NULL UNIQUE,
+			kind            TEXT NOT NULL,
+			status          TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'sent', 'dead')),
+			attempts        INTEGER NOT NULL DEFAULT 0,
+			next_attempt_at TEXT NOT NULL,
+			created_at      TEXT NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_otel_outbox_due ON otel_outbox(status, next_attempt_at);
+		CREATE TABLE IF NOT EXISTS otel_export_state (
+			workflow_id          TEXT NOT NULL,
+			session_id           TEXT NOT NULL DEFAULT '',
+			last_input_tokens    INTEGER NOT NULL DEFAULT 0,
+			last_output_tokens   INTEGER NOT NULL DEFAULT 0,
+			last_cache_read      INTEGER NOT NULL DEFAULT 0,
+			last_cache_creation  INTEGER NOT NULL DEFAULT 0,
+			last_cost_usd        REAL NOT NULL DEFAULT 0,
+			updated_at           TEXT NOT NULL,
+			PRIMARY KEY (workflow_id, session_id)
 		);
 	`);
 }
@@ -5381,4 +5445,277 @@ export function catalogResourceSetBundle(resourceSets) {
 			resources: set.resources,
 		})),
 	};
+}
+
+// ---------------------------------------------------------------------------
+// OpenTelemetry export: config, outbox and export state (current org only)
+// ---------------------------------------------------------------------------
+
+const OTEL_SIGNALS = ["traces", "metrics"];
+
+function otelError(code, message, statusCode = 400) {
+	const e = new Error(message);
+	e.code = code;
+	e.statusCode = statusCode;
+	return e;
+}
+
+function parseOtelSignals(text) {
+	const set = new Set(String(text ?? "").split(","));
+	return OTEL_SIGNALS.filter((s) => set.has(s));
+}
+
+function readHeaderEnvelopes(raw) {
+	try {
+		const parsed = JSON.parse(raw || "{}");
+		return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+	} catch {
+		return {};
+	}
+}
+
+function otelConfigFromRow(row, orgId, { includeSecrets }) {
+	const envelopes = readHeaderEnvelopes(row.headers_enc);
+	const headers = {};
+	const masked = [];
+	for (const [name, envelope] of Object.entries(envelopes)) {
+		let value = null;
+		try {
+			value = decryptSecret(orgId, envelope);
+		} catch {
+			// Key missing or rotated away: the header is kept but unreadable.
+		}
+		if (includeSecrets) {
+			if (value !== null) headers[name] = value;
+		} else {
+			masked.push({ name, masked: value === null ? "••••" : maskSecret(value) });
+		}
+	}
+	return {
+		enabled: row.enabled === 1,
+		endpoint: row.endpoint,
+		headers: includeSecrets ? headers : masked,
+		signals: parseOtelSignals(row.signals),
+		sendContent: row.send_content === 1,
+		langfuseAttrs: row.langfuse_attrs === 1,
+		enabledAt: row.enabled_at,
+		lastOkAt: row.last_ok_at,
+		lastError: row.last_error,
+		updatedAt: row.updated_at,
+	};
+}
+
+/**
+ * The org's export config, or null when never saved. Header values are masked
+ * (`{name, masked}`) unless `includeSecrets` (worker use only), which returns
+ * `headers` as a name → plaintext map and drops headers that cannot be decrypted.
+ */
+export function getOtelConfig({ includeSecrets = false } = {}) {
+	const row = open().prepare("SELECT * FROM otel_exports WHERE id = 1").get();
+	if (!row) return null;
+	return otelConfigFromRow(row, currentOrgId(), { includeSecrets });
+}
+
+/**
+ * Create or update the config. `headers` is a name → value map describing the
+ * FULL header set: a name with a value is (re-)encrypted, a name whose value is
+ * omitted (undefined/null/"") keeps the stored secret, and names not listed are
+ * removed. `enabled_at` is stamped when the exporter goes from off to on.
+ * Turning it on or writing a new header value needs a secrets key (fail closed).
+ * A new config that omits `sendContent` stores it ON; an existing one keeps its stored value.
+ */
+export function saveOtelConfig(input = {}) {
+	const d = open();
+	const orgId = currentOrgId();
+	const now = new Date().toISOString();
+	const prev = d.prepare("SELECT * FROM otel_exports WHERE id = 1").get();
+	const enabled = input.enabled ?? prev?.enabled === 1;
+	if (enabled && !secretsAvailable()) {
+		throw new SecretsError("secrets_unavailable", "TARGET_SECRETS_KEY is not configured");
+	}
+	const stored = readHeaderEnvelopes(prev?.headers_enc);
+	let headersEnc = prev?.headers_enc ?? "{}";
+	if (input.headers !== undefined) {
+		const next = {};
+		for (const [name, value] of Object.entries(input.headers ?? {})) {
+			if (typeof value === "string" && value !== "") next[name] = encryptSecret(orgId, value);
+			else if (stored[name]) next[name] = stored[name];
+			else throw otelError("header_value_required", `Header "${name}" needs a value`);
+		}
+		headersEnc = JSON.stringify(next);
+	}
+	const signals = input.signals !== undefined ? parseOtelSignals(input.signals.join(",")).join(",") : (prev?.signals ?? "traces,metrics");
+	const flag = (v, old) => (v === undefined ? (old ?? 0) : v ? 1 : 0);
+	// Send content is ON for a configuration that is being created; a stored choice is never changed here.
+	const sendContent = input.sendContent === undefined && !prev ? 1 : flag(input.sendContent, prev?.send_content);
+	const enabledAt = enabled ? (prev?.enabled === 1 && prev.enabled_at ? prev.enabled_at : now) : (prev?.enabled_at ?? null);
+	d.prepare(
+		`INSERT INTO otel_exports (id, enabled, endpoint, headers_enc, signals, send_content, langfuse_attrs, enabled_at, last_ok_at, last_error, updated_at)
+		 VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET enabled = excluded.enabled, endpoint = excluded.endpoint, headers_enc = excluded.headers_enc,
+		   signals = excluded.signals, send_content = excluded.send_content, langfuse_attrs = excluded.langfuse_attrs,
+		   enabled_at = excluded.enabled_at, updated_at = excluded.updated_at`,
+	).run(
+		enabled ? 1 : 0,
+		input.endpoint ?? prev?.endpoint ?? "",
+		headersEnc,
+		signals,
+		sendContent,
+		flag(input.langfuseAttrs, prev?.langfuse_attrs),
+		enabledAt,
+		prev?.last_ok_at ?? null,
+		prev?.last_error ?? null,
+		now,
+	);
+	return getOtelConfig();
+}
+
+/** Remove the config, the outbox and the export state for the current org. */
+export function deleteOtelConfig() {
+	const d = open();
+	d.exec("BEGIN IMMEDIATE");
+	try {
+		const removed = d.prepare("DELETE FROM otel_exports").run().changes > 0;
+		d.exec("DELETE FROM otel_outbox; DELETE FROM otel_export_state;");
+		d.exec("COMMIT");
+		return removed;
+	} catch (err) {
+		d.exec("ROLLBACK");
+		throw err;
+	}
+}
+
+/** Queue one event for export. Idempotent per event id; returns true when a row was added. */
+export function enqueueOtelEvent(eventId, kind, now = new Date().toISOString()) {
+	return (
+		open()
+			.prepare("INSERT OR IGNORE INTO otel_outbox (event_id, kind, status, attempts, next_attempt_at, created_at) VALUES (?, ?, 'pending', 0, ?, ?)")
+			.run(eventId, kind, now, now).changes > 0
+	);
+}
+
+/** Pending rows that are due, oldest first. There is a single worker per process, so claiming is a read. */
+export function claimOtelOutboxBatch(limit = 100, now = new Date().toISOString()) {
+	return open()
+		.prepare(
+			`SELECT id, event_id AS eventId, kind, attempts, next_attempt_at AS nextAttemptAt, created_at AS createdAt
+			 FROM otel_outbox WHERE status = 'pending' AND next_attempt_at <= ? ORDER BY id LIMIT ?`,
+		)
+		.all(now, limit);
+}
+
+const idPlaceholders = (ids) => ids.map(() => "?").join(",");
+
+/**
+ * Mark rows sent. Optional `states` (`{workflowId, sessionId, state}`) are
+ * written in the SAME transaction, so a crash can never leave rows sent without
+ * their cumulative state (or the reverse), which would double-count metrics.
+ */
+export function markOtelSent(ids, states = []) {
+	if (!ids.length && !states.length) return 0;
+	const d = open();
+	d.exec("BEGIN IMMEDIATE");
+	try {
+		let n = 0;
+		if (ids.length) n = d.prepare(`UPDATE otel_outbox SET status = 'sent' WHERE id IN (${idPlaceholders(ids)})`).run(...ids).changes;
+		for (const s of states) writeOtelExportState(d, s);
+		d.exec("COMMIT");
+		return n;
+	} catch (err) {
+		d.exec("ROLLBACK");
+		throw err;
+	}
+}
+
+export function markOtelDead(ids) {
+	if (!ids.length) return 0;
+	return open().prepare(`UPDATE otel_outbox SET status = 'dead' WHERE id IN (${idPlaceholders(ids)})`).run(...ids).changes;
+}
+
+/** Count one more failed attempt and push the rows back to `nextAttemptAt`. */
+export function markOtelRetry(ids, nextAttemptAt) {
+	if (!ids.length) return 0;
+	return open()
+		.prepare(`UPDATE otel_outbox SET attempts = attempts + 1, next_attempt_at = ? WHERE id IN (${idPlaceholders(ids)})`)
+		.run(nextAttemptAt, ...ids).changes;
+}
+
+/** Drop rows older than `maxAgeDays` (any status); returns how many were removed. */
+export function pruneOtelOutbox(maxAgeDays, now = new Date()) {
+	const cutoff = new Date(now.getTime() - maxAgeDays * 86_400_000).toISOString();
+	return open().prepare("DELETE FROM otel_outbox WHERE created_at < ?").run(cutoff).changes;
+}
+
+/** Row counts per status, for the settings status block. */
+export function otelOutboxCounts() {
+	const counts = { pending: 0, sent: 0, dead: 0 };
+	for (const r of open().prepare("SELECT status, COUNT(*) AS n FROM otel_outbox GROUP BY status").all()) counts[r.status] = r.n;
+	return counts;
+}
+
+const otelSessionKey = (s) => s ?? "";
+
+/** Exported-so-far totals for a session, in the `previousState` shape of `computeUsageDelta`; null if none. */
+export function getOtelExportState(workflowId, sessionId = null) {
+	const r = open()
+		.prepare("SELECT * FROM otel_export_state WHERE workflow_id = ? AND session_id = ?")
+		.get(workflowId, otelSessionKey(sessionId));
+	if (!r) return null;
+	return {
+		tokens: { input: r.last_input_tokens, output: r.last_output_tokens, cache_read: r.last_cache_read, cache_creation: r.last_cache_creation },
+		costUsd: r.last_cost_usd,
+	};
+}
+
+function writeOtelExportState(d, { workflowId, sessionId = null, state, now = new Date().toISOString() }) {
+	const t = state.tokens ?? {};
+	d.prepare(
+		`INSERT INTO otel_export_state (workflow_id, session_id, last_input_tokens, last_output_tokens, last_cache_read, last_cache_creation, last_cost_usd, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(workflow_id, session_id) DO UPDATE SET last_input_tokens = excluded.last_input_tokens,
+		   last_output_tokens = excluded.last_output_tokens, last_cache_read = excluded.last_cache_read,
+		   last_cache_creation = excluded.last_cache_creation, last_cost_usd = excluded.last_cost_usd, updated_at = excluded.updated_at`,
+	).run(workflowId, otelSessionKey(sessionId), t.input ?? 0, t.output ?? 0, t.cache_read ?? 0, t.cache_creation ?? 0, state.costUsd ?? 0, now);
+}
+
+/** Upsert the exported totals for one session. Prefer `markOtelSent(ids, states)` when marking rows sent. */
+export function setOtelExportState(workflowId, sessionId, state) {
+	writeOtelExportState(open(), { workflowId, sessionId, state });
+}
+
+/** Record the outcome of a delivery attempt: success stamps `last_ok_at` and clears the error. */
+export function recordOtelResult({ ok, error = null, at = new Date().toISOString() }) {
+	const d = open();
+	if (ok) d.prepare("UPDATE otel_exports SET last_ok_at = ?, last_error = NULL WHERE id = 1").run(at);
+	else d.prepare("UPDATE otel_exports SET last_error = ? WHERE id = 1").run(String(error ?? "error").slice(0, 500));
+}
+
+/** `enabled_at` while the exporter is on for the current org, else null. One indexed single-row read, used by the ingest hook. */
+export function otelEnqueueGate() {
+	const row = open().prepare("SELECT enabled, enabled_at FROM otel_exports WHERE id = 1").get();
+	return row && row.enabled === 1 ? row.enabled_at : null;
+}
+
+/** Event rows for the outbox worker, with the sender's display name; ids that no longer exist are simply absent. */
+export function loadOtelEvents(eventIds) {
+	const out = [];
+	const d = open();
+	for (let i = 0; i < eventIds.length; i += 400) {
+		const chunk = eventIds.slice(i, i + 400);
+		out.push(
+			...d
+				.prepare(
+					`SELECT e.id, e.instance_id, e.kind, e.workflow_id, e.session_id, e.created_at, e.received_at, e.data, i.display_name AS user_name
+					 FROM events e LEFT JOIN instances i ON i.instance_id = e.instance_id
+					 WHERE e.id IN (${chunk.map(() => "?").join(",")})`,
+				)
+				.all(...chunk),
+		);
+	}
+	return out;
+}
+
+/** workflow_id → runner announced by the workflow's events, as a plain object. */
+export function otelRunnersByWorkflow(workflowIds) {
+	return Object.fromEntries(latestWorkflowAgents([...new Set(workflowIds.filter(Boolean))]));
 }

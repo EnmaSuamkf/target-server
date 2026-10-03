@@ -50,6 +50,9 @@ services:
         sync: false
       - key: TARGET_INGEST_TOKEN
         sync: false
+      # 64 hex chars (openssl rand -hex 32). Encrypts OTLP export headers; needed only to use the export.
+      - key: TARGET_SECRETS_KEY
+        sync: false
       - key: TARGET_GOOGLE_CLIENT_ID
         sync: false
       - key: TARGET_GOOGLE_CLIENT_SECRET

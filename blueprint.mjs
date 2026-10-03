@@ -562,7 +562,36 @@ const PRICING_ESTIMATE_QUERY = Joi.object({
 	.or("templateId", "agent")
 	.with("model", "agent");
 
+/**
+ * `PUT /api/settings/otel`. Every field is optional except that an enabled
+ * exporter needs an endpoint; omitted fields keep their stored value. In
+ * `headers`, a name with a value sets it, a name with null or "" keeps the
+ * stored secret, and names not listed are removed. The SSRF check on the
+ * endpoint is async (DNS) and runs in the route, not here.
+ */
+// Names are checked in `.custom` rather than as a pattern key: `stripUnknown` would silently drop a bad name.
+const OTEL_HEADER_NAME = /^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,100}$/;
+const OTEL_SETTINGS = Joi.object({
+	enabled: Joi.boolean(),
+	endpoint: Joi.when("enabled", {
+		is: true,
+		then: Joi.string().trim().min(1).max(2048).required(),
+		otherwise: Joi.string().trim().max(2048).allow(""),
+	}),
+	headers: Joi.object()
+		.pattern(Joi.string(), Joi.string().max(4096).allow("", null))
+		.max(20)
+		.custom((headers, helpers) => {
+			const bad = Object.keys(headers).find((name) => !OTEL_HEADER_NAME.test(name));
+			return bad === undefined ? headers : helpers.message("Header names may only contain letters, digits and !#$%&'*+.^_`|~-");
+		}),
+	signals: Joi.array().items(Joi.string().valid("traces", "metrics")).min(1).unique(),
+	sendContent: Joi.boolean(),
+	langfuseAttrs: Joi.boolean(),
+});
+
 export const BLUEPRINTS = {
+	"otel.settings": OTEL_SETTINGS,
 	"pricing.estimate_query": PRICING_ESTIMATE_QUERY,
 	"pricing.rule": PRICING_RULE,
 	"pricing.import": PRICING_IMPORT,
