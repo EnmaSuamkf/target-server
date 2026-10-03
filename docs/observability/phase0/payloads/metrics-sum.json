@@ -1,0 +1,42 @@
+{
+	"resourceMetrics": [
+		{
+			"resource": {
+				"attributes": [
+					{ "key": "service.name", "value": { "stringValue": "target-server" } },
+					{ "key": "target.org", "value": { "stringValue": "demo-org" } }
+				]
+			},
+			"scopeMetrics": [
+				{
+					"scope": { "name": "target-server.otel", "version": "0.1.0" },
+					"metrics": [
+						{
+							"name": "target.tokens",
+							"description": "Tokens consumed by agent steps",
+							"unit": "{token}",
+							"sum": {
+								"aggregationTemporality": 1,
+								"isMonotonic": true,
+								"dataPoints": [
+									{
+										"attributes": [{ "key": "token.type", "value": { "stringValue": "input" } }],
+										"startTimeUnixNano": "1790000000000000000",
+										"timeUnixNano": "1790000060000000000",
+										"asInt": "1200"
+									},
+									{
+										"attributes": [{ "key": "token.type", "value": { "stringValue": "output" } }],
+										"startTimeUnixNano": "1790000000000000000",
+										"timeUnixNano": "1790000060000000000",
+										"asInt": "340"
+									}
+								]
+							}
+						}
+					]
+				}
+			]
+		}
+	]
+}

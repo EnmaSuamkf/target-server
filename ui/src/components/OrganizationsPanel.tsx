@@ -9,6 +9,7 @@ import {
 } from "../api/platform.ts";
 import type { FieldError, InviteLinks, PlatformOrg } from "../api/types.ts";
 import { timeAgo } from "../lib/format.ts";
+import { CopyValue } from "./CopyValue.tsx";
 import { Field } from "./Field.tsx";
 import { Modal } from "./Modal.tsx";
 
@@ -246,6 +247,7 @@ export function OrganizationsPanel() {
 						<tr>
 							<th>Name</th>
 							<th>Slug</th>
+							<th>ID</th>
 							<th>Users</th>
 							<th>Hubs</th>
 							<th>Created</th>
@@ -271,6 +273,9 @@ export function OrganizationsPanel() {
 										) : null}
 									</td>
 									<td className="mono">{org.slug}</td>
+									<td>
+										<CopyValue value={org.id} label={`id of ${org.name}`} />
+									</td>
 									<td>{org.userCount}</td>
 									<td>{org.deviceCount}</td>
 									<td className="mono">{timeAgo(org.createdAt)}</td>

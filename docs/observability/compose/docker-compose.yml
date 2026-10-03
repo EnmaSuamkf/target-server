@@ -1,0 +1,59 @@
+# Local observability stack for target-server exports (development and demo only).
+#
+#   docker compose -f docs/observability/compose/docker-compose.yml up -d
+#
+# - Grafana + Tempo + Prometheus + Loki in one container (grafana/otel-lgtm).
+#   It is meant for dev/demo/test, NOT for production:
+#   https://github.com/grafana/docker-otel-lgtm
+# - An OpenTelemetry Collector in front of it. target-server exports DELTA
+#   metrics; otel-lgtm accepts them with HTTP 200 and then silently drops them,
+#   so the Collector converts them to cumulative (deltatocumulative processor).
+#   See docs/observability/phase0-findings.md (Q2/Q3).
+#
+# Endpoints on the host:
+#   Grafana                http://localhost:3000   (admin / admin)
+#   OTLP/HTTP for exports  http://localhost:4318   (the Collector; use this one)
+#   otel-lgtm OTLP/HTTP    http://localhost:14318  (direct; traces only, metrics must be cumulative)
+name: target-observability
+services:
+  lgtm:
+    image: grafana/otel-lgtm:latest
+    ports:
+      - "3000:3000" # Grafana UI, default login admin / admin
+      - "14318:4318" # otel-lgtm OTLP/HTTP, direct (traces only, see above)
+    volumes:
+      - lgtm_data:/data
+      # Auto-load the Target Server dashboard (the Prometheus and Tempo datasources
+      # it uses, uid prometheus and tempo, already exist in the image).
+      - ../grafana/provisioning/dashboards/target-server.yaml:/otel-lgtm/grafana/conf/provisioning/dashboards/target-server.yaml:ro
+      - ../grafana/target-server-dashboard.json:/otel-lgtm/target-server-dashboards/target-server-dashboard.json:ro
+    # Healthy only when everything the Collector forwards to is ready: Grafana,
+    # Prometheus, Tempo and the OTLP/HTTP receiver. Waiting for Grafana alone let
+    # the Collector start sending before Prometheus/Tempo were up, and early data was lost.
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          curl -fs http://127.0.0.1:3000/api/health >/dev/null &&
+          curl -fs http://127.0.0.1:9090/-/ready >/dev/null &&
+          curl -fs http://127.0.0.1:3200/ready >/dev/null &&
+          bash -c 'exec 3<>/dev/tcp/127.0.0.1/4318'
+      interval: 5s
+      timeout: 5s
+      retries: 60
+
+  # Optional front door: remove this service (and publish lgtm's 4318 instead)
+  # if you only need traces.
+  collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      - "4318:4318" # OTLP/HTTP, point the target-server destination here
+    depends_on:
+      lgtm:
+        condition: service_healthy
+
+volumes:
+  lgtm_data:

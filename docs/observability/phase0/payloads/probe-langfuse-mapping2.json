@@ -1,0 +1,383 @@
+{
+	"resourceSpans": [
+		{
+			"resource": {
+				"attributes": [
+					{
+						"key": "service.name",
+						"value": {
+							"stringValue": "target-server"
+						}
+					}
+				]
+			},
+			"scopeSpans": [
+				{
+					"scope": {
+						"name": "probe"
+					},
+					"spans": [
+						{
+							"traceId": "8e1b222a0c36b436a59ce966b46cf93f",
+							"spanId": "bbbb000000000001",
+							"name": "E full step-1 as in trace.json",
+							"kind": 1,
+							"startTimeUnixNano": "1790000000500000000",
+							"endTimeUnixNano": "1790000003000000000",
+							"attributes": [
+								{
+									"key": "gen_ai.operation.name",
+									"value": {
+										"stringValue": "invoke_agent"
+									}
+								},
+								{
+									"key": "gen_ai.provider.name",
+									"value": {
+										"stringValue": "anthropic"
+									}
+								},
+								{
+									"key": "gen_ai.request.model",
+									"value": {
+										"stringValue": "claude-sonnet-4-5"
+									}
+								},
+								{
+									"key": "gen_ai.conversation.id",
+									"value": {
+										"stringValue": "session-demo-1"
+									}
+								},
+								{
+									"key": "gen_ai.usage.input_tokens",
+									"value": {
+										"intValue": "1200"
+									}
+								},
+								{
+									"key": "gen_ai.usage.output_tokens",
+									"value": {
+										"intValue": "340"
+									}
+								},
+								{
+									"key": "gen_ai.usage.cache_read.input_tokens",
+									"value": {
+										"intValue": "800"
+									}
+								},
+								{
+									"key": "gen_ai.usage.cache_write.input_tokens",
+									"value": {
+										"intValue": "100"
+									}
+								},
+								{
+									"key": "langfuse.observation.type",
+									"value": {
+										"stringValue": "generation"
+									}
+								},
+								{
+									"key": "langfuse.observation.model.name",
+									"value": {
+										"stringValue": "claude-sonnet-4-5"
+									}
+								},
+								{
+									"key": "langfuse.observation.usage_details",
+									"value": {
+										"stringValue": "{\"input\":1200,\"output\":340,\"cache_read_input_tokens\":800,\"cache_creation_input_tokens\":100}"
+									}
+								},
+								{
+									"key": "langfuse.observation.cost_details",
+									"value": {
+										"stringValue": "{\"total\":0.0123}"
+									}
+								},
+								{
+									"key": "target.cost.usd",
+									"value": {
+										"doubleValue": 0.0123
+									}
+								}
+							],
+							"status": {
+								"code": 1
+							}
+						},
+						{
+							"traceId": "8e1b222a0c36b436a59ce966b46cf93f",
+							"spanId": "bbbb000000000002",
+							"name": "F without gen_ai.operation.name",
+							"kind": 1,
+							"startTimeUnixNano": "1790000000500000000",
+							"endTimeUnixNano": "1790000003000000000",
+							"attributes": [
+								{
+									"key": "gen_ai.provider.name",
+									"value": {
+										"stringValue": "anthropic"
+									}
+								},
+								{
+									"key": "gen_ai.request.model",
+									"value": {
+										"stringValue": "claude-sonnet-4-5"
+									}
+								},
+								{
+									"key": "gen_ai.conversation.id",
+									"value": {
+										"stringValue": "session-demo-1"
+									}
+								},
+								{
+									"key": "gen_ai.usage.input_tokens",
+									"value": {
+										"intValue": "1200"
+									}
+								},
+								{
+									"key": "gen_ai.usage.output_tokens",
+									"value": {
+										"intValue": "340"
+									}
+								},
+								{
+									"key": "gen_ai.usage.cache_read.input_tokens",
+									"value": {
+										"intValue": "800"
+									}
+								},
+								{
+									"key": "gen_ai.usage.cache_write.input_tokens",
+									"value": {
+										"intValue": "100"
+									}
+								},
+								{
+									"key": "langfuse.observation.type",
+									"value": {
+										"stringValue": "generation"
+									}
+								},
+								{
+									"key": "langfuse.observation.model.name",
+									"value": {
+										"stringValue": "claude-sonnet-4-5"
+									}
+								},
+								{
+									"key": "langfuse.observation.usage_details",
+									"value": {
+										"stringValue": "{\"input\":1200,\"output\":340,\"cache_read_input_tokens\":800,\"cache_creation_input_tokens\":100}"
+									}
+								},
+								{
+									"key": "langfuse.observation.cost_details",
+									"value": {
+										"stringValue": "{\"total\":0.0123}"
+									}
+								},
+								{
+									"key": "target.cost.usd",
+									"value": {
+										"doubleValue": 0.0123
+									}
+								}
+							],
+							"status": {
+								"code": 1
+							}
+						},
+						{
+							"traceId": "8e1b222a0c36b436a59ce966b46cf93f",
+							"spanId": "bbbb000000000003",
+							"name": "G operation.name=chat",
+							"kind": 1,
+							"startTimeUnixNano": "1790000000500000000",
+							"endTimeUnixNano": "1790000003000000000",
+							"attributes": [
+								{
+									"key": "gen_ai.operation.name",
+									"value": {
+										"stringValue": "chat"
+									}
+								},
+								{
+									"key": "gen_ai.provider.name",
+									"value": {
+										"stringValue": "anthropic"
+									}
+								},
+								{
+									"key": "gen_ai.request.model",
+									"value": {
+										"stringValue": "claude-sonnet-4-5"
+									}
+								},
+								{
+									"key": "gen_ai.conversation.id",
+									"value": {
+										"stringValue": "session-demo-1"
+									}
+								},
+								{
+									"key": "gen_ai.usage.input_tokens",
+									"value": {
+										"intValue": "1200"
+									}
+								},
+								{
+									"key": "gen_ai.usage.output_tokens",
+									"value": {
+										"intValue": "340"
+									}
+								},
+								{
+									"key": "gen_ai.usage.cache_read.input_tokens",
+									"value": {
+										"intValue": "800"
+									}
+								},
+								{
+									"key": "gen_ai.usage.cache_write.input_tokens",
+									"value": {
+										"intValue": "100"
+									}
+								},
+								{
+									"key": "langfuse.observation.type",
+									"value": {
+										"stringValue": "generation"
+									}
+								},
+								{
+									"key": "langfuse.observation.model.name",
+									"value": {
+										"stringValue": "claude-sonnet-4-5"
+									}
+								},
+								{
+									"key": "langfuse.observation.usage_details",
+									"value": {
+										"stringValue": "{\"input\":1200,\"output\":340,\"cache_read_input_tokens\":800,\"cache_creation_input_tokens\":100}"
+									}
+								},
+								{
+									"key": "langfuse.observation.cost_details",
+									"value": {
+										"stringValue": "{\"total\":0.0123}"
+									}
+								},
+								{
+									"key": "target.cost.usd",
+									"value": {
+										"doubleValue": 0.0123
+									}
+								}
+							],
+							"status": {
+								"code": 1
+							}
+						},
+						{
+							"traceId": "8e1b222a0c36b436a59ce966b46cf93f",
+							"spanId": "bbbb000000000004",
+							"name": "H without cache_* usage keys in usage_details",
+							"kind": 1,
+							"startTimeUnixNano": "1790000000500000000",
+							"endTimeUnixNano": "1790000003000000000",
+							"attributes": [
+								{
+									"key": "gen_ai.operation.name",
+									"value": {
+										"stringValue": "invoke_agent"
+									}
+								},
+								{
+									"key": "gen_ai.provider.name",
+									"value": {
+										"stringValue": "anthropic"
+									}
+								},
+								{
+									"key": "gen_ai.request.model",
+									"value": {
+										"stringValue": "claude-sonnet-4-5"
+									}
+								},
+								{
+									"key": "gen_ai.conversation.id",
+									"value": {
+										"stringValue": "session-demo-1"
+									}
+								},
+								{
+									"key": "gen_ai.usage.input_tokens",
+									"value": {
+										"intValue": "1200"
+									}
+								},
+								{
+									"key": "gen_ai.usage.output_tokens",
+									"value": {
+										"intValue": "340"
+									}
+								},
+								{
+									"key": "gen_ai.usage.cache_read.input_tokens",
+									"value": {
+										"intValue": "800"
+									}
+								},
+								{
+									"key": "gen_ai.usage.cache_write.input_tokens",
+									"value": {
+										"intValue": "100"
+									}
+								},
+								{
+									"key": "langfuse.observation.type",
+									"value": {
+										"stringValue": "generation"
+									}
+								},
+								{
+									"key": "langfuse.observation.model.name",
+									"value": {
+										"stringValue": "claude-sonnet-4-5"
+									}
+								},
+								{
+									"key": "langfuse.observation.usage_details",
+									"value": {
+										"stringValue": "{\"input\":1200,\"output\":340}"
+									}
+								},
+								{
+									"key": "langfuse.observation.cost_details",
+									"value": {
+										"stringValue": "{\"total\":0.0123}"
+									}
+								},
+								{
+									"key": "target.cost.usd",
+									"value": {
+										"doubleValue": 0.0123
+									}
+								}
+							],
+							"status": {
+								"code": 1
+							}
+						}
+					]
+				}
+			]
+		}
+	]
+}

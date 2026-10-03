@@ -1,0 +1,7 @@
+# Moves Langfuse's web UI from host port 3000 (taken by Grafana in the other
+# stack) to 3001. Use together with the official, unmodified file:
+#   docker compose -f docker-compose.yml -f docker-compose.local-ports.yml --env-file .env.example up -d
+services:
+  langfuse-web:
+    ports: !override
+      - 3001:3000

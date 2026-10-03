@@ -53,6 +53,7 @@ Example dedicated URL: eDreams → `https://edreams.targetworkflows.com`
 | `TARGET_SEED_ADMIN_PASSWORD` | unique strong password (store in password manager; used only on first boot of an empty database) |
 | `TARGET_AUTH_SECRET` | random 32+ bytes hex |
 | `TARGET_INGEST_TOKEN` | random token |
+| `TARGET_SECRETS_KEY` | _(optional, needed only for OpenTelemetry export)_ 64 hex characters from `openssl rand -hex 32`, unique per tenant, set as a secret and different from `TARGET_AUTH_SECRET`; see [`otel-export.md`](otel-export.md) |
 | `TARGET_DEVICE_LINKING_MODE` | `optional` |
 | `TARGET_SMTP_URL` | same Resend SMTP URL as production (`smtps://resend:re_…@smtp.resend.com:465`) |
 | `TARGET_GOOGLE_CLIENT_ID` | shared OAuth client (or a per-tenant client) |

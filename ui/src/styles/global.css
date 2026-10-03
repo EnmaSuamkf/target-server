@@ -1434,3 +1434,26 @@ tbody tr.wf-row--selected, tbody tr.wf-row--selected:hover { background: var(--a
 .series-notice { padding: var(--space-1) var(--space-2); border-left: 3px solid var(--warn-200); background: var(--warn-50); font-size: var(--text-sm); }
 .series-notice--danger { border-left-color: var(--danger-200); background: var(--danger-50); }
 .series-list { display: grid; gap: var(--space-3); }
+
+/* Telemetry export panel */
+.otel-fieldset { border: 0; margin: 0; padding: 0; min-width: 0; display: flex; flex-direction: column; gap: var(--space-3); }
+.otel-fieldset:disabled { opacity: 0.6; }
+.otel-header-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) auto; gap: var(--space-2); align-items: center; margin-bottom: var(--space-2); }
+.otel-help { font-size: var(--text-sm); color: var(--text-muted); line-height: 1.5; }
+.otel-warning { color: var(--warn-700); }
+@media (max-width: 640px) {
+	.otel-header-row { grid-template-columns: 1fr; }
+}
+.otel-status { display: grid; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); gap: var(--space-3); margin: var(--space-3) 0; }
+.otel-status dt { font-size: var(--text-xs); color: var(--text-subtle); }
+.otel-status dd { margin: 0; font-size: var(--text-sm); overflow-wrap: anywhere; }
+.otel-status__error { color: var(--danger-700); }
+.otel-org { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-4); margin: var(--space-3) 0; }
+.otel-org__name, .otel-org__id { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); min-width: 0; }
+.otel-org__label { font-size: var(--text-xs); color: var(--text-subtle); }
+.otel-org .hint { flex-basis: 100%; margin: 0; }
+.copy-value { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); min-width: 0; }
+.copy-value__text { overflow-wrap: anywhere; user-select: all; }
+.copy-value__status { font-size: var(--text-xs); color: var(--text-subtle); }
+.copy-value__status[data-state="failed"] { color: var(--danger-700); }
+.otel-test { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }

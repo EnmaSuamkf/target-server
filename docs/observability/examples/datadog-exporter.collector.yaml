@@ -1,0 +1,34 @@
+# Alternative: the classic Datadog exporter. Datadog now recommends the otlp_http setup
+# for new Collector configurations; this one is kept for people already on the exporter.
+# Source: https://docs.datadoghq.com/opentelemetry/setup/collector_exporter/datadog_exporter.md
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    send_batch_max_size: 100
+    send_batch_size: 10
+    timeout: 10s
+
+connectors:
+  datadog/connector:
+
+exporters:
+  datadog/exporter:
+    api:
+      site: ${env:DD_SITE}
+      key: ${env:DD_API_KEY}
+
+service:
+  pipelines:
+    metrics:
+      receivers: [otlp, datadog/connector]
+      processors: [batch]
+      exporters: [datadog/exporter]
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [datadog/connector, datadog/exporter]

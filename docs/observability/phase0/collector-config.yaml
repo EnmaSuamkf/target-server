@@ -1,0 +1,30 @@
+# Plain OpenTelemetry Collector (contrib) that receives OTLP/HTTP and forwards to otel-lgtm.
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  # Prometheus (in otel-lgtm) drops delta metrics silently; convert them to cumulative.
+  deltatocumulative: {}
+  batch: {}
+
+exporters:
+  otlphttp/lgtm:
+    endpoint: http://lgtm:4318
+    # Default encoding is protobuf; this spike keeps it. Set "json" to forward JSON instead.
+    # encoding: json
+  debug:
+    verbosity: basic
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlphttp/lgtm, debug]
+    metrics:
+      receivers: [otlp]
+      processors: [deltatocumulative, batch]
+      exporters: [otlphttp/lgtm, debug]

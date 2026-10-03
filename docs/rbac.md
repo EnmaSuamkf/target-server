@@ -42,6 +42,14 @@ retired; they were replaced by create / edit / delete / import / export.
 | `rci.delete` | RCI | Delete RCI resource sets stored on this server |
 | `rci.import` | RCI | Import RCI resource sets stored on this server |
 | `rci.export` | RCI | Export RCI resource sets stored on this server |
+| `pricing.read` | Pricing | View the token price table and cost estimates |
+| `pricing.edit` | Pricing | Add, change and delete token price rules |
+| `pricing.import` | Pricing | Import a token price table |
+| `pricing.export` | Pricing | Export the token price table |
+| `telemetry.read` | Telemetry | View the OpenTelemetry export settings and status. Header values are never returned, only names and the last 4 characters. |
+| `telemetry.write` | Telemetry | Save, test and delete the OpenTelemetry export destination and its credentials (`PUT`/`POST`/`DELETE /api/settings/otel`). Granting it lets the holder point the organization's telemetry at any permitted endpoint, so treat it like `users.manage`. |
+
+New permissions are granted to the built-in `admin` role (which always holds the whole catalogue), exactly like `pricing.*`; custom roles get them only when an admin assigns them. See [otel-export.md](otel-export.md).
 
 These `templates.*` / `tcp-tools.*` / `rci.*` IDs are server-owned Agent Resources catalog permissions. They are distinct from the client-scoped `client.templates.*` / `client.tcp-tools.*` / `client.rci.*` IDs that gate per-client Remote resources.
 
