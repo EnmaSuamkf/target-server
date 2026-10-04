@@ -103,6 +103,20 @@ function toDraft(settings: OtelSettings): Draft {
 	};
 }
 
+/** True when the test error is the metrics probe rejected with HTTP 400 (traces were accepted before it). */
+function isMetricsRejected(result: { ok: boolean; error?: string | null }): boolean {
+	return !result.ok && /^metrics: HTTP 400\b/.test(result.error ?? "");
+}
+
+/** True for *.grafana.net hosts. */
+function isGrafanaCloud(endpoint: string): boolean {
+	try {
+		return new URL(endpoint).hostname.toLowerCase().endsWith(".grafana.net");
+	} catch {
+		return false;
+	}
+}
+
 /** Error text for a draft the server would reject anyway, or null. */
 function validate(d: Draft): string | null {
 	if (d.enabled && !d.endpoint.trim()) return "Enter an endpoint URL before turning the export on.";
@@ -509,6 +523,13 @@ export function OtelPanel({ canEdit }: { canEdit: boolean }) {
 									{testResult.error ?? "The destination did not accept the test data."}
 								</p>
 							)
+						) : null}
+						{testResult && isMetricsRejected(testResult) ? (
+							<p className="msg otel-warning" role="note" data-state="test-metrics-rejected">
+								{isGrafanaCloud(settings?.config.endpoint ?? "")
+									? "Grafana Cloud rejects Target's DELTA metrics (it expects cumulative). Traces were accepted. Uncheck Metrics, Save, and test again; otherwise real exports will fail too."
+									: "Traces were accepted but the metrics were rejected. Uncheck Metrics, Save, and test again."}
+							</p>
 						) : null}
 						{canEdit ? (
 							<div className="catalog-toolbar">

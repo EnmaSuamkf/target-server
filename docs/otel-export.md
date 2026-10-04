@@ -320,7 +320,14 @@ settings above for the current organization.
   **Failed** with the status when there is one and the server's error, such as
   `traces: HTTP 401` (check the Authorization header) or `traces: network error:
   ECONNREFUSED` (wrong host or port). It never shows header values and does not
-  change "last successful export" or "last error".
+  change "last successful export" or "last error". Every saved signal is
+  tested, in order, and the first failure is reported. If the error is
+  `metrics: HTTP 400`, traces were accepted and only metrics were rejected, so
+  the panel adds a warning: uncheck **Metrics**, **Save**, and test again. When
+  the saved host is `*.grafana.net` the warning says Grafana Cloud rejects
+  Target's DELTA metrics (it expects cumulative); other hosts get a shorter hint
+  that does not name Grafana. The warning is not shown on success, on a traces
+  failure, or merely because Test was clicked.
 - **Status block.** Last successful export (relative and absolute time), last
   error and the outbox counts, from `status` in `GET /api/settings/otel`.
 - **States.** Loading, not configured, configured (on / off), read-only, API
