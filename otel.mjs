@@ -474,8 +474,51 @@ const SUM_METRICS = {
 };
 
 /**
- * Event rows → an ExportMetricsServiceRequest with DELTA sums and one delta
- * histogram, plus the updated usage state.
+ * Fold this batch's deltas into the persisted running totals (cumulative mode).
+ * Returns the full updated series map (`seriesByKey` is not mutated) and the
+ * keys this batch touched. A series' start time is fixed when it is first seen,
+ * so the destination never mistakes a later batch for a counter reset.
+ */
+function mergeSeries(seriesByKey, acc, startTimeUnixNano) {
+	const series = { ...seriesByKey };
+	const changed = [];
+	const key = (item) => `${item.name}|${JSON.stringify(item.attributes)}`;
+	for (const item of acc.sums.values()) {
+		const k = key(item);
+		const prev = series[k];
+		series[k] = { key: k, kind: "sum", name: item.name, attributes: item.attributes, value: (prev?.value ?? 0) + item.value, startTimeUnixNano: prev?.startTimeUnixNano ?? startTimeUnixNano };
+		changed.push(k);
+	}
+	for (const item of acc.histograms.values()) {
+		const k = key(item);
+		const prev = series[k];
+		series[k] = {
+			key: k,
+			kind: "histogram",
+			name: item.name,
+			attributes: item.attributes,
+			count: (prev?.count ?? 0) + item.count,
+			sum: (prev?.sum ?? 0) + item.sum,
+			min: prev ? Math.min(prev.min, item.min) : item.min,
+			max: prev ? Math.max(prev.max, item.max) : item.max,
+			buckets: item.buckets.map((n, i) => n + (prev?.buckets?.[i] ?? 0)),
+			startTimeUnixNano: prev?.startTimeUnixNano ?? startTimeUnixNano,
+		};
+		changed.push(k);
+	}
+	return { series, changed };
+}
+
+/**
+ * Event rows → an ExportMetricsServiceRequest with sums and one histogram,
+ * plus the updated usage state.
+ *
+ * `temporality` "delta" (default) emits this batch's deltas as they are
+ * (aggregationTemporality 1) and touches no series. "cumulative" adds them onto
+ * the persisted running totals in `seriesByKey` and emits the totals
+ * (aggregationTemporality 2) with the series' own start time; the caller
+ * persists `series`/`changedSeries` together with the usage state, only after
+ * the destination accepted the request.
  *
  * Only the LAST usage.snapshot of each session in the batch is read (it is a
  * running total), and it is diffed against `stateBySession`, so replaying the
@@ -487,9 +530,11 @@ const SUM_METRICS = {
  * gen_ai.request.model (plus token.type on target.tokens): workflow, session,
  * user and step ids would explode the cardinality, and live on traces.
  *
- * Returns `{request, state}`; `request` is null when there is nothing to send.
+ * Returns `{request, state, series, changedSeries}`; `request` is null when there
+ * is nothing to send. `series` is `seriesByKey` plus this batch (unchanged in delta mode).
  */
-export function buildMetrics({ events, orgId, serviceVersion, stateBySession = {}, rules = [], runnerByWorkflow = {}, options = {} } = {}) {
+export function buildMetrics({ events, orgId, serviceVersion, stateBySession = {}, rules = [], runnerByWorkflow = {}, options = {}, temporality = "delta", seriesByKey = {} } = {}) {
+	const cumulative = temporality === "cumulative";
 	const { sendContent = false, orgName = null } = options;
 	const exportedOrgName = sendContent ? (orgName ?? orgId) : undefined;
 	const state = { ...stateBySession };
@@ -543,11 +588,24 @@ export function buildMetrics({ events, orgId, serviceVersion, stateBySession = {
 		if (delta.costDeltaUsd !== null) acc.add("target.cost.usd", dims(row.workflow_id, base.model, base.runner), delta.costDeltaUsd);
 	}
 
-	const startTimeUnixNano = first;
 	const timeUnixNano = last;
+	let sums = [...acc.sums.values()];
+	let histograms = [...acc.histograms.values()];
+	let series = seriesByKey;
+	let changedSeries = [];
+	if (cumulative) {
+		const merged = mergeSeries(seriesByKey, acc, first);
+		series = merged.series;
+		changedSeries = merged.changed;
+		// Every touched series is exported with its running total; untouched ones are not re-sent.
+		sums = changedSeries.map((k) => series[k]).filter((x) => x.kind === "sum");
+		histograms = changedSeries.map((k) => series[k]).filter((x) => x.kind === "histogram");
+	}
+	const aggregationTemporality = cumulative ? TEMPORALITY_CUMULATIVE : TEMPORALITY_DELTA;
+	const startOf = (p) => (cumulative ? p.startTimeUnixNano : first);
 	const metrics = [];
 	const byName = new Map();
-	for (const s of acc.sums.values()) byName.set(s.name, [...(byName.get(s.name) ?? []), s]);
+	for (const s of sums) byName.set(s.name, [...(byName.get(s.name) ?? []), s]);
 	for (const [name, points] of byName) {
 		const def = SUM_METRICS[name];
 		metrics.push({
@@ -555,27 +613,27 @@ export function buildMetrics({ events, orgId, serviceVersion, stateBySession = {
 			description: def.description,
 			unit: def.unit,
 			sum: {
-				aggregationTemporality: TEMPORALITY_DELTA,
+				aggregationTemporality,
 				isMonotonic: true,
 				dataPoints: points.map((p) => ({
 					attributes: p.attributes,
-					startTimeUnixNano,
+					startTimeUnixNano: startOf(p),
 					timeUnixNano,
 					...(def.double ? { asDouble: p.value } : { asInt: BigInt(Math.round(p.value)).toString() }),
 				})),
 			},
 		});
 	}
-	if (acc.histograms.size) {
+	if (histograms.length) {
 		metrics.push({
 			name: "target.step.duration",
 			description: "Duration of workflow step attempts",
 			unit: "s",
 			histogram: {
-				aggregationTemporality: TEMPORALITY_DELTA,
-				dataPoints: [...acc.histograms.values()].map((h) => ({
+				aggregationTemporality,
+				dataPoints: histograms.map((h) => ({
 					attributes: h.attributes,
-					startTimeUnixNano,
+					startTimeUnixNano: startOf(h),
 					timeUnixNano,
 					count: String(h.count),
 					sum: h.sum,
@@ -588,11 +646,13 @@ export function buildMetrics({ events, orgId, serviceVersion, stateBySession = {
 		});
 	}
 
-	if (metrics.length === 0) return { request: null, state };
+	if (metrics.length === 0) return { request: null, state, series, changedSeries: [] };
 	return {
 		request: {
 			resourceMetrics: [{ resource: resourceBlock({ org: orgId, orgName: exportedOrgName, serviceVersion }), scopeMetrics: [{ scope: scopeBlock({ serviceVersion }), metrics }] }],
 		},
 		state,
+		series,
+		changedSeries,
 	};
 }

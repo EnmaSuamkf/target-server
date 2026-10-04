@@ -757,6 +757,7 @@ export type EstimateResponse =
 
 /** The two OTLP signals an organization can export. */
 export type OtelSignal = "traces" | "metrics";
+export type OtelMetricsTemporality = "cumulative" | "delta";
 
 /** A stored header: the name plus `••••` and the last 4 characters; the value never leaves the server. */
 export interface OtelMaskedHeader {
@@ -771,6 +772,7 @@ export interface OtelConfig {
 	headers: OtelMaskedHeader[];
 	signals: OtelSignal[];
 	sendContent: boolean;
+	metricsTemporality: OtelMetricsTemporality;
 	langfuseAttrs: boolean;
 	updatedAt: string | null;
 }
@@ -804,6 +806,7 @@ export interface OtelSettingsInput {
 	headers?: Record<string, string | null>;
 	signals?: OtelSignal[];
 	sendContent?: boolean;
+	metricsTemporality?: OtelMetricsTemporality;
 	langfuseAttrs?: boolean;
 }
 

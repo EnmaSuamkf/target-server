@@ -38,12 +38,16 @@ All metrics use the scope `{ name: "target-server.otel", version: <service.versi
 | `target.workflow.failed` | `workflow.status_changed` with `to = failed` | Sum | `{workflow}` | 1 per event | true |
 
 - Histogram explicit bounds (seconds): `[1, 5, 10, 30, 60, 120, 300, 600, 1800, 3600]`; `bucketCounts` has `bounds.length + 1` entries; `count`, `bucketCounts` are 64-bit strings; `sum`, `min`, `max` are doubles.
-- **Temporality** ([phase0 Q3](phase0-findings.md)): OTEL 1 implements **DELTA only** (`aggregationTemporality: 1`), as the workflow brief requires. otel-lgtm accepts delta metrics with `200` and then silently drops them, so a delta destination must be a Collector with the `deltatocumulative` processor. Native cumulative output is not implemented in OTEL 1 and is left for a later step if a direct Prometheus-style destination is needed.
+- **Temporality** ([phase0 Q3](phase0-findings.md)): configurable per organization (`metricsTemporality`, see [otel-export.md](../otel-export.md)); `buildMetrics` takes `temporality: "delta" | "cumulative"` (default `"delta"`). The delta math above (usage diffed against the caller's state, per-event counters, per-batch histogram) is the same in both modes.
+  - **`delta`** (`aggregationTemporality: 1`): the batch's deltas are emitted as they are; no series are kept. otel-lgtm accepts them with `200` and then silently drops them, so a delta destination must be a Collector with the `deltatocumulative` processor. Grafana Cloud (Mimir) rejects DELTA with `400`. Existing saved configurations stay `delta`.
+  - **`cumulative`** (`aggregationTemporality: 2`, the default for a new configuration; phase0's "emit cumulative by default"): the batch's deltas are added onto persisted per-series running totals and the totals are emitted, not the deltas. A series is a metric name plus its canonical attribute JSON (`target.org`, `target.org.name` when Send content is on, `target.runner`, `gen_ai.request.model`, `token.type` on `target.tokens`) and is stored in `otel_metric_series` (sums: value; histogram: count, sum, min, max, bucket counts over the same bounds, merged as min of mins and max of maxes). `buildMetrics` takes the loaded map as `seriesByKey` and returns the full updated `series` plus `changedSeries`; only the series a batch touched are emitted.
+  - **Stable start time.** In cumulative mode every data point's `startTimeUnixNano` is the series' persisted start (the earliest event time of the batch that first created it), never the start of the current batch; `timeUnixNano` is the latest event in the batch. A start time that moved every batch would look like a counter reset to Prometheus / Mimir and make `increase()` wrong while the destination still answered `200`.
+  - **Commit.** The caller (the worker) persists `series` in the same transaction as the outbox `sent` mark and `otel_export_state`, and only after the destination accepted the request. A failed or interrupted delivery leaves both unadvanced, so the retry recomputes the same deltas and emits the same totals; a replay with the returned state and series exports nothing. Changing the temporality on save clears `otel_metric_series` (cumulative restarts at 0, DELTA never reuses stale totals) but not `otel_export_state`.
 - Langfuse has no metrics endpoint (phase0 Q4). The caller is expected to enable traces only for it; the builder does not know vendors.
 - **Allowed attributes, only these three** (plus `target.org.name` when the organization's Send content setting is on; it is 1:1 with `target.org`, so it adds no cardinality, and is also set on the resource): `target.org`, `target.runner`, `gen_ai.request.model`. `gen_ai.request.model` is omitted when the snapshot has no model. `target.tokens` additionally has `token.type` (a dimension of that one metric with four fixed values, not an identifier). Never `workflow_id`, `session_id`, user, step id, or any free text (cardinality). Phase0 Q5: only datapoint attributes become Prometheus labels, which is why `target.org` is repeated on the datapoint and not only on the resource.
 - Durations and counters are keyed by (org, runner, model) after aggregation; one datapoint per distinct attribute set and metric. Step and workflow metrics have no model attribute. Zero-valued sums are not emitted.
 - Only the **last** `usage.snapshot` of each session in a batch is read and diffed against the caller's state, so intermediate snapshots of a batch add nothing and a replay with the returned state exports no usage. Step and workflow counters are per event: the caller must deliver each event once.
-- Every data point of a request uses `startTimeUnixNano` = earliest and `timeUnixNano` = latest event time in the batch.
+- In delta mode every data point of a request uses `startTimeUnixNano` = earliest and `timeUnixNano` = latest event time in the batch; in cumulative mode see **Stable start time** above.
 
 ## 3. Attribute catalogue
 
@@ -150,7 +154,7 @@ Encoding rules: lowerCamelCase keys, hex ids, enums as **integers**, all `*UnixN
 | `Status.StatusCode` `STATUS_CODE_OK` | completed workflow, done step | **1** | [trace.proto](https://github.com/open-telemetry/opentelemetry-proto/blob/main/opentelemetry/proto/trace/v1/trace.proto); used as `"status": {"code": 1}` in the payloads phase0 verified ([phase0-findings.md §2.1](phase0-findings.md)) |
 | `Status.StatusCode` `STATUS_CODE_ERROR` | failed workflow or step | **2** | [trace.proto](https://github.com/open-telemetry/opentelemetry-proto/blob/main/opentelemetry/proto/trace/v1/trace.proto); `"code": 2` in [phase0-findings.md §2.1](phase0-findings.md) |
 | `AggregationTemporality` `DELTA` | `temporality: "delta"` | **1** | [metrics.proto](https://github.com/open-telemetry/opentelemetry-proto/blob/main/opentelemetry/proto/metrics/v1/metrics.proto) (`UNSPECIFIED=0, DELTA=1, CUMULATIVE=2`); `"aggregationTemporality": 1` in [phase0-findings.md §2.2](phase0-findings.md) |
-| `AggregationTemporality` `CUMULATIVE` | `temporality: "cumulative"` (default) | **2** | [metrics.proto](https://github.com/open-telemetry/opentelemetry-proto/blob/main/opentelemetry/proto/metrics/v1/metrics.proto); [phase0-findings.md §2.3 last paragraph](phase0-findings.md) |
+| `AggregationTemporality` `CUMULATIVE` | `temporality: "cumulative"` (default for a new configuration; `buildMetrics` itself defaults to `"delta"`) | **2** | [metrics.proto](https://github.com/open-telemetry/opentelemetry-proto/blob/main/opentelemetry/proto/metrics/v1/metrics.proto); [phase0-findings.md §2.3 last paragraph](phase0-findings.md) |
 
 The step that implements ids and encoding (OTEL 1 step 2) must assert these integers in tests and re-check them against the linked `.proto` files. Status messages are never sent (they would carry error text).
 
@@ -240,9 +244,10 @@ export function computeUsageDelta({ previousState, snapshot, rules, agent, at })
 	costDeltaUsd: number | null, costSource: "hub"|"pricing"|"unpriced", partial: boolean, model,
 	nextState: { tokens: {...}, costUsd: number },                   // per (workflow, session); plain JSON
 }
-export function buildMetrics({ events, orgId, serviceVersion, stateBySession = {}, rules = [], runnerByWorkflow = {} }): {
-	request: { resourceMetrics: [...] } | null,                      // DELTA temporality, null when nothing to send
+export function buildMetrics({ events, orgId, serviceVersion, stateBySession = {}, rules = [], runnerByWorkflow = {}, options = {}, temporality = "delta", seriesByKey = {} }): {
+	request: { resourceMetrics: [...] } | null,                      // aggregationTemporality per `temporality`, null when nothing to send
 	state,                                                           // updated stateBySession, keyed "workflowId:sessionId"
+	series, changedSeries,                                           // cumulative only: updated seriesByKey and the keys this batch touched
 }
 export const STEP_DURATION_BOUNDS: number[]
 
@@ -274,7 +279,7 @@ Client behavior: `POST` with `Content-Type: application/json`; caller headers me
 
 ## 9. Deviations from the task text, per phase0
 
-1. **Metric temporality is delta only in OTEL 1** (the workflow brief requires it); cumulative output is not implemented (section 2). Phase0 shows delta metrics sent straight to otel-lgtm are accepted and dropped silently ([phase0-findings.md Q2, Q3, §4 item 4](phase0-findings.md)).
+1. **Metric temporality is configurable.** OTEL 1 shipped DELTA only (the workflow brief required it); cumulative output with persisted series totals was added later and is the default for a new configuration (section 2). Phase0 shows delta metrics sent straight to otel-lgtm are accepted and dropped silently ([phase0-findings.md Q2, Q3, §4 item 4](phase0-findings.md)).
 2. **With `langfuse: true` the session span uses `gen_ai.operation.name = "chat"`** (name `chat <model or runner>`), because Langfuse ignores model, usage and cost on `invoke_agent` spans ([Q4, §4 item 5](phase0-findings.md)). Without the flag it stays `invoke_agent`.
 3. Metrics are not meaningful for Langfuse (no metrics store); the caller should not enable them there ([§4](phase0-findings.md)).
 4. Grafana Cloud and Datadog direct JSON are unverified ([§5](phase0-findings.md)); the generic client does not special-case them.

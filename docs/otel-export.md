@@ -70,6 +70,7 @@ Any other method on these paths is `405 {"error":"method not allowed"}`.
     "headers": [{ "name": "Authorization", "masked": "••••1234" }],
     "signals": ["traces", "metrics"],
     "sendContent": true,
+    "metricsTemporality": "cumulative",
     "langfuseAttrs": false,
     "updatedAt": "2026-10-03T10:00:00.000Z"
   },
@@ -87,7 +88,7 @@ Any other method on these paths is `405 {"error":"method not allowed"}`.
 
 An organization that never saved settings gets the defaults: `enabled: false`,
 `endpoint: ""`, `headers: []`, `signals: ["traces","metrics"]`,
-`sendContent: true`, `langfuseAttrs: false`, null timestamps.
+`sendContent: true`, `metricsTemporality: "cumulative"`, `langfuseAttrs: false`, null timestamps.
 
 `sendContent` is **on by default for an organization that has never saved a
 configuration**: GET reports `true`, and the first `PUT` that omits it stores
@@ -96,6 +97,17 @@ configuration that omits it keeps the stored value. **Existing configurations
 are never changed**: no migration or startup code rewrites `send_content`, so an
 organization that saved it off stays off. The default lives in code, not in the
 SQLite column default, so no table is rebuilt.
+
+`metricsTemporality` (`"cumulative"` or `"delta"`) follows the same rule:
+**cumulative for an organization that has never saved a configuration** (GET
+reports it, and the first `PUT` that omits it stores `cumulative`), the stored
+value for an existing configuration when a `PUT` omits it. **Existing
+configurations stay `delta`**: `migrateOtelSchema` adds the column with
+`ALTER TABLE ... ADD COLUMN metrics_temporality TEXT NOT NULL DEFAULT 'delta'`,
+so every row saved before the field existed keeps sending what it always sent
+(DELTA), and nothing rewrites it at migrate or startup. Cumulative is what
+Grafana Cloud / Prometheus expect; DELTA is for a Collector that already
+converts (`deltatocumulative`).
 
 - `organization` is the current organization: its `id` (the value exported as
   `target.org`) and its `name` from the control database (the id when the name
@@ -121,6 +133,7 @@ All fields are optional except that **`endpoint` is required (non-empty) when
 | `headers` | object `name -> value`, max 20 | The **full** header set. See below. Names: letters, digits and `` !#$%&'*+.^_`|~- `` (max 100). Values: string up to 4096 |
 | `signals` | array of `"traces"`, `"metrics"` | 1 or 2 unique entries |
 | `sendContent` | boolean | Default **true** for a new configuration. Adds the workflow name and the organization name (`target.org.name`); step descriptions, acceptance criteria, error messages and conversation content are never exported |
+| `metricsTemporality` | `"cumulative"` or `"delta"` | Default **cumulative** for a new configuration; an omitted field on an existing one keeps the stored value (`delta` for rows saved before the field existed). Any other value is a `422`. Changing the stored value deletes the saved metric series (see Storage); the worker and **Test connection** both use the saved value |
 | `langfuseAttrs` | boolean | Adds the `langfuse.*` attributes |
 
 `headers` semantics: a name with a value sets (and encrypts) it; a name whose
@@ -174,14 +187,15 @@ values.
 
 ## Storage
 
-Three tables, created idempotently in **each organization's** SQLite file
+Four tables, created idempotently in **each organization's** SQLite file
 (`migrateOtelSchema` in `db.mjs`):
 
 | Table | Purpose |
 | --- | --- |
-| `otel_exports` | One row (`id = 1`): `enabled`, `endpoint`, `headers_enc`, `signals` (`traces,metrics`), `send_content` (column default 0; the application treats a new configuration as 1, see Settings body), `langfuse_attrs` (0), `enabled_at`, `last_ok_at`, `last_error`, `updated_at` |
+| `otel_exports` | One row (`id = 1`): `enabled`, `endpoint`, `headers_enc`, `signals` (`traces,metrics`), `send_content` (column default 0; the application treats a new configuration as 1, see Settings body), `metrics_temporality` (`cumulative` or `delta`; column default `delta`, added with `ALTER TABLE` to existing files; the application treats a new configuration as `cumulative`), `langfuse_attrs` (0), `enabled_at`, `last_ok_at`, `last_error`, `updated_at` |
 | `otel_outbox` | One row per event to export: `event_id` (unique), `kind`, `status` (`pending`, `sent`, `dead`), `attempts`, `next_attempt_at`, `created_at` |
-| `otel_export_state` | Per `workflow_id` + `session_id`: last exported cumulative input / output / cache-read / cache-creation tokens and cost (`last_cost_usd`), `updated_at`. This is the base for metric deltas |
+| `otel_export_state` | Per `workflow_id` + `session_id`: last exported cumulative input / output / cache-read / cache-creation tokens and cost (`last_cost_usd`), `updated_at`. This is the base for metric deltas, and it is used in both temporality modes; it is **not** reset when the temporality changes |
+| `otel_metric_series` | Only used in cumulative mode: one row per metric series (`series_key` = metric name + canonical attribute JSON) with the running total (`value` for sums; `count`, `sum`, `min`, `max`, `buckets_json` for the step-duration histogram), `attributes_json`, `start_time_unix_nano` (when the series was first exported, never changed) and `updated_at`. Cleared when `metrics_temporality` changes on save and by `DELETE /api/settings/otel`. DELTA never writes it |
 
 `headers_enc` is a JSON object `{ "<header name>": "<envelope>" }`: names are
 plain, **each value is encrypted separately**. A raw `SELECT` never shows a
@@ -205,11 +219,16 @@ header value.
    - claims due `pending` rows in batches of 200 (up to 5 batches per pass),
      skips events received before `enabled_at`, and builds the requests with
      `otel.mjs` using the organization's `pricing_rules` and `otel_export_state`;
-   - sends traces then metrics, honouring `signals`, `sendContent` and
-     `langfuseAttrs`, with one attempt per pass.
+   - sends traces then metrics, honouring `signals`, `sendContent`,
+     `langfuseAttrs` and `metricsTemporality`, with one attempt per pass. In
+     `delta` mode the metrics carry this batch's deltas
+     (`aggregationTemporality: 1`). In `cumulative` mode the same deltas are
+     added onto the saved `otel_metric_series` totals and the totals are sent
+     (`aggregationTemporality: 2`) with the series' own start time.
 3. **Outcome.**
-   - Success (2xx): rows become `sent` and the new export state is written **in
-     the same transaction**; `last_ok_at` is set and `last_error` cleared. A
+   - Success (2xx): rows become `sent` and the new export state (and, in
+     cumulative mode, the updated metric series) is written **in the same
+     transaction**; `last_ok_at` is set and `last_error` cleared. A
      `partialSuccess` reply is logged.
    - Retryable failure (`429`, `502`, `503`, `504`, network error, timeout): rows
      stay `pending`, `attempts` increases and `next_attempt_at` moves out by
@@ -218,11 +237,13 @@ header value.
      rows become `dead` and `last_error` is set.
 
 Delivery is **at-least-once**. Traces have deterministic ids, so a re-send is
-harmless. Metrics are DELTA sums and OTLP has no idempotency key: if the
+harmless. OTLP has no idempotency key for metrics. In DELTA mode, if the
 process stops after the destination accepted a metrics request but before the
 commit, the next pass re-sends that batch with the same deltas (the state was
 not advanced, so they are never doubled in size) and the destination counts it
-twice. The window is small but real. If a traces request succeeds and the
+twice. In cumulative mode the state and series are not advanced either, so the
+retry emits the same running totals and the destination simply keeps the latest
+value. The window is small but real in DELTA mode. If a traces request succeeds and the
 metrics request then fails, the retry re-sends the traces.
 
 `dead` rows are not retried. Their `usage.snapshot` totals are cumulative, so a
@@ -296,21 +317,38 @@ settings above for the current organization.
   testing need `telemetry.write`; without it the form is read-only and the Save
   and Test buttons are hidden. Both permissions are in the role editor.
 - **Form.** Enabled switch, endpoint URL, header rows, Traces / Metrics
-  checkboxes, "Add Langfuse attributes" and "Send content (workflow and organization names)"
+  checkboxes, **Metrics temporality** (see below), "Add Langfuse attributes" and "Send content (workflow and organization names)"
   (checked by default for a new configuration, with an explanation of what it
   adds and what is never sent). The organization name and id are shown at the
   top with a Copy button for the id. A static notice says that editing a
   price in Pricing does not change data that was already exported.
+- **Metrics temporality.** A radio group, **Cumulative** or **DELTA** (never two
+  checkboxes), shown after Signals; it is disabled while Metrics is unchecked,
+  but presets still set it. It is part of the form's dirty state and of the
+  `PUT` body. A static hint is always visible: "Cumulative: Grafana /
+  Prometheus. DELTA: a Collector that already converts (deltatocumulative)."
+  Two warnings, neither blocks Save and neither is a modal:
+  - *Change warning*, shown only when the chosen value differs from the saved
+    one **and** the destination already exported (`status.lastOkAt` is set or
+    `status.outbox.sent > 0`): "Switching temporality on a destination that
+    already has data can make existing Prometheus series look wrong for a
+    while. New destinations are fine." It never appears on a first
+    configuration.
+  - *Grafana + DELTA hint*, shown when Metrics is selected, the value is DELTA
+    and the endpoint host ends in `.grafana.net`: Grafana Cloud rejects DELTA
+    and expects Cumulative.
 - **Headers.** A saved header comes back masked and its value field stays empty
   (the mask is only a placeholder). Leave it empty to keep the saved secret, or
   type a new value to replace it. The panel sends `""` for unchanged headers
   and the typed value for changed or new ones; removing a row removes the
   header. No stored value is ever rendered or logged.
 - **Presets.** Langfuse, Grafana Cloud and "My own OpenTelemetry Collector" only
-  pre-fill the endpoint, header names, signals and the Langfuse flag; nothing is
+  pre-fill the endpoint, header names, signals, the metrics temporality and the Langfuse flag; nothing is
   sent or saved until Save. Authorization is never pre-filled: build it as
   `Basic ` plus `echo -n 'user:secret' | base64` (Langfuse: public:secret key;
-  Grafana Cloud: instance ID:token). A preset is marked "untested" where
+  Grafana Cloud: instance ID:token). Defaults: **Grafana Cloud** = traces +
+  metrics, Cumulative; **My own OpenTelemetry Collector** = traces + metrics,
+  DELTA; **Langfuse** = traces only (temporality is unused there). A preset is marked "untested" where
   [observability/phase0-findings.md](observability/phase0-findings.md) says NOT
   TESTED or FAIL: Grafana Cloud (both signals) and Langfuse metrics (Langfuse
   accepts but does not store them, so the preset selects Traces only).
@@ -323,10 +361,15 @@ settings above for the current organization.
   change "last successful export" or "last error". Every saved signal is
   tested, in order, and the first failure is reported. If the error is
   `metrics: HTTP 400`, traces were accepted and only metrics were rejected, so
-  the panel adds a warning: uncheck **Metrics**, **Save**, and test again. When
-  the saved host is `*.grafana.net` the warning says Grafana Cloud rejects
-  Target's DELTA metrics (it expects cumulative); other hosts get a shorter hint
-  that does not name Grafana. The warning is not shown on success, on a traces
+  the panel adds a warning. When the saved host is `*.grafana.net` and the saved
+  temporality is DELTA, it says traces were accepted, Grafana Cloud rejects
+  DELTA, and to switch Metrics temporality to **Cumulative**, **Save** and test
+  again (otherwise real exports fail too). Other hosts, or Grafana already on
+  Cumulative, get the generic hint: traces were accepted but metrics were
+  rejected; check that the destination accepts OTLP metrics and that the
+  temporality matches what it expects. The test metric (`target.otel.test`)
+  carries the **saved** temporality, so after saving Cumulative Grafana Cloud
+  no longer answers `400` for it. The warning is not shown on success, on a traces
   failure, or merely because Test was clicked.
 - **Status block.** Last successful export (relative and absolute time), last
   error and the outbox counts, from `status` in `GET /api/settings/otel`.

@@ -3574,6 +3574,7 @@ const OTEL_DEFAULTS = Object.freeze({
 	headers: [],
 	signals: ["traces", "metrics"],
 	sendContent: true, // default for an organization that never saved a config; stored values are never changed
+	metricsTemporality: "cumulative", // same semantics as sendContent; an existing row keeps its stored value ("delta" for rows saved before the field existed)
 	langfuseAttrs: false,
 	enabledAt: null,
 	lastOkAt: null,
@@ -3612,7 +3613,7 @@ async function handleOtelRoute(req, res, pathname) {
 		}
 		const check = await validateOtelEndpoint(config.endpoint);
 		if (!check.ok) return sendOtelEndpointError(res, check);
-		const payloads = buildTestPayloads({ orgId: currentOrgId() });
+		const payloads = buildTestPayloads({ orgId: currentOrgId(), temporality: config.metricsTemporality });
 		let failure = null;
 		let status = null;
 		for (const signal of config.signals) {

@@ -4,9 +4,9 @@
  * workflow data in them.
  */
 import { randomBytes } from "node:crypto";
-import { TEMPORALITY_DELTA, SPAN_KIND_INTERNAL, STATUS_OK, attrs, resourceBlock, scopeBlock, toUnixNano } from "./otel.mjs";
+import { TEMPORALITY_CUMULATIVE, TEMPORALITY_DELTA, SPAN_KIND_INTERNAL, STATUS_OK, attrs, resourceBlock, scopeBlock, toUnixNano } from "./otel.mjs";
 
-export function buildTestPayloads({ orgId = null, serviceVersion = null, now = new Date() } = {}) {
+export function buildTestPayloads({ orgId = null, serviceVersion = null, now = new Date(), temporality = "delta" } = {}) {
 	const end = toUnixNano(now);
 	const start = toUnixNano(new Date(now.getTime() - 1));
 	const resource = resourceBlock({ org: orgId, serviceVersion });
@@ -49,7 +49,7 @@ export function buildTestPayloads({ orgId = null, serviceVersion = null, now = n
 									description: "Connectivity check sent from the settings page",
 									unit: "1",
 									sum: {
-										aggregationTemporality: TEMPORALITY_DELTA,
+										aggregationTemporality: temporality === "cumulative" ? TEMPORALITY_CUMULATIVE : TEMPORALITY_DELTA,
 										isMonotonic: true,
 										dataPoints: [{ attributes: attrs({ "target.test": true }), startTimeUnixNano: start, timeUnixNano: end, asInt: "1" }],
 									},

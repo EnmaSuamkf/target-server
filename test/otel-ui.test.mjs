@@ -46,7 +46,7 @@ test("stored header values are never rendered, logged or sent back", () => {
 
 test("presets only pre-fill the form: endpoint, header names, signals", () => {
 	const fn = panel.slice(panel.indexOf("function applyPreset"), panel.indexOf("async function onSubmit"));
-	assert.match(fn, /setDraft\(\{ \.\.\.draft, endpoint: p\.endpoint, headers, signals: p\.signals, langfuseAttrs: p\.langfuseAttrs \}\)/);
+	assert.match(fn, /setDraft\(\{ \.\.\.draft, endpoint: p\.endpoint, headers, signals: p\.signals, metricsTemporality: p\.metricsTemporality, langfuseAttrs: p\.langfuseAttrs \}\)/);
 	assert.doesNotMatch(fn, /saveOtelSettings|testOtelConnection|fetch\(/);
 	assert.match(panel, /Nothing is saved until you press Save/);
 	assert.match(panel, /endpoint: "https:\/\/cloud\.langfuse\.com\/api\/public\/otel"/);
@@ -185,8 +185,8 @@ const helperSource = (name) => {
 	assert.ok(match, `${name} is defined in OtelPanel.tsx`);
 	return match[0];
 };
-const { isMetricsRejected, isGrafanaCloud } = new Function(
-	`${stripTypeScriptTypes(helperSource("isMetricsRejected"))}\n${stripTypeScriptTypes(helperSource("isGrafanaCloud"))}\nreturn { isMetricsRejected, isGrafanaCloud };`,
+const { isMetricsRejected, isGrafanaCloud, hasExported, showTemporalityChangeWarning, showGrafanaDeltaHint } = new Function(
+	`${["isMetricsRejected", "isGrafanaCloud", "hasExported", "showTemporalityChangeWarning", "showGrafanaDeltaHint"].map((n) => stripTypeScriptTypes(helperSource(n))).join("\n")}\nreturn { isMetricsRejected, isGrafanaCloud, hasExported, showTemporalityChangeWarning, showGrafanaDeltaHint };`,
 )();
 
 test("the uncheck-Metrics warning is for a failed test whose error is metrics HTTP 400", () => {
@@ -219,10 +219,11 @@ test("the warning is rendered after the test result, only for a metrics 400, wit
 	assert.match(block[1], /className="msg otel-warning"/);
 	assert.match(block[1], /isGrafanaCloud\(settings\?\.config\.endpoint \?\? ""\)/);
 	const [grafana, generic] = block[1].split(/\n\s*: "/);
-	assert.match(grafana, /Grafana Cloud rejects Target's DELTA metrics/);
-	assert.match(grafana, /Uncheck Metrics, Save, and test again/);
-	assert.match(generic, /Uncheck Metrics, Save, and test again/);
-	assert.doesNotMatch(generic, /Grafana|DELTA/);
+	assert.match(grafana, /settings\?\.config\.metricsTemporality === "delta"/);
+	assert.match(grafana, /Traces were accepted\. Grafana Cloud rejects DELTA metrics and expects Cumulative: switch Metrics temporality to Cumulative, Save, and test again; otherwise real exports will fail too/);
+	assert.match(generic, /Traces were accepted but the metrics were rejected/);
+	assert.doesNotMatch(block[1], /Uncheck Metrics/i);
+	assert.doesNotMatch(generic, /Grafana Cloud rejects|DELTA/);
 	// Not shown while testing, nor derived from the Test click itself, and never built from header data.
 	assert.doesNotMatch(block[1], /headers|value|token/i);
 	assert.ok(panel.indexOf('data-state="test-failure"') < panel.indexOf('data-state="test-metrics-rejected"'));
@@ -231,4 +232,74 @@ test("the warning is rendered after the test result, only for a metrics 400, wit
 test("Test connection still sends every saved signal, metrics included", () => {
 	const server = read("../server.mjs");
 	assert.match(server, /for \(const signal of config\.signals\) \{\s*const sent = await sendOtlp\(\{[\s\S]*?body: payloads\[signal\]/);
+});
+
+const input = (extra = {}) => ({
+	config: { enabled: true, endpoint: "https://otlp.example.com", headers: [], signals: ["traces", "metrics"], sendContent: true, metricsTemporality: "cumulative", langfuseAttrs: false, updatedAt: "2026-10-01T00:00:00.000Z" },
+	status: { enabled: true, lastOkAt: null, lastError: null, outbox: { pending: 0, sent: 0, dead: 0 } },
+	...extra,
+});
+const withStatus = (status, config = {}) => {
+	const base = input();
+	return { config: { ...base.config, ...config }, status: { ...base.status, ...status } };
+};
+const draftOf = (changes = {}) => ({ endpoint: "https://otlp.example.com", signals: ["traces", "metrics"], metricsTemporality: "cumulative", ...changes });
+
+test("Metrics temporality is a radio group, not checkboxes, wired into draft, PUT body and dirty detection", () => {
+	const at = panel.indexOf('data-state="temporality"');
+	const block = panel.slice(panel.lastIndexOf('<div className="field"', at), panel.indexOf("Add Langfuse attributes"));
+	assert.match(block, /role="radiogroup"/);
+	assert.match(block, /Metrics temporality/);
+	assert.match(block, /type="radio"/);
+	assert.doesNotMatch(block.slice(0, block.indexOf("</div>\n\t\t\t\t\t\t\t<p")), /type="checkbox"/);
+	assert.match(panel, /\{ id: "cumulative", label: "Cumulative" \}/);
+	assert.match(panel, /\{ id: "delta", label: "DELTA" \}/);
+	assert.match(panel, /metricsTemporality: config\.metricsTemporality,/);
+	assert.match(panel, /metricsTemporality: d\.metricsTemporality,/);
+	assert.match(panel, /d\.metricsTemporality !== c\.metricsTemporality/);
+	assert.match(types, /metricsTemporality\?: OtelMetricsTemporality/);
+	assert.match(types, /metricsTemporality: OtelMetricsTemporality/);
+});
+
+test("the static hint is always shown with the control", () => {
+	assert.match(panel.replace(/\s+/g, " "), /<p className="hint">Cumulative: Grafana \/ Prometheus\. DELTA: a Collector that already converts \(deltatocumulative\)\.<\/p>/);
+});
+
+test("presets: Grafana Cloud cumulative, Collector delta, Langfuse traces only", () => {
+	assert.match(panel, /id: "grafana-cloud"[\s\S]*?signals: \["traces", "metrics"\],\s*metricsTemporality: "cumulative"/);
+	assert.match(panel, /id: "collector"[\s\S]*?signals: \["traces", "metrics"\],\s*metricsTemporality: "delta"/);
+	assert.match(panel, /id: "langfuse"[\s\S]*?signals: \["traces"\],/);
+	assert.doesNotMatch(panel.match(/id: "langfuse"[\s\S]*?help:/)[0], /signals: \[[^\]]*metrics/);
+});
+
+test("the change warning needs a different temporality AND a destination that already exported", () => {
+	const warn = (draft, status, saved = "cumulative") => showTemporalityChangeWarning(draft, withStatus(status, { metricsTemporality: saved }));
+	const never = { lastOkAt: null, outbox: { pending: 0, sent: 0, dead: 0 } };
+	// First configuration / nothing exported: never shown, even though the value differs.
+	assert.equal(warn(draftOf({ metricsTemporality: "delta" }), never), false);
+	// Exported (lastOkAt, or sent > 0): shown only when the value differs from the saved one.
+	assert.equal(warn(draftOf({ metricsTemporality: "delta" }), { ...never, lastOkAt: "2026-10-02T10:00:00.000Z" }), true);
+	assert.equal(warn(draftOf({ metricsTemporality: "delta" }), { ...never, outbox: { pending: 0, sent: 3, dead: 0 } }), true);
+	assert.equal(warn(draftOf({ metricsTemporality: "cumulative" }), { ...never, lastOkAt: "2026-10-02T10:00:00.000Z" }), false);
+	assert.equal(warn(draftOf({ metricsTemporality: "cumulative" }), { ...never, outbox: { pending: 0, sent: 3, dead: 0 } }, "delta"), true);
+	assert.equal(hasExported(withStatus({ lastOkAt: null, outbox: { pending: 5, sent: 0, dead: 2 } })), false);
+});
+
+test("the change warning copy is verbatim, is a hint (no modal) and Save is not disabled by it", () => {
+	assert.match(panel.replace(/\s+/g, " "), /Switching temporality on a destination that already has data can make existing Prometheus series look wrong for a while\. New destinations are fine\./);
+	assert.match(panel, /data-state="temporality-change"/);
+	assert.match(panel, /settings && showTemporalityChangeWarning\(draft, settings\)/);
+	assert.doesNotMatch(panel, /confirm\(|role="dialog"|<dialog|Modal/);
+	assert.match(panel, /<button className="btn btn--on" disabled=\{locked\}>/);
+});
+
+test("Grafana + Metrics + DELTA shows the Cloud hint; Cumulative, other hosts or no Metrics do not", () => {
+	const grafana = "https://otlp-gateway-prod-us-east-0.grafana.net/otlp";
+	assert.equal(showGrafanaDeltaHint(draftOf({ endpoint: grafana, metricsTemporality: "delta" })), true);
+	assert.equal(showGrafanaDeltaHint(draftOf({ endpoint: ` ${grafana} `, metricsTemporality: "delta" })), true);
+	assert.equal(showGrafanaDeltaHint(draftOf({ endpoint: grafana, metricsTemporality: "cumulative" })), false);
+	assert.equal(showGrafanaDeltaHint(draftOf({ endpoint: grafana, metricsTemporality: "delta", signals: ["traces"] })), false);
+	assert.equal(showGrafanaDeltaHint(draftOf({ endpoint: "http://collector.example.com:4318", metricsTemporality: "delta" })), false);
+	assert.match(panel.replace(/\s+/g, " "), /Grafana Cloud rejects DELTA metrics and expects Cumulative\./);
+	assert.match(panel, /data-state="temporality-grafana-delta"/);
 });
