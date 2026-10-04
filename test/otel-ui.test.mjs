@@ -5,6 +5,7 @@
  */
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { stripTypeScriptTypes } from "node:module";
 import test from "node:test";
 
 const read = (rel) => fs.readFileSync(new URL(rel, import.meta.url), "utf8");
@@ -176,4 +177,58 @@ test("Send content explains what it adds and what is never sent, right next to t
 	assert.match(block, /Never sent, whatever you choose: step descriptions or prompts, acceptance criteria, error messages \(only the error kind is sent\) and conversation content/);
 	assert.doesNotMatch(panel, new RegExp(["step text", "errors"].join(", ")));
 	assert.doesNotMatch(panel, /off by default/);
+});
+
+// Behaviour of the post-test warning: the two helpers are lifted from the panel source and run for real.
+const helperSource = (name) => {
+	const match = panel.match(new RegExp(`\\nfunction ${name}\\([\\s\\S]*?\\n\\}\\n`));
+	assert.ok(match, `${name} is defined in OtelPanel.tsx`);
+	return match[0];
+};
+const { isMetricsRejected, isGrafanaCloud } = new Function(
+	`${stripTypeScriptTypes(helperSource("isMetricsRejected"))}\n${stripTypeScriptTypes(helperSource("isGrafanaCloud"))}\nreturn { isMetricsRejected, isGrafanaCloud };`,
+)();
+
+test("the uncheck-Metrics warning is for a failed test whose error is metrics HTTP 400", () => {
+	assert.equal(isMetricsRejected({ ok: false, status: 400, error: "metrics: HTTP 400" }), true);
+});
+
+test("no uncheck-Metrics warning on success, on a traces failure or on other metrics errors", () => {
+	assert.equal(isMetricsRejected({ ok: true, status: 200, error: null }), false);
+	assert.equal(isMetricsRejected({ ok: false, status: 401, error: "traces: HTTP 401" }), false);
+	assert.equal(isMetricsRejected({ ok: false, status: 400, error: "traces: HTTP 400" }), false);
+	assert.equal(isMetricsRejected({ ok: false, status: 500, error: "metrics: HTTP 500" }), false);
+	assert.equal(isMetricsRejected({ ok: false, status: 4000, error: "metrics: HTTP 4000" }), false);
+	assert.equal(isMetricsRejected({ ok: false, status: null, error: "metrics: network error: ECONNREFUSED" }), false);
+	assert.equal(isMetricsRejected({ ok: false, status: null, error: null }), false);
+});
+
+test("only *.grafana.net endpoints get the Grafana Cloud copy", () => {
+	assert.equal(isGrafanaCloud("https://otlp-gateway-prod-eu-west-6.grafana.net/otlp"), true);
+	assert.equal(isGrafanaCloud("HTTPS://OTLP-GATEWAY.GRAFANA.NET/otlp"), true);
+	assert.equal(isGrafanaCloud("http://collector.example.com:4318"), false);
+	assert.equal(isGrafanaCloud("https://grafana.net.evil.example/otlp"), false);
+	assert.equal(isGrafanaCloud("https://notgrafana.net/otlp"), false);
+	assert.equal(isGrafanaCloud(""), false);
+});
+
+test("the warning is rendered after the test result, only for a metrics 400, with Grafana and generic copy", () => {
+	const block = panel.match(/\{testResult && isMetricsRejected\(testResult\) \? \(([\s\S]*?)\) : null\}/);
+	assert.ok(block, "the warning is gated on a test result that is a metrics rejection");
+	assert.match(block[1], /data-state="test-metrics-rejected"/);
+	assert.match(block[1], /className="msg otel-warning"/);
+	assert.match(block[1], /isGrafanaCloud\(settings\?\.config\.endpoint \?\? ""\)/);
+	const [grafana, generic] = block[1].split(/\n\s*: "/);
+	assert.match(grafana, /Grafana Cloud rejects Target's DELTA metrics/);
+	assert.match(grafana, /Uncheck Metrics, Save, and test again/);
+	assert.match(generic, /Uncheck Metrics, Save, and test again/);
+	assert.doesNotMatch(generic, /Grafana|DELTA/);
+	// Not shown while testing, nor derived from the Test click itself, and never built from header data.
+	assert.doesNotMatch(block[1], /headers|value|token/i);
+	assert.ok(panel.indexOf('data-state="test-failure"') < panel.indexOf('data-state="test-metrics-rejected"'));
+});
+
+test("Test connection still sends every saved signal, metrics included", () => {
+	const server = read("../server.mjs");
+	assert.match(server, /for \(const signal of config\.signals\) \{\s*const sent = await sendOtlp\(\{[\s\S]*?body: payloads\[signal\]/);
 });
