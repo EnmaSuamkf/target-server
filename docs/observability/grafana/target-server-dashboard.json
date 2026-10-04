@@ -116,7 +116,7 @@
    "id": 1,
    "type": "bargauge",
    "title": "Cost (USD) by org and runner",
-   "description": "Exported cost over the selected time range, from target_cost_usd_USD_total (priced at the moment each snapshot was exported; unpriced runners have no cost series).",
+   "description": "Exported cost over the selected time range: last value of target_cost_usd_USD_total minus its value before the range (priced at the moment each snapshot was exported; unpriced runners have no cost series). Counter resets (Collector restart) count as zero.",
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -134,7 +134,7 @@
       "uid": "prometheus"
      },
      "refId": "A",
-     "expr": "sum by (org, target_runner) (label_replace(label_replace((increase(target_cost_usd_USD_total{target_org=~\"$org\", target_runner=~\"$runner\"}[$__range]) or (target_cost_usd_USD_total{target_org=~\"$org\", target_runner=~\"$runner\"} unless (target_cost_usd_USD_total{target_org=~\"$org\", target_runner=~\"$runner\"} offset $__range))), \"org\", \"$1\", \"target_org\", \"(.+)\"), \"org\", \"$1\", \"target_org_name\", \"(.+)\"))",
+     "expr": "sum by (org, target_runner) (label_replace(label_replace(clamp_min(last_over_time(target_cost_usd_USD_total{target_org=~\"$org\", target_runner=~\"$runner\"}[$__range]) - (last_over_time(target_cost_usd_USD_total{target_org=~\"$org\", target_runner=~\"$runner\"}[7d] offset $__range) or (last_over_time(target_cost_usd_USD_total{target_org=~\"$org\", target_runner=~\"$runner\"}[$__range]) * 0)), 0), \"org\", \"$1\", \"target_org\", \"(.+)\"), \"org\", \"$1\", \"target_org_name\", \"(.+)\"))",
      "legendFormat": "{{org}} / {{target_runner}}",
      "range": false,
      "instant": true
@@ -190,7 +190,7 @@
       "uid": "prometheus"
      },
      "refId": "A",
-     "expr": "(sum((increase(target_workflow_failed_total{target_org=~\"$org\", target_runner=~\"$runner\"}[$__range]) or (target_workflow_failed_total{target_org=~\"$org\", target_runner=~\"$runner\"} unless (target_workflow_failed_total{target_org=~\"$org\", target_runner=~\"$runner\"} offset $__range)))) or vector(0)) / ((sum((increase(target_workflow_completed_total{target_org=~\"$org\", target_runner=~\"$runner\"}[$__range]) or (target_workflow_completed_total{target_org=~\"$org\", target_runner=~\"$runner\"} unless (target_workflow_completed_total{target_org=~\"$org\", target_runner=~\"$runner\"} offset $__range)))) or vector(0)) + (sum((increase(target_workflow_failed_total{target_org=~\"$org\", target_runner=~\"$runner\"}[$__range]) or (target_workflow_failed_total{target_org=~\"$org\", target_runner=~\"$runner\"} unless (target_workflow_failed_total{target_org=~\"$org\", target_runner=~\"$runner\"} offset $__range)))) or vector(0)))",
+     "expr": "(sum(clamp_min(last_over_time(target_workflow_failed_total{target_org=~\"$org\", target_runner=~\"$runner\"}[$__range]) - (last_over_time(target_workflow_failed_total{target_org=~\"$org\", target_runner=~\"$runner\"}[7d] offset $__range) or (last_over_time(target_workflow_failed_total{target_org=~\"$org\", target_runner=~\"$runner\"}[$__range]) * 0)), 0)) or vector(0)) / ((sum(clamp_min(last_over_time(target_workflow_completed_total{target_org=~\"$org\", target_runner=~\"$runner\"}[$__range]) - (last_over_time(target_workflow_completed_total{target_org=~\"$org\", target_runner=~\"$runner\"}[7d] offset $__range) or (last_over_time(target_workflow_completed_total{target_org=~\"$org\", target_runner=~\"$runner\"}[$__range]) * 0)), 0)) or vector(0)) + (sum(clamp_min(last_over_time(target_workflow_failed_total{target_org=~\"$org\", target_runner=~\"$runner\"}[$__range]) - (last_over_time(target_workflow_failed_total{target_org=~\"$org\", target_runner=~\"$runner\"}[7d] offset $__range) or (last_over_time(target_workflow_failed_total{target_org=~\"$org\", target_runner=~\"$runner\"}[$__range]) * 0)), 0)) or vector(0)))",
      "legendFormat": "failure rate",
      "range": false,
      "instant": true
@@ -240,9 +240,9 @@
   },
   {
    "id": 3,
-   "type": "timeseries",
+   "type": "bargauge",
    "title": "Workflows completed vs failed",
-   "description": "Workflows that reached a terminal status per window, from target_workflow_completed_total and target_workflow_failed_total.",
+   "description": "Workflows that reached a terminal status in the selected time range: last value of target_workflow_completed_total / target_workflow_failed_total minus its value before the range. Counter resets (Collector restart) count as zero.",
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -260,10 +260,10 @@
       "uid": "prometheus"
      },
      "refId": "A",
-     "expr": "sum(increase(target_workflow_completed_total{target_org=~\"$org\", target_runner=~\"$runner\"}[$window]))",
+     "expr": "sum(clamp_min(last_over_time(target_workflow_completed_total{target_org=~\"$org\", target_runner=~\"$runner\"}[$__range]) - (last_over_time(target_workflow_completed_total{target_org=~\"$org\", target_runner=~\"$runner\"}[7d] offset $__range) or (last_over_time(target_workflow_completed_total{target_org=~\"$org\", target_runner=~\"$runner\"}[$__range]) * 0)), 0)) or vector(0)",
      "legendFormat": "completed",
-     "range": true,
-     "instant": false
+     "range": false,
+     "instant": true
     },
     {
      "datasource": {
@@ -271,25 +271,20 @@
       "uid": "prometheus"
      },
      "refId": "B",
-     "expr": "sum(increase(target_workflow_failed_total{target_org=~\"$org\", target_runner=~\"$runner\"}[$window]))",
+     "expr": "sum(clamp_min(last_over_time(target_workflow_failed_total{target_org=~\"$org\", target_runner=~\"$runner\"}[$__range]) - (last_over_time(target_workflow_failed_total{target_org=~\"$org\", target_runner=~\"$runner\"}[7d] offset $__range) or (last_over_time(target_workflow_failed_total{target_org=~\"$org\", target_runner=~\"$runner\"}[$__range]) * 0)), 0)) or vector(0)",
      "legendFormat": "failed",
-     "range": true,
-     "instant": false
+     "range": false,
+     "instant": true
     }
    ],
    "fieldConfig": {
     "defaults": {
      "unit": "short",
-     "custom": {
-      "drawStyle": "bars",
-      "lineWidth": 2,
-      "fillOpacity": 60,
-      "showPoints": "auto",
-      "spanNulls": true,
-      "stacking": {
-       "mode": "normal",
-       "group": "A"
-      }
+     "decimals": 0,
+     "min": 0,
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "green"
      }
     },
     "overrides": [
@@ -326,16 +321,19 @@
     ]
    },
    "options": {
-    "legend": {
-     "displayMode": "table",
-     "placement": "bottom",
+    "displayMode": "basic",
+    "orientation": "horizontal",
+    "showUnfilled": true,
+    "valueMode": "color",
+    "reduceOptions": {
      "calcs": [
-      "sum"
-     ]
+      "lastNotNull"
+     ],
+     "values": false,
+     "fields": ""
     },
-    "tooltip": {
-     "mode": "multi",
-     "sort": "desc"
+    "legend": {
+     "showLegend": false
     }
    }
   },
