@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { loadOtelSettings, saveOtelSettings, testOtelConnection } from "../api/otel.ts";
-import type { OtelSettings, OtelSettingsInput, OtelSignal, OtelTestResult } from "../api/types.ts";
+import type { OtelMetricsTemporality, OtelSettings, OtelSettingsInput, OtelSignal, OtelTestResult } from "../api/types.ts";
 import { timeAgo } from "../lib/format.ts";
 import { CopyValue } from "./CopyValue.tsx";
 import { Field } from "./Field.tsx";
@@ -25,8 +25,14 @@ interface Draft {
 	headers: HeaderRow[];
 	signals: OtelSignal[];
 	sendContent: boolean;
+	metricsTemporality: OtelMetricsTemporality;
 	langfuseAttrs: boolean;
 }
+
+const TEMPORALITIES: { id: OtelMetricsTemporality; label: string }[] = [
+	{ id: "cumulative", label: "Cumulative" },
+	{ id: "delta", label: "DELTA" },
+];
 
 const SIGNALS: { id: OtelSignal; label: string }[] = [
 	{ id: "traces", label: "Traces" },
@@ -40,6 +46,7 @@ interface Preset {
 	endpoint: string;
 	headers: { name: string; value: string }[];
 	signals: OtelSignal[];
+	metricsTemporality: OtelMetricsTemporality;
 	langfuseAttrs: boolean;
 	/** Signals that docs/observability/phase0-findings.md lists as NOT TESTED or FAIL for this destination. */
 	untested: OtelSignal[];
@@ -59,6 +66,7 @@ const PRESETS: Preset[] = [
 			{ name: "x-langfuse-ingestion-version", value: "4" },
 		],
 		signals: ["traces"],
+		metricsTemporality: "cumulative", // unused: Langfuse is traces-only
 		langfuseAttrs: true,
 		untested: ["metrics"],
 		help: "Use your Langfuse project keys as publicKey:secretKey. For a self-hosted Langfuse replace the host (keep /api/public/otel). Langfuse accepts but does not store metrics, so only Traces is selected.",
@@ -70,6 +78,7 @@ const PRESETS: Preset[] = [
 		endpoint: "https://otlp-gateway-<REGION>.grafana.net/otlp",
 		headers: [{ name: "Authorization", value: "" }],
 		signals: ["traces", "metrics"],
+		metricsTemporality: "cumulative",
 		langfuseAttrs: false,
 		untested: ["traces", "metrics"],
 		help: "Replace <REGION> with your stack's region (for example prod-us-east-0). Use your instance ID and a token with the MetricsPublisher and traces write scopes as instanceId:token.",
@@ -81,6 +90,7 @@ const PRESETS: Preset[] = [
 		endpoint: "http://collector.example.com:4318",
 		headers: [],
 		signals: ["traces", "metrics"],
+		metricsTemporality: "delta",
 		langfuseAttrs: false,
 		untested: [],
 		help: "Point it at your Collector's OTLP/HTTP receiver (port 4318). Add headers only if the receiver requires authentication. Plain http and private addresses are accepted only when the server operator has set TARGET_OTEL_ALLOW_PRIVATE=1.",
@@ -99,6 +109,7 @@ function toDraft(settings: OtelSettings): Draft {
 		headers: config.headers.map((h) => newRow({ name: h.name, stored: true, masked: h.masked })),
 		signals: config.signals,
 		sendContent: config.sendContent,
+		metricsTemporality: config.metricsTemporality,
 		langfuseAttrs: config.langfuseAttrs,
 	};
 }
@@ -115,6 +126,21 @@ function isGrafanaCloud(endpoint: string): boolean {
 	} catch {
 		return false;
 	}
+}
+
+/** True once the destination has taken data: a successful export, or rows marked sent. */
+function hasExported(settings: OtelSettings): boolean {
+	return Boolean(settings.status.lastOkAt) || settings.status.outbox.sent > 0;
+}
+
+/** True when the draft changes the saved temporality of a destination that already has data (never on first configuration). */
+function showTemporalityChangeWarning(d: Draft, settings: OtelSettings): boolean {
+	return d.metricsTemporality !== settings.config.metricsTemporality && hasExported(settings);
+}
+
+/** True when Metrics would go out as DELTA to a *.grafana.net endpoint, which Grafana Cloud rejects. */
+function showGrafanaDeltaHint(d: Draft): boolean {
+	return d.signals.includes("metrics") && d.metricsTemporality === "delta" && isGrafanaCloud(d.endpoint.trim());
 }
 
 /** Error text for a draft the server would reject anyway, or null. */
@@ -146,6 +172,7 @@ function toInput(d: Draft): OtelSettingsInput {
 		headers,
 		signals: d.signals,
 		sendContent: d.sendContent,
+		metricsTemporality: d.metricsTemporality,
 		langfuseAttrs: d.langfuseAttrs,
 	};
 }
@@ -157,6 +184,7 @@ function isDirty(d: Draft, saved: OtelSettings): boolean {
 		d.enabled !== c.enabled ||
 		d.endpoint.trim() !== c.endpoint ||
 		d.sendContent !== c.sendContent ||
+		d.metricsTemporality !== c.metricsTemporality ||
 		d.langfuseAttrs !== c.langfuseAttrs ||
 		d.signals.join() !== c.signals.join() ||
 		d.headers.length !== c.headers.length ||
@@ -222,7 +250,7 @@ export function OtelPanel({ canEdit }: { canEdit: boolean }) {
 			if (!existing) headers = [...headers, newRow({ name: h.name, value: h.value })];
 			else if (!existing.stored && !existing.value) headers = headers.map((r) => (r === existing ? { ...r, value: h.value } : r));
 		}
-		setDraft({ ...draft, endpoint: p.endpoint, headers, signals: p.signals, langfuseAttrs: p.langfuseAttrs });
+		setDraft({ ...draft, endpoint: p.endpoint, headers, signals: p.signals, metricsTemporality: p.metricsTemporality, langfuseAttrs: p.langfuseAttrs });
 		setPreset(p);
 		setFormError(null);
 		setNotice(`Form pre-filled from ${p.label}. Nothing is saved until you press Save.`);
@@ -471,6 +499,39 @@ export function OtelPanel({ canEdit }: { canEdit: boolean }) {
 							</div>
 						</div>
 
+						<div className="field" role="radiogroup" aria-labelledby="otel-temporality-label" data-state="temporality">
+							<span className="label" id="otel-temporality-label">
+								Metrics temporality
+							</span>
+							<div className="sync-step-form__toggles">
+								{TEMPORALITIES.map((t) => (
+									<label key={t.id} className="sync-toggle">
+										<input
+											type="radio"
+											name="otel-metrics-temporality"
+											value={t.id}
+											checked={draft.metricsTemporality === t.id}
+											disabled={!draft.signals.includes("metrics")}
+											onChange={() => patch({ metricsTemporality: t.id })}
+										/>
+										<span>{t.label}</span>
+									</label>
+								))}
+							</div>
+							<p className="hint">Cumulative: Grafana / Prometheus. DELTA: a Collector that already converts (deltatocumulative).</p>
+							{settings && showTemporalityChangeWarning(draft, settings) ? (
+								<p className="hint otel-warning" role="note" data-state="temporality-change">
+									Switching temporality on a destination that already has data can make existing Prometheus series look wrong for a while. New
+									destinations are fine.
+								</p>
+							) : null}
+							{showGrafanaDeltaHint(draft) ? (
+								<p className="hint otel-warning" role="note" data-state="temporality-grafana-delta">
+									Grafana Cloud rejects DELTA metrics and expects Cumulative. Select Cumulative before saving this endpoint.
+								</p>
+							) : null}
+						</div>
+
 						<div className="field">
 							<label className="sync-toggle">
 								<input type="checkbox" checked={draft.langfuseAttrs} onChange={(event) => patch({ langfuseAttrs: event.target.checked })} />
@@ -526,9 +587,9 @@ export function OtelPanel({ canEdit }: { canEdit: boolean }) {
 						) : null}
 						{testResult && isMetricsRejected(testResult) ? (
 							<p className="msg otel-warning" role="note" data-state="test-metrics-rejected">
-								{isGrafanaCloud(settings?.config.endpoint ?? "")
-									? "Grafana Cloud rejects Target's DELTA metrics (it expects cumulative). Traces were accepted. Uncheck Metrics, Save, and test again; otherwise real exports will fail too."
-									: "Traces were accepted but the metrics were rejected. Uncheck Metrics, Save, and test again."}
+								{isGrafanaCloud(settings?.config.endpoint ?? "") && settings?.config.metricsTemporality === "delta"
+									? "Traces were accepted. Grafana Cloud rejects DELTA metrics and expects Cumulative: switch Metrics temporality to Cumulative, Save, and test again; otherwise real exports will fail too."
+									: "Traces were accepted but the metrics were rejected. Check that the destination accepts OTLP metrics and that Metrics temporality matches what it expects (Cumulative for Grafana / Prometheus)."}
 							</p>
 						) : null}
 						{canEdit ? (

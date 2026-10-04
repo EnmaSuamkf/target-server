@@ -254,6 +254,16 @@ test("POST /test sends one span and one metric to a fake OTLP server", async () 
 		assert.equal(spans.length, 1);
 		assert.equal(spans[0].name, "target.otel.test");
 		assert.equal(seen[1].body.resourceMetrics[0].scopeMetrics[0].metrics.length, 1);
+		const testTemporality = (entry) => entry.body.resourceMetrics[0].scopeMetrics[0].metrics[0].sum.aggregationTemporality;
+		assert.equal(testTemporality(seen[1]), 2, "the first save omitted the field: cumulative");
+		assert.equal((await call("PUT", "", { metricsTemporality: "delta" }, admin)).status, 200);
+		seen.length = 0;
+		assert.equal((await call("POST", "/test", undefined, admin)).body.ok, true);
+		assert.equal(testTemporality(seen[1]), 1, "the saved DELTA is what the test sends");
+		assert.equal((await call("PUT", "", { metricsTemporality: "cumulative" }, admin)).status, 200);
+		seen.length = 0;
+		await call("POST", "/test", undefined, admin);
+		assert.equal(testTemporality(seen[1]), 2);
 
 		mode = "reject";
 		const rejected = await call("POST", "/test", undefined, admin);

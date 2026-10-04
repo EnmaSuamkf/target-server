@@ -7,14 +7,18 @@
  * traces and metrics (otel.mjs) with the org's pricing rules and export state,
  * sends them (otel-client.mjs, one attempt per pass; retries are rescheduled
  * through `next_attempt_at`), and on success marks the rows sent and writes the
- * new export state in ONE transaction (db.markOtelSent).
+ * new export state (and, in cumulative mode, the metric series totals) in ONE
+ * transaction (db.markOtelSent).
  *
  * Delivery is at-least-once. Traces carry deterministic ids, so a re-send is
- * harmless. Metrics are DELTA sums with no idempotency key in OTLP: if the
+ * harmless. Metrics have no idempotency key in OTLP. In DELTA mode: if the
  * process dies after the destination accepted a request but before the commit,
  * the next pass re-sends that same batch (same deltas, computed from the
  * unchanged state, never doubled) and the destination counts it twice. The
  * export state itself is never advanced without the rows being marked sent.
+ * In cumulative mode the retry recomputes the same deltas from the unadvanced
+ * state and series, so it emits the same running totals (the destination keeps
+ * the latest value rather than counting twice).
  * A down destination only delays this worker; /ingest never waits for it.
  */
 import { listOrganizations } from "./control-plane.mjs";
@@ -26,6 +30,7 @@ import {
 	getOtelExportState,
 	listPricingRules,
 	loadOtelEvents,
+	loadOtelMetricSeries,
 	markOtelDead,
 	markOtelRetry,
 	markOtelSent,
@@ -155,6 +160,7 @@ export function createOtelWorker({
 
 			let metrics = null;
 			let states = [];
+			let seriesWrites = [];
 			if (config.signals.includes("metrics")) {
 				const snapshots = events.filter((e) => e.kind === "usage.snapshot" && e.workflow_id);
 				const stateBySession = {};
@@ -163,8 +169,9 @@ export function createOtelWorker({
 					const state = getOtelExportState(e.workflow_id, e.session_id ?? null);
 					if (state) stateBySession[key] = state;
 				}
-				const built = buildMetrics({ events, orgId, serviceVersion, stateBySession, rules, runnerByWorkflow: runners, options: { sendContent: config.sendContent, orgName } });
+				const built = buildMetrics({ events, orgId, serviceVersion, stateBySession, rules, runnerByWorkflow: runners, options: { sendContent: config.sendContent, orgName }, temporality: config.metricsTemporality, seriesByKey: config.metricsTemporality === "cumulative" ? loadOtelMetricSeries() : {} });
 				metrics = built.request;
+				seriesWrites = built.changedSeries.map((k) => built.series[k]);
 				const seen = new Set();
 				for (const e of snapshots) {
 					const key = `${e.workflow_id}:${e.session_id ?? ""}`;
@@ -191,7 +198,7 @@ export function createOtelWorker({
 				break;
 			}
 			if (beforeCommit) await beforeCommit({ rows, traces, metrics });
-			markOtelSent(ids, states);
+			markOtelSent(ids, states, seriesWrites);
 			totals.sent += ids.length;
 			if (traces || metrics) recordOtelResult({ ok: true, at: clock() });
 		}

@@ -692,6 +692,7 @@ function migrateOtelSchema(database) {
 			headers_enc    TEXT NOT NULL DEFAULT '{}',
 			signals        TEXT NOT NULL DEFAULT 'traces,metrics',
 			send_content   INTEGER NOT NULL DEFAULT 0,
+			metrics_temporality TEXT NOT NULL DEFAULT 'delta',
 			langfuse_attrs INTEGER NOT NULL DEFAULT 0,
 			enabled_at     TEXT,
 			last_ok_at     TEXT,
@@ -719,7 +720,28 @@ function migrateOtelSchema(database) {
 			updated_at           TEXT NOT NULL,
 			PRIMARY KEY (workflow_id, session_id)
 		);
+		-- Running totals per metric series, only used (and written) in cumulative mode.
+		CREATE TABLE IF NOT EXISTS otel_metric_series (
+			series_key          TEXT PRIMARY KEY,
+			name                TEXT NOT NULL,
+			kind                TEXT NOT NULL CHECK (kind IN ('sum', 'histogram')),
+			attributes_json     TEXT NOT NULL,
+			value               REAL NOT NULL DEFAULT 0,
+			count               INTEGER NOT NULL DEFAULT 0,
+			sum                 REAL NOT NULL DEFAULT 0,
+			min                 REAL,
+			max                 REAL,
+			buckets_json        TEXT,
+			start_time_unix_nano TEXT NOT NULL,
+			updated_at          TEXT NOT NULL
+		);
 	`);
+	// CREATE TABLE IF NOT EXISTS does not alter an existing otel_exports. Existing rows read as 'delta' (what they always sent).
+	try {
+		database.exec("ALTER TABLE otel_exports ADD COLUMN metrics_temporality TEXT NOT NULL DEFAULT 'delta'");
+	} catch {
+		// Column already exists.
+	}
 }
 
 function migrateAuthSchema(database) {
@@ -5497,6 +5519,7 @@ function otelConfigFromRow(row, orgId, { includeSecrets }) {
 		headers: includeSecrets ? headers : masked,
 		signals: parseOtelSignals(row.signals),
 		sendContent: row.send_content === 1,
+		metricsTemporality: row.metrics_temporality === "cumulative" ? "cumulative" : "delta",
 		langfuseAttrs: row.langfuse_attrs === 1,
 		enabledAt: row.enabled_at,
 		lastOkAt: row.last_ok_at,
@@ -5523,6 +5546,7 @@ export function getOtelConfig({ includeSecrets = false } = {}) {
  * removed. `enabled_at` is stamped when the exporter goes from off to on.
  * Turning it on or writing a new header value needs a secrets key (fail closed).
  * A new config that omits `sendContent` stores it ON; an existing one keeps its stored value.
+ * Likewise a new config that omits `metricsTemporality` stores "cumulative"; an existing one keeps its stored value.
  */
 export function saveOtelConfig(input = {}) {
 	const d = open();
@@ -5548,12 +5572,13 @@ export function saveOtelConfig(input = {}) {
 	const flag = (v, old) => (v === undefined ? (old ?? 0) : v ? 1 : 0);
 	// Send content is ON for a configuration that is being created; a stored choice is never changed here.
 	const sendContent = input.sendContent === undefined && !prev ? 1 : flag(input.sendContent, prev?.send_content);
+	const metricsTemporality = input.metricsTemporality ?? prev?.metrics_temporality ?? "cumulative";
 	const enabledAt = enabled ? (prev?.enabled === 1 && prev.enabled_at ? prev.enabled_at : now) : (prev?.enabled_at ?? null);
 	d.prepare(
-		`INSERT INTO otel_exports (id, enabled, endpoint, headers_enc, signals, send_content, langfuse_attrs, enabled_at, last_ok_at, last_error, updated_at)
-		 VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO otel_exports (id, enabled, endpoint, headers_enc, signals, send_content, metrics_temporality, langfuse_attrs, enabled_at, last_ok_at, last_error, updated_at)
+		 VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(id) DO UPDATE SET enabled = excluded.enabled, endpoint = excluded.endpoint, headers_enc = excluded.headers_enc,
-		   signals = excluded.signals, send_content = excluded.send_content, langfuse_attrs = excluded.langfuse_attrs,
+		   signals = excluded.signals, send_content = excluded.send_content, metrics_temporality = excluded.metrics_temporality, langfuse_attrs = excluded.langfuse_attrs,
 		   enabled_at = excluded.enabled_at, updated_at = excluded.updated_at`,
 	).run(
 		enabled ? 1 : 0,
@@ -5561,12 +5586,15 @@ export function saveOtelConfig(input = {}) {
 		headersEnc,
 		signals,
 		sendContent,
+		metricsTemporality,
 		flag(input.langfuseAttrs, prev?.langfuse_attrs),
 		enabledAt,
 		prev?.last_ok_at ?? null,
 		prev?.last_error ?? null,
 		now,
 	);
+	// Stored totals belong to one temporality: a change starts cumulative at 0 and never leaves stale totals for delta.
+	if (prev && (prev.metrics_temporality ?? "delta") !== metricsTemporality) d.exec("DELETE FROM otel_metric_series");
 	return getOtelConfig();
 }
 
@@ -5576,7 +5604,7 @@ export function deleteOtelConfig() {
 	d.exec("BEGIN IMMEDIATE");
 	try {
 		const removed = d.prepare("DELETE FROM otel_exports").run().changes > 0;
-		d.exec("DELETE FROM otel_outbox; DELETE FROM otel_export_state;");
+		d.exec("DELETE FROM otel_outbox; DELETE FROM otel_export_state; DELETE FROM otel_metric_series;");
 		d.exec("COMMIT");
 		return removed;
 	} catch (err) {
@@ -5611,14 +5639,15 @@ const idPlaceholders = (ids) => ids.map(() => "?").join(",");
  * written in the SAME transaction, so a crash can never leave rows sent without
  * their cumulative state (or the reverse), which would double-count metrics.
  */
-export function markOtelSent(ids, states = []) {
-	if (!ids.length && !states.length) return 0;
+export function markOtelSent(ids, states = [], series = []) {
+	if (!ids.length && !states.length && !series.length) return 0;
 	const d = open();
 	d.exec("BEGIN IMMEDIATE");
 	try {
 		let n = 0;
 		if (ids.length) n = d.prepare(`UPDATE otel_outbox SET status = 'sent' WHERE id IN (${idPlaceholders(ids)})`).run(...ids).changes;
 		for (const s of states) writeOtelExportState(d, s);
+		for (const s of series) writeOtelMetricSeries(d, s);
 		d.exec("COMMIT");
 		return n;
 	} catch (err) {
@@ -5676,6 +5705,46 @@ function writeOtelExportState(d, { workflowId, sessionId = null, state, now = ne
 		   last_output_tokens = excluded.last_output_tokens, last_cache_read = excluded.last_cache_read,
 		   last_cache_creation = excluded.last_cache_creation, last_cost_usd = excluded.last_cost_usd, updated_at = excluded.updated_at`,
 	).run(workflowId, otelSessionKey(sessionId), t.input ?? 0, t.output ?? 0, t.cache_read ?? 0, t.cache_creation ?? 0, state.costUsd ?? 0, now);
+}
+
+/** The persisted running totals, keyed by series key, in the shape `buildMetrics` takes as `seriesByKey`. */
+export function loadOtelMetricSeries() {
+	const out = {};
+	for (const r of open().prepare("SELECT * FROM otel_metric_series").all()) {
+		out[r.series_key] = {
+			key: r.series_key,
+			kind: r.kind,
+			name: r.name,
+			attributes: JSON.parse(r.attributes_json),
+			...(r.kind === "sum"
+				? { value: r.value }
+				: { count: r.count, sum: r.sum, min: r.min, max: r.max, buckets: JSON.parse(r.buckets_json ?? "[]") }),
+			startTimeUnixNano: r.start_time_unix_nano,
+		};
+	}
+	return out;
+}
+
+function writeOtelMetricSeries(d, s, now = new Date().toISOString()) {
+	d.prepare(
+		`INSERT INTO otel_metric_series (series_key, name, kind, attributes_json, value, count, sum, min, max, buckets_json, start_time_unix_nano, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(series_key) DO UPDATE SET value = excluded.value, count = excluded.count, sum = excluded.sum, min = excluded.min,
+		   max = excluded.max, buckets_json = excluded.buckets_json, updated_at = excluded.updated_at`,
+	).run(
+		s.key,
+		s.name,
+		s.kind,
+		JSON.stringify(s.attributes),
+		s.value ?? 0,
+		s.count ?? 0,
+		s.sum ?? 0,
+		s.min ?? null,
+		s.max ?? null,
+		s.buckets ? JSON.stringify(s.buckets) : null,
+		String(s.startTimeUnixNano),
+		now,
+	);
 }
 
 /** Upsert the exported totals for one session. Prefer `markOtelSent(ids, states)` when marking rows sent. */

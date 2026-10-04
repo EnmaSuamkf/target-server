@@ -67,7 +67,7 @@ function enqueueFinished(wf = uid("wf")) {
 }
 
 function configure(extra = {}) {
-	return db.saveOtelConfig({ enabled: true, endpoint: "https://otlp.example.com", headers: { Authorization: "Bearer worker-secret-1234" }, sendContent: false, ...extra });
+	return db.saveOtelConfig({ enabled: true, endpoint: "https://otlp.example.com", headers: { Authorization: "Bearer worker-secret-1234" }, sendContent: false, metricsTemporality: "delta", ...extra });
 }
 const metricValues = (body, name) =>
 	(body.resourceMetrics?.[0].scopeMetrics[0].metrics ?? [])

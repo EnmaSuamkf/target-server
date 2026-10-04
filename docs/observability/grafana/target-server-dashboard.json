@@ -1,7 +1,7 @@
 {
  "uid": "target-server-otel",
  "title": "Target Server - OTEL export",
- "description": "Cost, tokens, workflow outcomes, step duration and retries exported by target-server (target.* metrics) plus recent workflow traces.",
+ "description": "Cost and usage from invoke_workflow traces (target.cost.usd, target.usage.*) plus Prometheus target.* metrics when the destination stores them.",
  "tags": [
   "target-server",
   "opentelemetry"
@@ -123,7 +123,7 @@
    },
    "gridPos": {
     "x": 0,
-    "y": 0,
+    "y": 10,
     "w": 12,
     "h": 8
    },
@@ -179,7 +179,7 @@
    },
    "gridPos": {
     "x": 12,
-    "y": 0,
+    "y": 10,
     "w": 4,
     "h": 8
    },
@@ -249,7 +249,7 @@
    },
    "gridPos": {
     "x": 16,
-    "y": 0,
+    "y": 10,
     "w": 8,
     "h": 8
    },
@@ -350,7 +350,7 @@
    },
    "gridPos": {
     "x": 0,
-    "y": 8,
+    "y": 18,
     "w": 12,
     "h": 8
    },
@@ -409,7 +409,7 @@
    },
    "gridPos": {
     "x": 12,
-    "y": 8,
+    "y": 18,
     "w": 12,
     "h": 8
    },
@@ -479,7 +479,7 @@
    },
    "gridPos": {
     "x": 0,
-    "y": 16,
+    "y": 26,
     "w": 12,
     "h": 8
    },
@@ -530,17 +530,17 @@
   {
    "id": 7,
    "type": "table",
-   "title": "Recent workflows (traces)",
-   "description": "Root spans (invoke_workflow) from Tempo, newest first. Organization shows the organization name when it was exported (Send content on) and the id otherwise. Click a trace id to open the span tree. (The Organization column takes the last non-empty of target.org and target.org.name, in the order Tempo returns them.)",
+   "title": "Workflow cost and usage (traces)",
+   "description": "Root invoke_workflow spans from Tempo. Cost and tokens are span attributes (target.cost.usd, target.usage.*), so this table works when only traces are exported. Unpriced workflows omit cost. Click a workflow name to open the trace.",
    "datasource": {
     "type": "tempo",
     "uid": "tempo"
    },
    "gridPos": {
-    "x": 12,
-    "y": 16,
-    "w": 12,
-    "h": 8
+    "x": 0,
+    "y": 0,
+    "w": 24,
+    "h": 10
    },
    "targets": [
     {
@@ -550,7 +550,7 @@
      },
      "refId": "A",
      "queryType": "traceql",
-     "query": "{ resource.service.name = \"target-server\" && name =~ \"invoke_workflow.*\" && resource.target.org =~ \"${org:regex}\" && span.target.runner =~ \"${runner:regex}\" } | select(resource.target.org.name, resource.target.org)",
+     "query": "{ resource.service.name = \"target-server\" && name =~ \"invoke_workflow.*\" } | select(span.target.cost.usd, span.target.usage.input_tokens, span.target.usage.output_tokens, span.target.workflow.status, span.target.runner, resource.target.org.name, resource.target.org)",
      "limit": 20,
      "tableType": "spans",
      "spss": 1
@@ -573,6 +573,22 @@
           "url": "/explore?schemaVersion=1&panes=%7B%22a%22%3A%7B%22datasource%22%3A%22tempo%22%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22datasource%22%3A%7B%22type%22%3A%22tempo%22%2C%22uid%22%3A%22tempo%22%7D%2C%22queryType%22%3A%22traceql%22%2C%22query%22%3A%22${__data.fields.traceIdHidden}%22%7D%5D%7D%7D&orgId=1"
          }
         ]
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "target.cost.usd"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "currencyUSD"
+       },
+       {
+        "id": "decimals",
+        "value": 4
        }
       ]
      }
@@ -612,7 +628,11 @@
        "name": "Workflow",
        "target.runner": "Runner",
        "time": "Start",
-       "duration": "Duration"
+       "duration": "Duration",
+       "target.cost.usd": "Cost (USD)",
+       "target.usage.input_tokens": "Input tokens",
+       "target.usage.output_tokens": "Output tokens",
+       "target.workflow.status": "Status"
       }
      }
     }

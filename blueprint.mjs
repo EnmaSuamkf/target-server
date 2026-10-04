@@ -587,6 +587,7 @@ const OTEL_SETTINGS = Joi.object({
 		}),
 	signals: Joi.array().items(Joi.string().valid("traces", "metrics")).min(1).unique(),
 	sendContent: Joi.boolean(),
+	metricsTemporality: Joi.string().valid("cumulative", "delta"),
 	langfuseAttrs: Joi.boolean(),
 });
 

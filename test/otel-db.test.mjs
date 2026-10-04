@@ -44,7 +44,7 @@ test("migration is idempotent on an existing database file", () => {
 			.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'otel_%' ORDER BY name")
 			.all()
 			.map((r) => r.name);
-		assert.deepEqual(tables, ["otel_export_state", "otel_exports", "otel_outbox"]);
+		assert.deepEqual(tables, ["otel_export_state", "otel_exports", "otel_metric_series", "otel_outbox"]);
 		assert.equal(db.getOtelConfig(), null);
 	});
 });
