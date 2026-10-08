@@ -19,7 +19,6 @@ import type {
 	SyncRemoteWorkflowsResponse,
 	SyncScheduleSeriesResponse,
 	LinkedDevicesResponse,
-	RemoteResourceActions,
 } from "./api/types.ts";
 import { EMPTY_FILTERS } from "./api/types.ts";
 import { Bars } from "./components/Bars.tsx";
@@ -33,7 +32,6 @@ import { PricingPanel } from "./components/PricingPanel.tsx";
 import { Pagination } from "./components/Pagination.tsx";
 import { TargetMark } from "./components/TargetMark.tsx";
 import { RemoteWorkflowsPanel } from "./components/RemoteWorkflowsPanel.tsx";
-import { RemoteResourcesPanel } from "./components/RemoteResourcesPanel.tsx";
 import { SyncClientsPanel } from "./components/SyncClientsPanel.tsx";
 import { DevicesPanel } from "./components/DevicesPanel.tsx";
 import { UsersPanel } from "./components/UsersPanel.tsx";
@@ -223,16 +221,7 @@ export function App({ user, catalog = null, onSignOut }: { user: AuthUser; catal
 	const canEditRemoteStep = can("client.workflows.steps.edit");
 	const canManageRemote = can("client.workflows.manage");
 	const canExecuteRemote = can("client.workflows.execute");
-	const resourceActions = (prefix: "client.templates" | "client.tcp-tools" | "client.rci"): RemoteResourceActions => ({
-		create: can(`${prefix}.create`),
-		edit: can(`${prefix}.edit`),
-		delete: can(`${prefix}.delete`),
-		import: can(`${prefix}.import`),
-		export: can(`${prefix}.export`),
-	});
-	const templateActions = resourceActions("client.templates");
-	const tcpActions = resourceActions("client.tcp-tools");
-	const rciActions = resourceActions("client.rci");
+
 	const canManageDevices = can("devices.manage");
 	const canSeeRemoteArea = canRemote || canManageDevices;
 	const canPricing = can("pricing.read");
@@ -681,17 +670,6 @@ export function App({ user, catalog = null, onSignOut }: { user: AuthUser; catal
 							/>
 						</div> : null}
 
-						{canRemote ? <div className="panel" id="sync-remote-resources">
-							<h2>Remote resources</h2>
-							<div className="panel-note">Templates, TCP tools and RCI resource sets are mirrored per Target client and applied through the sync queue.</div>
-							<RemoteResourcesPanel
-								clients={syncClients?.clients ?? null}
-								templateActions={templateActions}
-								tcpActions={tcpActions}
-								rciActions={rciActions}
-								onRefresh={syncRefresh}
-							/>
-						</div> : null}
 					</>
 				)}
 			</main>
