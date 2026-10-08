@@ -66,7 +66,7 @@ test("create, template-read and add-step gates stay on the remote workflow panel
 	assert.match(source, /permissions\.manage/);
 	assert.match(source, /permissions\.execute/);
 	assert.match(source, /\+ Add step/);
-	assert.match(source, /label="Append a template's steps"/);
+	assert.match(source, /title="Append a template's steps"/);
 	assert.match(source, /label="Task description"/);
 	assert.match(source, /label="Acceptance criteria"/);
 	assert.match(source, /label="Manual review"/);

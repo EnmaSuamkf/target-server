@@ -34,6 +34,8 @@ export interface CollapsibleSectionProps {
 	forceOpen?: boolean
 	/** Shows an "unsaved" indicator and opens the section when it becomes true. */
 	dirty?: boolean
+	/** Accessible name for the section landmark when the title is not enough. */
+	'aria-label'?: string
 	children?: ReactNode
 }
 
@@ -45,6 +47,7 @@ export function CollapsibleSection({
 	defaultOpen = false,
 	forceOpen = false,
 	dirty = false,
+	'aria-label': ariaLabel,
 	children,
 }: CollapsibleSectionProps) {
 	const [open, setOpen] = useState<boolean>(() => readStored(id, defaultOpen))
@@ -65,7 +68,7 @@ export function CollapsibleSection({
 	}
 
 	return (
-		<section className={`sync-collapsible${open ? ' sync-collapsible--open' : ''}`}>
+		<section className={`sync-collapsible${open ? ' sync-collapsible--open' : ''}`} aria-label={ariaLabel}>
 			<div className="sync-collapsible-head">
 				<button
 					type="button"

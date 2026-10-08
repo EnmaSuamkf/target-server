@@ -1124,6 +1124,7 @@ export function RemoteWorkflowsPanel({
 					{permissions.execute && permissions.manage ? (
 						<CollapsibleSection
 							id="schedule"
+							aria-label="Schedule"
 							title="Schedule"
 							dirty={scheduleDirty}
 							summary={
