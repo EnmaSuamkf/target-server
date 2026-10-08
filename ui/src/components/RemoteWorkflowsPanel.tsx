@@ -40,6 +40,7 @@ import {
 	formatInZone,
 	type ScheduleDraft,
 } from "../lib/schedule.ts";
+import { CollapsibleSection } from "./CollapsibleSection.tsx";
 import { Field } from "./Field.tsx";
 import { Modal } from "./Modal.tsx";
 import { ResourceSelectionEditor } from "./ResourceSelectionEditor.tsx";
@@ -349,6 +350,13 @@ export function RemoteWorkflowsPanel({
 		(selected && SCHEDULE_BUSY_STATUSES.has(selected.status ?? "")
 			? `this workflow is ${selected.status}; its schedule can be changed once the run is over.`
 			: null);
+	const tcpDirty = selected != null && !sameTcpSelections(tcpDraft, selected.tcp_selections ?? []);
+	const rciDirty = selected != null && !sameResourceSelections(rciDraft, selected.resource_selections ?? []);
+	const scheduleBaseline = liveSeries ? draftFromSeries(liveSeries) : { ...emptyScheduleDraft(), enabled: true };
+	const scheduleDirty = JSON.stringify(scheduleDraft) !== JSON.stringify(scheduleBaseline);
+	const contextDirty = contextDraft !== "" && contextDraft.trim() !== (selected?.conversation_context ?? "").trim();
+	const savedContext = (selected?.conversation_context ?? "").trim();
+	const contextSummary = savedContext ? (savedContext.length > 60 ? `${savedContext.slice(0, 60)}…` : savedContext) : "Empty";
 	const templates = templatesData?.templates ?? [];
 	// What the create form would run: the picked template's step count is the
 	// best guess at the new workflow's size (only when a template is chosen).
@@ -985,20 +993,73 @@ export function RemoteWorkflowsPanel({
 
 			{selected ? (
 				<div className="sync-control sync-control--editor">
-					<div className="sync-control-head">
-						<h3>{selected.name ?? shortId(selected.id)}</h3>
-						<StatusBadge status={selected.status} />
-						<ClientSyncBadge localId={selected.local_id} stepsPendingSync={selectedStepsPendingSync} />
-						<AgentBadge agent={selected.agent} />
-						<SandboxBadge sandbox={selected.sandbox ?? "docker"} image={null} />
-						<span className="badge badge--neutral">{steps.length} step{steps.length === 1 ? "" : "s"}</span>
-						<ScheduleBadges workflow={selected} series={selected.series_id ? seriesById.get(selected.series_id) : null} />
-						{selected.local_id ? (
-							<span className="mono hint" title={selected.local_id}>
-								local {shortId(selected.local_id)}
-							</span>
-						) : null}
-					</div>
+					<header className="sync-detail-head">
+						<div className="sync-detail-head__main">
+							<div className="sync-detail-head__title">
+								<h3 title={selected.name ?? shortId(selected.id)}>{selected.name ?? shortId(selected.id)}</h3>
+								<StatusBadge status={selected.status} />
+								<ClientSyncBadge localId={selected.local_id} stepsPendingSync={selectedStepsPendingSync} />
+							</div>
+							<div className="sync-detail-head__meta">
+								<span>{selected.agent}</span>
+								<span>{selected.sandbox ?? "docker"}</span>
+								<span>{steps.length} step{steps.length === 1 ? "" : "s"}</span>
+								{selected.local_id ? (
+									<span className="mono" title={selected.local_id}>
+										local {shortId(selected.local_id)}
+									</span>
+								) : null}
+								<ScheduleBadges workflow={selected} series={selected.series_id ? seriesById.get(selected.series_id) : null} />
+							</div>
+						</div>
+						<div className="sync-control-actions">
+							{permissions.execute ? (
+								<button
+									type="button"
+									className="btn btn--sm btn--on"
+									disabled={startDisabled}
+									title={
+										selectedStepKeys.size === 0
+											? "Select at least one step to run"
+											: pendingRunCommand
+												? "Run command already queued or in flight"
+												: isRunningOnClient
+													? "Workflow is already running on the client"
+													: runAction === "restart"
+														? "Restart resets the selected steps and runs them again"
+														: undefined
+									}
+									onClick={() => void runCommand(`workflow.${runAction}`, runPayload())}
+								>
+									{pendingRunCommand
+										? "Run queued…"
+										: isRunningOnClient
+											? "Running…"
+											: `${runLabels[runAction]}${selectedStepKeys.size > 0 ? ` (${selectedStepKeys.size})` : ""}`}
+								</button>
+							) : null}
+							{permissions.manage ? (
+								<button
+									type="button"
+									className="btn btn--sm"
+									disabled={busy || !isRunningOnClient}
+									onClick={() => void runCommand("workflow.pause")}
+								>
+									Pause
+								</button>
+							) : null}
+							{permissions.manage ? (
+								<button
+									type="button"
+									className="btn btn--sm btn--danger sync-control-actions__delete"
+									disabled={busy || selected.status === "deleting"}
+									onClick={() => void onDelete()}
+								>
+									Delete
+								</button>
+							) : null}
+						</div>
+					</header>
 
 					{runState ? (
 						<div className={`sync-run-banner sync-run-banner--${runState.tone}`} role="status">
@@ -1020,59 +1081,15 @@ export function RemoteWorkflowsPanel({
 						</p>
 					) : null}
 
-					<div className="sync-control-actions">
-						{permissions.execute ? (
-							<button
-								type="button"
-								className="btn btn--sm btn--on"
-								disabled={startDisabled}
-								title={
-									selectedStepKeys.size === 0
-										? "Select at least one step to run"
-										: pendingRunCommand
-											? "Run command already queued or in flight"
-											: isRunningOnClient
-												? "Workflow is already running on the client"
-												: runAction === "restart"
-													? "Restart resets the selected steps and runs them again"
-													: undefined
-								}
-								onClick={() => void runCommand(`workflow.${runAction}`, runPayload())}
-							>
-								{pendingRunCommand
-									? "Run queued…"
-									: isRunningOnClient
-										? "Running…"
-										: `${runLabels[runAction]}${selectedStepKeys.size > 0 ? ` (${selectedStepKeys.size})` : ""}`}
-							</button>
-						) : null}
-						{permissions.manage ? (
-							<button
-								type="button"
-								className="btn btn--sm"
-								disabled={busy || !isRunningOnClient}
-								onClick={() => void runCommand("workflow.pause")}
-							>
-								Pause
-							</button>
-						) : null}
-						{permissions.manage ? (
-							<button
-								type="button"
-								className="btn btn--sm btn--danger"
-								disabled={busy || selected.status === "deleting"}
-								onClick={() => void onDelete()}
-							>
-								Delete
-							</button>
-						) : null}
-					</div>
-
 					{permissions.addStep && permissions.templatesRead ? (
-						<section className="sync-section">
+						<CollapsibleSection
+							id="append-template"
+							title="Append a template's steps"
+							summary={appendTemplateId ? templates.find((t) => t.id === appendTemplateId)?.name : undefined}
+						>
 							<div className="sync-create-row">
 								<Field
-									label="Append a template's steps"
+									label="Template"
 									hint="Adds every step from a server catalog template. TCP and RCI selections are merged into this workflow."
 								>
 									{(props) => (
@@ -1101,19 +1118,26 @@ export function RemoteWorkflowsPanel({
 									Append template
 								</button>
 							</div>
-						</section>
+						</CollapsibleSection>
 					) : null}
 
 					{permissions.execute && permissions.manage ? (
-						<section className="sync-section" aria-label="Schedule">
-							<div className="sync-section-head">
-								<h4>Schedule</h4>
-								{liveSeries ? (
-									<span className={`badge badge--${liveSeries.state === "broken" ? "danger" : "neutral"}`}>
-										{liveSeries.state}
-									</span>
-								) : null}
-							</div>
+						<CollapsibleSection
+							id="schedule"
+							aria-label="Schedule"
+							title="Schedule"
+							dirty={scheduleDirty}
+							summary={
+								<>
+									{liveSeries ? describeSchedule(liveSeries.spec, liveSeries.timezone) : "Not scheduled"}
+									{liveSeries ? (
+										<span className={`badge badge--${liveSeries.state === "broken" ? "danger" : "neutral"}`}>
+											{liveSeries.state}
+										</span>
+									) : null}
+								</>
+							}
+						>
 							{liveSeries ? (
 								<p className="hint">
 									{describeSchedule(liveSeries.spec, liveSeries.timezone)}
@@ -1166,25 +1190,27 @@ export function RemoteWorkflowsPanel({
 									</button>
 								</div>
 							) : null}
-						</section>
+						</CollapsibleSection>
 					) : null}
 
-					<section className="sync-section">
-						<div className="sync-section-head">
-							<h4>TCP</h4>
-							{canSaveTcps ? (
+					<CollapsibleSection
+						id="tcp"
+						title="TCP"
+						dirty={tcpDirty}
+						summary={`${tcpDraft.length} pack${tcpDraft.length === 1 ? "" : "s"} selected`}
+						actions={
+							canSaveTcps ? (
 								<button
 									type="button"
 									className="btn btn--sm btn--on"
-									disabled={
-										busy || sameTcpSelections(tcpDraft, selected.tcp_selections ?? [])
-									}
+									disabled={busy || !tcpDirty}
 									onClick={() => void onSaveTcps()}
 								>
 									Save TCP selection
 								</button>
-							) : null}
-						</div>
+							) : null
+						}
+					>
 						<p className="hint">
 							Attach server catalog TCP packs. Whole packs or individual tools are pushed to the client.
 						</p>
@@ -1201,24 +1227,26 @@ export function RemoteWorkflowsPanel({
 						{!canSaveTcps && permissions.tcpRead ? (
 							<p className="hint">Saving TCP selections needs client.workflows.manage.</p>
 						) : null}
-					</section>
+					</CollapsibleSection>
 
-					<section className="sync-section">
-						<div className="sync-section-head">
-							<h4>RCI</h4>
-							{canSaveRci ? (
+					<CollapsibleSection
+						id="rci"
+						title="RCI"
+						dirty={rciDirty}
+						summary={`${rciDraft.length} resource set${rciDraft.length === 1 ? "" : "s"} selected`}
+						actions={
+							canSaveRci ? (
 								<button
 									type="button"
 									className="btn btn--sm btn--on"
-									disabled={
-										busy || sameResourceSelections(rciDraft, selected.resource_selections ?? [])
-									}
+									disabled={busy || !rciDirty}
 									onClick={() => void onSaveRci()}
 								>
 									Save RCI selection
 								</button>
-							) : null}
-						</div>
+							) : null
+						}
+					>
 						<p className="hint">
 							Attach server catalog resource sets. Whole sets or individual resources are pushed to the client.
 						</p>
@@ -1235,12 +1263,28 @@ export function RemoteWorkflowsPanel({
 						{!canSaveRci && permissions.rciRead ? (
 							<p className="hint">Saving RCI selections needs client.workflows.manage.</p>
 						) : null}
-					</section>
+					</CollapsibleSection>
 
 					{catalogError ? <div className="err">{catalogError}</div> : null}
 
-					<section className="sync-section">
-						<h4>Conversation context</h4>
+					<CollapsibleSection
+						id="context"
+						title="Conversation context"
+						dirty={contextDirty}
+						summary={contextSummary}
+						actions={
+							permissions.manage ? (
+								<button
+									type="button"
+									className="btn btn--sm btn--on"
+									disabled={busy}
+									onClick={() => void saveContext()}
+								>
+									Save context
+								</button>
+							) : null
+						}
+					>
 						<p className="hint">Delivered before every step — same as Target hub.</p>
 						<textarea
 							className="input sync-context-input"
@@ -1251,17 +1295,7 @@ export function RemoteWorkflowsPanel({
 							disabled={!permissions.manage}
 							readOnly={!permissions.manage}
 						/>
-						{permissions.manage ? (
-							<button
-								type="button"
-								className="btn btn--sm btn--on"
-								disabled={busy}
-								onClick={() => void saveContext()}
-							>
-								Save context
-							</button>
-						) : null}
-					</section>
+					</CollapsibleSection>
 
 					{selected.local_id ? (
 						<p className="hint sync-plan-live-hint">
@@ -1439,10 +1473,12 @@ export function RemoteWorkflowsPanel({
 					</section>
 
 					{selected.local_id ? (
-						<section className="sync-section sync-reported">
-							<div className="sync-section-head">
-								<h4>Client activity</h4>
-								{reportedDetail ? (
+						<CollapsibleSection
+							id="client-activity"
+							title="Client activity"
+							summary={reportedDetail ? (reportedDetail.workflow?.status ?? "reporting") : "Loading…"}
+							actions={
+								reportedDetail ? (
 									<button
 										type="button"
 										className="btn btn--sm btn--ghost"
@@ -1450,8 +1486,9 @@ export function RemoteWorkflowsPanel({
 									>
 										Open in Activity tab
 									</button>
-								) : null}
-							</div>
+								) : null
+							}
+						>
 							<p className="hint">
 								Live run state from the client hub (same feed as Activity when reporting is enabled).
 							</p>
@@ -1465,25 +1502,30 @@ export function RemoteWorkflowsPanel({
 							) : (
 								<div className="empty">Loading client activity…</div>
 							)}
-						</section>
+						</CollapsibleSection>
 					) : null}
 
 					{errors.length ? <div className="err">{errors.map((e) => e.message).join(" · ")}</div> : null}
 
-					<h4>Live sync events</h4>
-					{!events || events.length === 0 ? (
-						<div className="empty">No sync events for this workflow yet.</div>
-					) : (
-						<ul className="sync-event-feed">
-							{events.map((ev) => (
-								<li key={ev.id}>
-									<span className="mono">{timeAgo(ev.received_at)}</span>
-									<span className="badge badge--neutral">{ev.type}</span>
-									<span className="sync-event-payload">{formatSyncEventSummary(ev)}</span>
-								</li>
-							))}
-						</ul>
-					)}
+					<CollapsibleSection
+						id="recent-events"
+						title="Recent events"
+						summary={`${events?.length ?? 0} event${events?.length === 1 ? "" : "s"}`}
+					>
+						{!events || events.length === 0 ? (
+							<div className="empty">No sync events for this workflow yet.</div>
+						) : (
+							<ul className="sync-event-feed">
+								{events.map((ev) => (
+									<li key={ev.id}>
+										<span className="mono">{timeAgo(ev.received_at)}</span>
+										<span className="badge badge--neutral">{ev.type}</span>
+										<span className="sync-event-payload">{formatSyncEventSummary(ev)}</span>
+									</li>
+								))}
+							</ul>
+						)}
+					</CollapsibleSection>
 				</div>
 			) : null}
 		</div>

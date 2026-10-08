@@ -41,8 +41,8 @@ test("remote workflow actions are independently gated", () => {
 	assert.match(workflows, /appendRemoteTemplate/);
 	assert.match(workflows, /setRemoteWorkflowTcps/);
 	assert.match(workflows, /setRemoteWorkflowResourceSets/);
-	assert.match(workflows, /<h4>TCP<\/h4>/);
-	assert.match(workflows, /<h4>RCI<\/h4>/);
+	assert.match(workflows, /title="TCP"/);
+	assert.match(workflows, /title="RCI"/);
 	assert.match(app, /templatesRead: can\("templates\.read"\)/);
 	assert.match(app, /tcpRead: can\("tcp-tools\.read"\)/);
 	assert.match(app, /rciRead: can\("rci\.read"\)/);
@@ -82,20 +82,6 @@ test("superuser dashboard shows an Organizations tab with a create form", () => 
 	assert.match(panel, /Password setup link/);
 	assert.match(panel, /<Modal/);
 	assert.match(panel, /<Field/);
-});
-
-test("remote resources expose independent create/edit/delete/import/export actions", () => {
-	const source = read("../ui/src/components/RemoteResourcesPanel.tsx");
-	assert.match(source, /exportRemoteResources/);
-	assert.match(source, /importRemoteResources/);
-	assert.match(source, /actions\.create/);
-	assert.match(source, /actions\.edit/);
-	assert.match(source, /actions\.delete/);
-	assert.match(source, /actions\.import/);
-	assert.match(source, /actions\.export/);
-	assert.match(source, />Import</);
-	assert.match(source, />Export</);
-	assert.doesNotMatch(source, /canManageTemplates/);
 });
 
 test("Agent Resources editors pick catalog sync roles", () => {

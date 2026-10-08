@@ -199,6 +199,8 @@ across Target hub versions.
 ## Operator resource API
 
 All resource paths are scoped to one client; resources are never global.
+These routes are API-only: the dashboard's Remote control tab no longer has a
+per-client resources panel.
 
 | Method | Path | Permission |
 | --- | --- | --- |
