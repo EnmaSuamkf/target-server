@@ -1,7 +1,7 @@
 import type { WorkflowStep } from "../api/types.ts";
 import { formatDuration } from "../lib/format.ts";
 import { StatusBadge } from "./Badges.tsx";
-import { StepNotes } from "./StepNotes.tsx";
+import { StepTimeline } from "./StepTimeline.tsx";
 
 /**
  * Workflow steps as cards — the same read-only shape as the Target hub's step
@@ -85,7 +85,7 @@ function StepCard({ step, planMode }: { step: WorkflowStep; planMode: boolean })
 				</div>
 			) : null}
 
-			{!isContext && step.notes && step.notes.length > 0 ? <StepNotes notes={step.notes} /> : null}
+			{!isContext && step.notes && step.notes.length > 0 ? <StepTimeline notes={step.notes} /> : null}
 		</li>
 	);
 }

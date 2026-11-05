@@ -139,8 +139,13 @@ export interface StepNote {
 	id: string;
 	theme: StepNoteTheme;
 	content: string;
+	/** Who wrote the note: "agent" or "operator" (a missing value means operator). */
+	source?: StepNoteSource | null;
+	createdAt?: string | null;
 	updatedAt?: string | null;
 }
+
+export type StepNoteSource = "operator" | "agent";
 
 /**
  * One session's `usage.snapshot`, normalised by the server

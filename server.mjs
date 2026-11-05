@@ -191,6 +191,7 @@ import {
 	applyScheduleInstanceCreated,
 	mirrorScheduleSyncEvent,
 	listScheduleNotices,
+	normalizeNoteSource,
 } from "./db.mjs";
 import {
 	assertMultiOrgDeviceLinkingMode,
@@ -2043,7 +2044,7 @@ function remoteStepToApi(step) {
 	};
 }
 
-function templateStepToAddPayload(step, stepKey) {
+export function templateStepToAddPayload(step, stepKey) {
 	const payload = {
 		step_key: stepKey,
 		description: step.description,
@@ -2056,10 +2057,14 @@ function templateStepToAddPayload(step, stepKey) {
 		payload.acceptance_criteria = step.acceptanceCriteria.trim();
 	}
 	if (Array.isArray(step.notes) && step.notes.length > 0) {
+		const now = new Date().toISOString();
 		payload.notes = step.notes.map((note) => ({
 			...(typeof note.id === "string" && note.id ? { id: note.id } : {}),
 			content: note.content,
 			...(note.theme ? { theme: note.theme } : {}),
+			source: normalizeNoteSource(note.source),
+			createdAt: typeof note.createdAt === "string" && note.createdAt ? note.createdAt : now,
+			updatedAt: typeof note.updatedAt === "string" && note.updatedAt ? note.updatedAt : now,
 		}));
 	}
 	return payload;
