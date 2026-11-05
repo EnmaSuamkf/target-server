@@ -659,6 +659,99 @@ tbody tr.wf-row--selected, tbody tr.wf-row--selected:hover { background: var(--a
 	color: var(--success-700);
 }
 
+/* --- step notes timeline (read-only) --- */
+
+.step-timeline__list {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+	display: grid;
+	gap: 0;
+	min-width: 0;
+}
+
+.step-timeline__item {
+	display: grid;
+	grid-template-columns: 1rem minmax(0, 1fr);
+	column-gap: var(--space-2);
+	min-width: 0;
+}
+
+.step-timeline__rail {
+	position: relative;
+	display: flex;
+	justify-content: center;
+	padding-top: 0.4rem;
+}
+
+.step-timeline__item:not(:last-child) .step-timeline__rail::after {
+	content: "";
+	position: absolute;
+	top: calc(0.4rem + 0.5rem);
+	bottom: calc(-1 * var(--space-2));
+	left: 50%;
+	width: 2px;
+	transform: translateX(-50%);
+	background: var(--border-strong);
+}
+
+.step-timeline__dot {
+	position: relative;
+	z-index: 1;
+	width: 0.5rem;
+	height: 0.5rem;
+	border-radius: 999px;
+	background: var(--gray-400);
+	box-shadow: 0 0 0 2px var(--surface);
+}
+
+.step-timeline__dot--neutral { background: #eab308; }
+.step-timeline__dot--warning { background: var(--warn-500); }
+.step-timeline__dot--success { background: var(--success-500); }
+
+.step-timeline__item + .step-timeline__item { margin-top: var(--space-2); }
+
+.step-timeline__note {
+	min-width: 0;
+	max-width: none;
+	width: 100%;
+}
+
+.step-timeline__meta {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: baseline;
+	gap: var(--space-1) var(--space-2);
+	font-size: var(--text-xs);
+	color: var(--text-muted);
+	margin-bottom: var(--space-1);
+}
+
+.step-timeline__pos {
+	font-family: var(--font-mono);
+	font-weight: 600;
+	color: var(--gray-700);
+}
+
+.step-timeline__author {
+	font-weight: 600;
+	color: var(--gray-700);
+}
+
+.step-timeline__edited {
+	padding: 0 var(--space-1);
+	border-radius: var(--radius-sm);
+	border: 1px solid var(--border-strong);
+	color: var(--gray-600);
+	font-size: var(--text-xs);
+}
+
+.step-timeline__text {
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+	word-break: break-word;
+}
+
 /* --- event feed --- */
 
 .feed { display: flex; flex-direction: column; max-height: 480px; overflow-y: auto; }

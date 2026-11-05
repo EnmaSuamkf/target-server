@@ -3274,6 +3274,11 @@ export function listWorkflowNames({ instanceId = null, user = null, agent = null
  * latest lifecycle event carries the run state.
  */
 /** Fold sticky-note events into per-step note lists (latest state wins). */
+/** Note author: only "agent" is kept; missing or invalid values mean "operator". */
+export function normalizeNoteSource(value) {
+	return value === "agent" ? "agent" : "operator";
+}
+
 function foldStepNotes(workflowId, ownerUserId = null) {
 	const own = ownerScope(ownerUserId);
 	const rows = open()
@@ -3311,7 +3316,9 @@ function foldStepNotes(workflowId, ownerUserId = null) {
 		if (!content && typeof data.content_len === "number") {
 			content = `(${data.content_len} characters — reported before note text was included)`;
 		}
-		notes.set(noteId, { id: noteId, theme, content: content ?? "", updatedAt: r.createdAt });
+		const source = normalizeNoteSource(data.source);
+		const createdAt = notes.get(noteId)?.createdAt ?? r.createdAt;
+		notes.set(noteId, { id: noteId, theme, content: content ?? "", source, createdAt, updatedAt: r.createdAt });
 	}
 	const out = new Map();
 	for (const [stepId, notes] of byStep) {
