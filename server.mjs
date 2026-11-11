@@ -39,6 +39,7 @@ import {
 	verifyOAuthState,
 } from "./google-oauth.mjs";
 import { EVENT_TYPES, validate, validateSyncEventBatch } from "./blueprint.mjs";
+import { parsePipeline } from "./pipeline-yaml.mjs";
 import { estimate } from "./estimates.mjs";
 import {
 	DEFAULT_ADMIN_EMAIL,
@@ -158,6 +159,14 @@ import {
 	catalogTemplateBundle,
 	catalogTcpBundle,
 	catalogResourceSetBundle,
+	catalogPipelineBundle,
+	createPipeline,
+	deletePipeline,
+	getPipeline,
+	importPipelines,
+	listPipelines,
+	PipelineStoreError,
+	updatePipeline,
 	createDeviceLinkRequest,
 	getDeviceLinkRequest,
 	authenticateDeviceLinkRequest,
@@ -1729,6 +1738,20 @@ const RESOURCE_DOMAINS = {
 			export: "client.rci.export",
 		},
 	},
+	// Pipelines (docs/pipelines.md). `pipeline.upsert`/`pipeline.delete` are not
+	// hub commands, so the commands check refuses writes; a hub reports its copies
+	// by events, mirrored into remote_resources, as TCP tools are.
+	pipelines: {
+		capability: "pipelines",
+		command: "pipeline",
+		permissions: {
+			create: "client.pipelines.create",
+			edit: "client.pipelines.edit",
+			delete: "client.pipelines.delete",
+			import: "client.pipelines.import",
+			export: "client.pipelines.export",
+		},
+	},
 };
 
 const EXECUTE_STEP_COMMANDS = new Set(["step.run", "step.abort", "step.continue"]);
@@ -1754,6 +1777,16 @@ function workflowCommandPermission(type) {
 function clientSupportsResourceDomain(client, info) {
 	const resources = client.capabilities?.resources;
 	return resources?.version === 2 && resources?.[info.capability] === true;
+}
+
+/**
+ * True when the hub advertises the `pipelines` capability (`resources.pipelines`
+ * under sync/v2). A hub that does not runs no pipelines, so it must never be
+ * sent one, nor a template or step that uses one: a command step sent to an
+ * older hub would be read as an agent step.
+ */
+function clientSupportsPipelines(client) {
+	return clientSupportsResourceDomain(client, { capability: "pipelines" });
 }
 
 function clientSupportsResourceCommand(client, info, type) {
@@ -1941,6 +1974,24 @@ function capabilityUnsupportedBody(info, type) {
 	};
 }
 
+/**
+ * A template's command steps can be sent to a hub only when the hub advertises
+ * `pipelines`, and only when every pipeline they run is one this hub's owner is
+ * granted. Otherwise the step would reach the hub without its pipeline.
+ * Returns { status, body } for a refusal, or null.
+ */
+function pipelineStepCapabilityError(client, commandSteps) {
+	if (!client || !clientSupportsPipelines(client)) {
+		return { status: 409, body: capabilityUnsupportedBody({ capability: "pipelines" }, "step.add") };
+	}
+	const granted = new Set(client.ownerUserId ? listSyncableCatalog(client.ownerUserId).pipelines.map((item) => item.id) : []);
+	const missing = [...new Set(commandSteps.map((step) => step.pipelineId))].filter((id) => !granted.has(id));
+	if (missing.length > 0) {
+		return { status: 409, body: { error: "pipeline_not_synced", pipelineIds: missing } };
+	}
+	return null;
+}
+
 function selectionCapabilityError(client, tcpSelections, resourceSelections) {
 	if (tcpSelections.length) {
 		const info = RESOURCE_DOMAINS["tcp-tools"];
@@ -2045,6 +2096,21 @@ function remoteStepToApi(step) {
 }
 
 export function templateStepToAddPayload(step, stepKey) {
+	if (step.kind === "command") {
+		// A command step: the hub runs the pipeline, with no subagent and no criteria.
+		// Callers only reach this for a hub that advertises `pipelines`.
+		return {
+			step_key: stepKey,
+			description: step.description,
+			manual_review: false,
+			use_subagent: false,
+			max_retries: 0,
+			retry_interval_seconds: 0,
+			kind: "command",
+			pipeline_id: step.pipelineId,
+			pipeline_inputs: { ...(step.pipelineInputs ?? {}) },
+		};
+	}
 	const payload = {
 		step_key: stepKey,
 		description: step.description,
@@ -2119,7 +2185,7 @@ function isOperatorSyncPath(pathname, method) {
 	if (method === "DELETE" && /^\/api\/sync\/remote-workflows\/[^/]+$/.test(pathname)) return true;
 	if ((method === "PUT" || method === "DELETE") && /^\/api\/sync\/remote-workflows\/[^/]+\/schedule$/.test(pathname)) return true;
 	if (method === "GET" && pathname === "/api/sync/schedule-series") return true;
-	if (/^\/api\/sync\/clients\/[^/]+\/(templates|tcp-tools|resource-sets)(\/[^/]+)?$/.test(pathname)) return true;
+	if (/^\/api\/sync\/clients\/[^/]+\/(templates|tcp-tools|resource-sets|pipelines)(\/[^/]+)?$/.test(pathname)) return true;
 	return false;
 }
 
@@ -2208,6 +2274,18 @@ async function handleSyncRoute(req, res, pathname, url) {
 		const syncable = listSyncableCatalog(client.ownerUserId);
 		const tcpIds = new Set(syncable.tcps.map((item) => item.id));
 		const resourceSetIds = new Set(syncable.resourceSets.map((item) => item.id));
+		// Pipelines go only to a hub that advertises the `pipelines` capability
+		// (sync/v2 resources). For any other hub the pipelines domain is left out
+		// entirely, and so is every template with a command step: a template
+		// without its pipeline would not do what it says.
+		const hubRunsPipelines = clientSupportsPipelines(client);
+		const pipelinesAllowed = hubRunsPipelines && permissions.includes("client.pipelines.sync");
+		const pipelineIds = new Set(pipelinesAllowed ? syncable.pipelines.map((item) => item.id) : []);
+		const templatesForHub = syncable.templates.filter((template) => {
+			const commandIds = template.pipelineIds ?? [];
+			if (commandIds.length === 0) return true;
+			return hubRunsPipelines && commandIds.every((id) => pipelineIds.has(id));
+		});
 		return sendJson(res, 200, {
 			contract_version: "catalog-sync/v1",
 			server_time: new Date().toISOString(),
@@ -2216,8 +2294,22 @@ async function handleSyncRoute(req, res, pathname, url) {
 				templates: permissions.includes("client.templates.sync"),
 				tcp_tools: permissions.includes("client.tcp-tools.sync"),
 				resource_sets: permissions.includes("client.rci.sync"),
+				pipelines: pipelinesAllowed,
 			},
-			templates: syncable.templates.map((template) => ({
+			// A hub without the `pipelines` capability gets no pipelines domain at all.
+			...(hubRunsPipelines
+				? {
+						pipelines: syncable.pipelines.filter((pipeline) => pipelineIds.has(pipeline.id)).map((pipeline) => ({
+							id: pipeline.id,
+							name: pipeline.name,
+							updatedAt: pipeline.updatedAt,
+							// The YAML text is the pipeline. A pipeline holds no secret value:
+							// `${{ secrets.NAME }}` only names a secret the hub owns.
+							data: { tags: pipeline.tags, source: pipeline.source, sourceHash: pipeline.sourceHash },
+						})),
+					}
+				: {}),
+			templates: templatesForHub.map((template) => ({
 				id: template.id,
 				name: template.name,
 				updatedAt: template.updatedAt,
@@ -2481,7 +2573,7 @@ async function handleOperatorSyncRoute(req, res, pathname, url) {
 		return sendJson(res, created ? 201 : 200, { contract_version: "sync/v2", commands });
 	}
 
-	const resourceMatch = pathname.match(/^\/api\/sync\/clients\/([^/]+)\/(templates|tcp-tools|resource-sets)(?:\/([^/]+))?$/);
+	const resourceMatch = pathname.match(/^\/api\/sync\/clients\/([^/]+)\/(templates|tcp-tools|resource-sets|pipelines)(?:\/([^/]+))?$/);
 	if (resourceMatch) {
 		const [, clientId, pathDomain, resourceId] = resourceMatch;
 		const info = resourceDomainInfo(pathDomain);
@@ -2645,6 +2737,9 @@ async function handleOperatorSyncRoute(req, res, pathname, url) {
 			}
 			const cap = selectionCapabilityError(client, templateTcpSelections, templateResourceSelections);
 			if (cap) return sendJson(res, 409, cap);
+			const commandSteps = (template.steps ?? []).filter((step) => step.kind === "command");
+			const pipelineCap = commandSteps.length ? pipelineStepCapabilityError(client, commandSteps) : null;
+			if (pipelineCap) return sendJson(res, pipelineCap.status, pipelineCap.body);
 		}
 		const remoteId = randomUUID();
 		const conversationContext = v.value.conversation_context?.trim() || null;
@@ -2796,6 +2891,9 @@ async function handleOperatorSyncRoute(req, res, pathname, url) {
 			if (err.statusCode === 422) return sendJson(res, 422, { error: err.code });
 			throw err;
 		}
+		const commandSteps = (template.steps ?? []).filter((step) => step.kind === "command");
+		const pipelineCap = commandSteps.length ? pipelineStepCapabilityError(client, commandSteps) : null;
+		if (pipelineCap) return sendJson(res, pipelineCap.status, pipelineCap.body);
 		const mergedTcp = mergeTcpSelections(remoteWorkflow.tcpSelections, incomingTcp);
 		const mergedRci = mergeResourceSelections(remoteWorkflow.resourceSelections, incomingRci);
 		const applySelections = incomingTcp.length > 0 || incomingRci.length > 0;
@@ -3466,7 +3564,11 @@ function catalogAttachment(filename) {
 
 function sendCatalogMutationError(res, err) {
 	if (err.statusCode === 422) {
-		sendJson(res, 422, { error: err.code, ...(err.roleId ? { roleId: err.roleId } : {}) });
+		sendJson(res, 422, {
+			error: err.code,
+			...(err.roleId ? { roleId: err.roleId } : {}),
+			...(err.errors ? { errors: err.errors } : {}),
+		});
 		return true;
 	}
 	return false;
@@ -3766,6 +3868,150 @@ async function handleCatalogRoute(req, res, pathname) {
 	return sendJson(res, 404, { error: "not_found" });
 }
 
+// Pipelines (docs/pipelines.md, "HTTP API"). Gated by the client.pipelines.*
+// catalogue IDs. Reads need any of them, since the catalogue has no read ID of
+// its own. Validation is the same parser the hub runs; invalid YAML is 400.
+const PIPELINE_READ_PERMISSIONS = [
+	"client.pipelines.create",
+	"client.pipelines.edit",
+	"client.pipelines.delete",
+	"client.pipelines.import",
+	"client.pipelines.export",
+	"client.pipelines.sync",
+];
+
+/** Maps a pipeline store refusal to its HTTP answer. Returns false for anything else. */
+function sendPipelineStoreError(res, err) {
+	if (!(err instanceof PipelineStoreError)) return false;
+	if (err.code === "invalid_pipeline") {
+		const body = { error: "invalid_pipeline", errors: err.errors };
+		if (err.index !== null) body.index = err.index;
+		sendJson(res, 400, body);
+		return true;
+	}
+	if (err.code === "in_use") {
+		sendJson(res, 409, { error: "in_use", templates: err.templates });
+		return true;
+	}
+	return false;
+}
+
+async function handlePipelineRoute(req, res, pathname) {
+	const match = pathname.match(/^\/api\/pipelines(?:\/([^/]+))?(?:\/(export))?$/);
+	if (!match) return false;
+	const [, part, tail] = match;
+
+	if (part === "validate" && !tail) {
+		if (req.method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
+		if (!(await requireAnyCapability(req, res, ["client.pipelines.create", "client.pipelines.edit"]))) return true;
+		const body = await readJson(req, res);
+		if (!body) return true;
+		if (typeof body.source !== "string") {
+			return sendJson(res, 422, { errors: [{ path: "source", message: "source is required" }] });
+		}
+		const result = parsePipeline(body.source);
+		if (!result.ok) return sendJson(res, 200, { ok: false, errors: result.errors });
+		// `inputs` are the declared inputs, so a template's command step can show one field each.
+		const inputs = Object.entries(result.pipeline.inputs).map(([name, spec]) => ({
+			name,
+			required: spec.required === true,
+			default: spec.default ?? null,
+		}));
+		return sendJson(res, 200, { ok: true, name: result.pipeline.name, inputs, errors: [] });
+	}
+
+	if (part === "import" && !tail) {
+		if (req.method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
+		if (!(await requireCapability(req, res, "client.pipelines.import"))) return true;
+		const body = await readJson(req, res);
+		if (!body) return true;
+		const v = validate("catalog.pipelines.import", body);
+		if (!v.ok) return sendJson(res, 422, { errors: v.errors });
+		const items = Array.isArray(v.value) ? v.value : v.value.pipelines ? v.value.pipelines : [v.value];
+		try {
+			return sendJson(res, 201, { pipelines: importPipelines(items) });
+		} catch (err) {
+			if (sendPipelineStoreError(res, err)) return true;
+			if (sendCatalogMutationError(res, err)) return true;
+			throw err;
+		}
+	}
+
+	if (part === "export" && !tail) {
+		if (req.method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
+		if (!(await requireCapability(req, res, "client.pipelines.export"))) return true;
+		return sendJson(res, 200, catalogPipelineBundle(listPipelines()), catalogAttachment("pipelines-export.json"));
+	}
+
+	if (part && tail === "export") {
+		if (req.method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
+		if (!(await requireCapability(req, res, "client.pipelines.export"))) return true;
+		const item = getPipeline(part);
+		if (!item) return sendJson(res, 404, { error: "not_found" });
+		return sendJson(res, 200, catalogPipelineBundle([item]), catalogAttachment(`pipeline-${part}.json`));
+	}
+
+	if (part && !tail) {
+		if (req.method === "GET") {
+			if (!(await requireAnyCapability(req, res, PIPELINE_READ_PERMISSIONS))) return true;
+			const item = getPipeline(part);
+			if (!item) return sendJson(res, 404, { error: "not_found" });
+			return sendJson(res, 200, { pipeline: item });
+		}
+		if (req.method === "PATCH") {
+			if (!(await requireCapability(req, res, "client.pipelines.edit"))) return true;
+			const body = await readJson(req, res);
+			if (!body) return true;
+			const v = validate("catalog.pipeline.update", body);
+			if (!v.ok) return sendJson(res, 422, { errors: v.errors });
+			try {
+				const item = updatePipeline(part, v.value);
+				if (!item) return sendJson(res, 404, { error: "not_found" });
+				return sendJson(res, 200, { pipeline: item });
+			} catch (err) {
+				if (sendPipelineStoreError(res, err)) return true;
+				if (sendCatalogMutationError(res, err)) return true;
+				throw err;
+			}
+		}
+		if (req.method === "DELETE") {
+			if (!(await requireCapability(req, res, "client.pipelines.delete"))) return true;
+			try {
+				if (!deletePipeline(part)) return sendJson(res, 404, { error: "not_found" });
+				return sendJson(res, 200, { ok: true });
+			} catch (err) {
+				if (sendPipelineStoreError(res, err)) return true;
+				throw err;
+			}
+		}
+		return sendJson(res, 405, { error: "method not allowed" });
+	}
+
+	if (!part) {
+		if (req.method === "GET") {
+			if (!(await requireAnyCapability(req, res, PIPELINE_READ_PERMISSIONS))) return true;
+			return sendJson(res, 200, { pipelines: listPipelines() });
+		}
+		if (req.method === "POST") {
+			if (!(await requireCapability(req, res, "client.pipelines.create"))) return true;
+			const body = await readJson(req, res);
+			if (!body) return true;
+			const v = validate("catalog.pipeline.create", body);
+			if (!v.ok) return sendJson(res, 422, { errors: v.errors });
+			try {
+				return sendJson(res, 201, { pipeline: createPipeline(v.value) });
+			} catch (err) {
+				if (sendPipelineStoreError(res, err)) return true;
+				if (sendCatalogMutationError(res, err)) return true;
+				throw err;
+			}
+		}
+		return sendJson(res, 405, { error: "method not allowed" });
+	}
+
+	return sendJson(res, 404, { error: "not_found" });
+}
+
 /** A request that raced an org delete gets 401, never a 500 or a re-created DB file. */
 function sendOrgGoneError(res, err) {
 	if (err?.code !== "org_deleted" && err?.code !== "unknown_organization") return false;
@@ -3836,6 +4082,11 @@ const server = createServer(async (req, res) => {
 
 		if (pathname.startsWith("/api/templates") || pathname.startsWith("/api/tcps") || pathname.startsWith("/api/resource-sets")) {
 			const handled = await handleCatalogRoute(req, res, pathname);
+			if (handled !== false) return;
+		}
+
+		if (pathname === "/api/pipelines" || pathname.startsWith("/api/pipelines/")) {
+			const handled = await handlePipelineRoute(req, res, pathname);
 			if (handled !== false) return;
 		}
 

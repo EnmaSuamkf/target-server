@@ -47,6 +47,12 @@ export const KIND_INFO: Record<string, KindInfo> = {
 		label: "Step finished",
 		tip: "A step finished successfully. Carries how long it took and how many tokens it used.",
 	},
+	// A command step (a pipeline run) reports its finish as `step.completed`; it is the
+	// same success as `step.done`, and the summary reads it the same way.
+	"step.completed": {
+		label: "Step finished",
+		tip: "A command step finished: its pipeline passed. Carries the pipeline, its conclusion and each job step's duration. No log content.",
+	},
 	"step.failed": {
 		label: "Step failed",
 		tip: "A step ended with an error (the message travels in the event payload).",
@@ -96,7 +102,7 @@ export function kindTip(kind: string): string {
 /** Event kind → the badge tone the hub would give that state. */
 export function badgeClass(kind: string): string {
 	if (kind === "step.failed" || kind === "workflow.failed") return "badge badge--danger";
-	if (kind === "step.done" || kind === "step.judged" || kind === "workflow.completed") return "badge badge--success";
+	if (kind === "step.done" || kind === "step.completed" || kind === "step.judged" || kind === "workflow.completed") return "badge badge--success";
 	if (kind.startsWith("step") || kind.startsWith("workflow")) return "badge badge--info";
 	if (kind.startsWith("usage") || kind.startsWith("conversation")) return "badge badge--warn";
 	return "badge badge--neutral"; // heartbeat and anything new

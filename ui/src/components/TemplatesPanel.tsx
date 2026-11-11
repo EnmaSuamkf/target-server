@@ -1,5 +1,6 @@
 import { useRef, useState, type FormEvent } from "react";
 import { createTemplate, deleteTemplate, exportCatalog, importCatalog, splitTags, updateTemplate } from "../api/catalog.ts";
+import { CommandStepFields } from "./CommandStepFields.tsx";
 import { SyncRolesPicker, syncRolesCardMeta } from "./SyncRolesPicker.tsx";
 import type {
 	CatalogActions,
@@ -12,6 +13,8 @@ import type {
 	Template,
 	TemplateStep,
 	TemplatesResponse,
+	Pipeline,
+	PipelinesResponse,
 } from "../api/types.ts";
 import { useApi } from "../hooks/useApi.ts";
 
@@ -28,15 +31,18 @@ export function TemplatesPanel({
 	actions,
 	canReadTcps,
 	canReadRci,
+	canReadPipelines,
 }: {
 	actions: CatalogActions;
 	canReadTcps: boolean;
 	canReadRci: boolean;
+	canReadPipelines: boolean;
 }) {
 	const [refreshKey, setRefreshKey] = useState(0);
 	const { data, error } = useApi<TemplatesResponse>(actions.read ? `/api/templates?_=${refreshKey}` : null);
 	const { data: tcpsData } = useApi<TcpsResponse>(canReadTcps ? `/api/tcps?_=${refreshKey}` : null);
 	const { data: setsData } = useApi<ResourceSetsResponse>(canReadRci ? `/api/resource-sets?_=${refreshKey}` : null);
+		const { data: pipelinesData } = useApi<PipelinesResponse>(canReadPipelines ? `/api/pipelines?_=${refreshKey}` : null);
 	const [overlay, setOverlay] = useState<Template | null>(null);
 	const templates = data?.templates ?? [];
 	const visibleTemplates = overlay && !templates.some((item) => item.id === overlay.id) ? [overlay, ...templates] : templates;
@@ -117,6 +123,7 @@ export function TemplatesPanel({
 						template={selected}
 						tcps={tcpsData?.tcps ?? []}
 						resourceSets={setsData?.resourceSets ?? []}
+						pipelines={pipelinesData?.pipelines ?? []}
 						actions={actions}
 						onCancel={() => setSelectedId(null)}
 						onSaved={(item) => {
@@ -177,10 +184,44 @@ export function TemplatesPanel({
 	);
 }
 
+/**
+ * A step as the server takes it. An agent step carries no kind; a command step
+ * carries its pipeline and its inputs, and never a subagent or acceptance criteria.
+ */
+function toPayloadStep(step: TemplateStep, pipelines: Pipeline[]): TemplateStep {
+	const description = step.description.trim();
+	const notes = step.notes ? { notes: step.notes } : {};
+	if (step.kind === "command") {
+		const pipelineName = pipelines.find((item) => item.id === step.pipelineId)?.name ?? step.pipeline?.name ?? "";
+		return {
+			kind: "command",
+			pipelineId: step.pipelineId ?? null,
+			pipelineInputs: step.pipelineInputs ?? {},
+			description: description || pipelineName,
+			acceptanceCriteria: null,
+			manualReview: step.manualReview,
+			useSubagent: false,
+			maxRetries: step.maxRetries,
+			retryIntervalSeconds: step.retryIntervalSeconds,
+			...notes,
+		};
+	}
+	return {
+		description,
+		acceptanceCriteria: step.acceptanceCriteria?.trim() || null,
+		manualReview: step.manualReview,
+		useSubagent: step.useSubagent,
+		maxRetries: step.maxRetries,
+		retryIntervalSeconds: step.retryIntervalSeconds,
+		...notes,
+	};
+}
+
 function TemplateEditor({
 	template,
 	tcps,
 	resourceSets,
+	pipelines,
 	actions,
 	onCancel,
 	onSaved,
@@ -189,6 +230,7 @@ function TemplateEditor({
 	template: Template | null;
 	tcps: Tcp[];
 	resourceSets: ResourceSet[];
+	pipelines: Pipeline[];
 	actions: CatalogActions;
 	onCancel: () => void;
 	onSaved: (item: Template) => void;
@@ -202,6 +244,7 @@ function TemplateEditor({
 	const [syncRoleIds, setSyncRoleIds] = useState<string[]>(template?.syncRoleIds ?? []);
 	const [busy, setBusy] = useState(false);
 	const canWrite = template ? actions.edit : actions.create;
+		const commandWithoutPipeline = steps.some((step) => step.kind === "command" && !step.pipelineId);
 
 	const updateStep = (index: number, patch: Partial<TemplateStep>) => {
 		setSteps((current) => current.map((step, i) => (i === index ? { ...step, ...patch } : step)));
@@ -215,8 +258,8 @@ function TemplateEditor({
 			name: name.trim(),
 			tags: splitTags(tags),
 			steps: steps
-				.map((step) => ({ ...step, description: step.description.trim(), acceptanceCriteria: step.acceptanceCriteria?.trim() || null }))
-				.filter((step) => step.description !== ""),
+					.map((step) => toPayloadStep(step, pipelines))
+					.filter((step) => step.description !== ""),
 			tcpSelections,
 			resourceSelections,
 			syncRoleIds,
@@ -355,7 +398,30 @@ function TemplateEditor({
 						<span>Description</span>
 						<textarea className="input sync-context-input" rows={3} value={step.description} onChange={(event) => updateStep(index, { description: event.target.value })} />
 					</label>
-					<label className="catalog-field">
+						<label className="catalog-field">
+							<span>Step type</span>
+							<select
+								className="input"
+								disabled={!canWrite}
+								value={step.kind === "command" ? "command" : "task"}
+								onChange={(event) =>
+									updateStep(
+										index,
+										event.target.value === "command"
+											? { kind: "command", useSubagent: false, acceptanceCriteria: null }
+											: { kind: "task", useSubagent: true },
+									)
+								}
+							>
+								<option value="task">Agent step</option>
+								<option value="command">Command (runs a pipeline)</option>
+							</select>
+						</label>
+						{step.kind === "command" ? (
+							<CommandStepFields step={step} pipelines={pipelines} disabled={!canWrite} onChange={(patch) => updateStep(index, patch)} />
+						) : null}
+					{step.kind === "command" ? null : (
+							<label className="catalog-field">
 						<span>Acceptance criteria</span>
 						<textarea
 							className="input sync-context-input"
@@ -364,11 +430,14 @@ function TemplateEditor({
 							onChange={(event) => updateStep(index, { acceptanceCriteria: event.target.value || null })}
 						/>
 					</label>
+						)}
 					<div className="sync-step-form__toggles">
-						<label className="sync-toggle">
+						{step.kind === "command" ? null : (
+							<label className="sync-toggle">
 							<input type="checkbox" checked={step.useSubagent !== false} onChange={(event) => updateStep(index, { useSubagent: event.target.checked })} />
 							Subagent
 						</label>
+						)}
 						<label className="sync-toggle">
 							<input type="checkbox" checked={step.manualReview} onChange={(event) => updateStep(index, { manualReview: event.target.checked })} />
 							Manual review
@@ -412,7 +481,7 @@ function TemplateEditor({
 						Delete
 					</button>
 				) : null}
-				<button className="btn btn--on" disabled={!canWrite || busy || !name.trim()}>
+				<button className="btn btn--on" disabled={!canWrite || busy || !name.trim() || commandWithoutPipeline}>
 					{busy ? "Saving…" : "Save"}
 				</button>
 			</div>

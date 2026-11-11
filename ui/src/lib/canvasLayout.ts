@@ -45,8 +45,11 @@
 /** All the canvas needs of a step. Structurally satisfied by `Step` from api/types.ts. */
 export interface CanvasStep {
 	id: string;
-	/** "context" for the hub-owned context step, "task" for everything else. */
+	/** "context" for the hub-owned context step, "command" for a step that runs a pipeline, "task" for everything else. */
 	kind?: string;
+	/** The pipeline a command step runs. Its name is what the card says; the id stands in when no name came with it. */
+	pipelineId?: string | null;
+	pipeline?: { id: string; name: string } | null;
 	orderIndex: number;
 	description: string;
 	status: string;
@@ -114,6 +117,8 @@ export interface CanvasNode {
 	inline: boolean;
 	/** The step is delegated to a subagent — the box drawn on its left. */
 	subagent: boolean;
+	/** The step runs a pipeline: no subagent, no judge, and the card says which pipeline. Null for every other node. */
+	command: { name: string } | null;
 	/** Retry budget of the judged step, or null when it has none to spend. */
 	retries: { count: number; max: number } | null;
 }
@@ -197,8 +202,18 @@ function isLive(state: CanvasNodeState): boolean {
 	return state === "running" || state === "queued" || state === "judging" || state === "waiting";
 }
 
+/** A command step runs its pipeline and is never judged: its pass or fail is the pipeline's own conclusion. */
+function isCommand(step: CanvasStep): boolean {
+	return step.kind === "command";
+}
+
+/** The name a command card shows: the pipeline's name, else its id, else a plain label. */
+function commandName(step: CanvasStep): string {
+	return step.pipeline?.name ?? step.pipelineId ?? "pipeline";
+}
+
 function hasJudge(step: CanvasStep): boolean {
-	return (step.acceptanceCriteria ?? "").trim() !== "";
+	return !isCommand(step) && (step.acceptanceCriteria ?? "").trim() !== "";
 }
 
 /**
@@ -207,7 +222,7 @@ function hasJudge(step: CanvasStep): boolean {
  * stored before the toggle existed was delegated too.
  */
 function usesSubagent(step: CanvasStep): boolean {
-	return step.kind !== "context" && step.useSubagent !== false;
+	return step.kind !== "context" && !isCommand(step) && step.useSubagent !== false;
 }
 
 /**
@@ -253,6 +268,7 @@ export function layoutWorkflow(steps: readonly CanvasStep[]): CanvasGraph {
 			manualReview: false,
 			inline: false,
 			subagent: false,
+			command: null,
 			retries: null,
 		});
 		y += CONTEXT_CARD_HEIGHT + ROW_GAP;
@@ -274,8 +290,10 @@ export function layoutWorkflow(steps: readonly CanvasStep[]): CanvasGraph {
 			height: CARD_HEIGHT,
 			selected: step.selected === true,
 			manualReview: step.manualReview === true,
-			inline: step.useSubagent === false,
+			// A command step is not "inline": the session does not do its work, the pipeline does.
+			inline: !isCommand(step) && step.useSubagent === false,
 			subagent: usesSubagent(step),
+			command: isCommand(step) ? { name: commandName(step) } : null,
 			retries: max > 0 ? { count: step.retryCount ?? 0, max } : null,
 		});
 
@@ -303,6 +321,7 @@ export function layoutWorkflow(steps: readonly CanvasStep[]): CanvasGraph {
 				manualReview: false,
 				inline: false,
 				subagent: true,
+				command: null,
 				retries: null,
 			});
 			edges.push({
@@ -337,6 +356,7 @@ export function layoutWorkflow(steps: readonly CanvasStep[]): CanvasGraph {
 				manualReview: false,
 				inline: false,
 				subagent: false,
+				command: null,
 				retries: max > 0 ? { count: step.retryCount ?? 0, max } : null,
 			});
 

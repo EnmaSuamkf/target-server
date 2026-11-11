@@ -2,6 +2,10 @@ import { downloadJson } from "./sync.ts";
 import type {
 	CatalogSyncRolesResponse,
 	FieldError,
+	Pipeline,
+	PipelineInput,
+	PipelineValidation,
+	PipelinesResponse,
 	ResourceSet,
 	ResourceSetInput,
 	Tcp,
@@ -58,6 +62,29 @@ export async function updateTcp(id: string, input: TcpInput) {
 
 export async function deleteTcp(id: string) {
 	return sendJson<{ ok: true }>(`/api/tcps/${encodeURIComponent(id)}`, "DELETE");
+}
+
+export async function createPipeline(input: PipelineInput) {
+	return sendJson<{ pipeline: Pipeline }>("/api/pipelines", "POST", input);
+}
+
+export async function updatePipeline(id: string, input: Partial<PipelineInput>) {
+	return sendJson<{ pipeline: Pipeline }>(`/api/pipelines/${encodeURIComponent(id)}`, "PATCH", input);
+}
+
+export async function deletePipeline(id: string) {
+	return sendJson<{ ok: true }>(`/api/pipelines/${encodeURIComponent(id)}`, "DELETE");
+}
+
+/** Checks YAML on the server without saving it. Errors carry the line they are on. */
+export async function validatePipeline(source: string) {
+	return sendJson<PipelineValidation>("/api/pipelines/validate", "POST", { source });
+}
+
+export async function listPipelines() {
+	const res = await fetch("/api/pipelines", { credentials: "same-origin" });
+	if (!res.ok) return readError(res);
+	return { ok: true as const, data: (await res.json()) as PipelinesResponse };
 }
 
 export async function createResourceSet(input: ResourceSetInput) {

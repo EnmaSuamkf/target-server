@@ -46,6 +46,8 @@ function toCanvasStep(step: WorkflowStep, fallbackOrder: number, planMode: boole
 	return {
 		id: step.stepId,
 		kind: step.kind ?? "task",
+		pipelineId: step.pipelineId ?? null,
+		pipeline: step.pipeline ?? null,
 		orderIndex: step.orderIndex ?? fallbackOrder,
 		description: step.description ?? "(no description reported)",
 		status: planMode ? "pending" : step.status,
@@ -204,6 +206,7 @@ function StepCard({ node, planMode }: { node: CanvasNode; planMode: boolean }) {
 				"wf-card",
 				planMode ? "wf-state--pending" : `wf-state--${node.state}`,
 				isContext && "wf-card--context",
+				!!node.command && "wf-card--command",
 				node.selected && "wf-card--selected",
 			)}
 			style={{ left: node.x, top: node.y, width: node.width, height: node.height }}
@@ -211,6 +214,14 @@ function StepCard({ node, planMode }: { node: CanvasNode; planMode: boolean }) {
 		>
 			<span className="wf-card-head">
 				<span className="wf-card-index mono">{node.label}</span>
+				{node.command ? (
+					<span className="wf-card-command" data-canvas-command title={`Runs the pipeline “${node.command.name}”`}>
+						<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true" focusable="false">
+							<path d="M2.5 4l3.5 3.5L2.5 11M7.5 12h6" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+						</svg>
+						<span className="wf-card-command-name">Pipeline: {node.command.name}</span>
+					</span>
+				) : null}
 				{planMode ? null : (
 					<span className="wf-card-state">
 						{isLiveState(node.state) && <span className="wf-dot" aria-hidden="true" />}

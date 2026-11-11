@@ -109,10 +109,16 @@ visible "Showing only your activity" indicator.
 | `client.rci.import` | RCI | Import a client's resource sets |
 | `client.rci.export` | RCI | Export a client's resource sets |
 | `client.rci.sync` | RCI | Pull server catalog resource sets onto a linked hub |
+| `client.pipelines.create` | Pipelines | Create a client's pipelines and validate their YAML |
+| `client.pipelines.edit` | Pipelines | Edit a client's pipelines, and validate their YAML |
+| `client.pipelines.delete` | Pipelines | Delete a client's pipelines that no step or template uses |
+| `client.pipelines.import` | Pipelines | Import a client's pipelines |
+| `client.pipelines.export` | Pipelines | Export a client's pipelines |
+| `client.pipelines.sync` | Pipelines | Pull server catalog pipelines onto a linked hub |
 
 ### Catalog sync allowlists
 
-Each Agent Resources item (template, TCP pack, resource set) has a per-resource
+Each Agent Resources item (template, TCP pack, resource set, pipeline) has a per-resource
 sync role allowlist (`catalog_sync_roles`). A linked-hub owner can pull a
 resource only when **both** are true:
 

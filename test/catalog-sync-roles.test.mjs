@@ -261,10 +261,10 @@ test("listSyncableCatalog follows permission plus allowlist, with admin bypass a
 	const emptyRci = db.createResourceSet({ name: "Empty rci", syncRoleIds: [] });
 
 	const none = db.listSyncableCatalog(noPermUser.id);
-	assert.deepEqual(none, { templates: [], tcps: [], resourceSets: [] });
+	assert.deepEqual(none, { templates: [], tcps: [], resourceSets: [], pipelines: [] });
 
 	const unlistedResult = db.listSyncableCatalog(unlistedUser.id);
-	assert.deepEqual(unlistedResult, { templates: [], tcps: [], resourceSets: [] });
+	assert.deepEqual(unlistedResult, { templates: [], tcps: [], resourceSets: [], pipelines: [] });
 
 	const listedResult = db.listSyncableCatalog(listedUser.id);
 	assert.deepEqual(listedResult.templates.map((item) => item.id), [listedTemplate.id]);
@@ -281,4 +281,22 @@ test("listSyncableCatalog follows permission plus allowlist, with admin bypass a
 	assert.ok(adminResult.resourceSets.some((item) => item.id === emptyRci.id));
 
 	assert.equal(db.listSyncableCatalog("missing-owner").templates.length, 0);
+});
+
+test("listSyncableCatalog returns pipelines only to roles that hold client.pipelines.sync and are listed, admin bypass included", () => {
+	const syncer = db.createRole({ name: "Pipeline catalogue syncer", permissions: ["client.pipelines.sync"] });
+	const listedOnly = db.createRole({ name: "Pipeline role without the grant", permissions: ["client.templates.sync"] });
+	const syncerUser = db.createAuthUser({ email: "pipeline-syncer@example.test", roleId: syncer.id });
+	const withoutGrantUser = db.createAuthUser({ email: "pipeline-nogrant@example.test", roleId: listedOnly.id });
+	const adminUser = db.getAuthUserByEmail(DEFAULT_ADMIN_EMAIL);
+
+	const listed = db.createPipeline({ source: "name: listed\nsteps:\n  - run: echo listed\n", syncRoleIds: [syncer.id, listedOnly.id] });
+	const unlisted = db.createPipeline({ source: "name: unlisted\nsteps:\n  - run: echo unlisted\n", syncRoleIds: [listedOnly.id] });
+
+	assert.deepEqual(db.listSyncableCatalog(syncerUser.id).pipelines.map((item) => item.id), [listed.id]);
+	// Listed for the role, but the role lacks client.pipelines.sync: nothing.
+	assert.deepEqual(db.listSyncableCatalog(withoutGrantUser.id).pipelines, []);
+	// Admin holds every catalogue ID, so it sees every pipeline.
+	const adminIds = db.listSyncableCatalog(adminUser.id).pipelines.map((item) => item.id);
+	assert.ok(adminIds.includes(listed.id) && adminIds.includes(unlisted.id));
 });
