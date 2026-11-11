@@ -29,8 +29,10 @@ function StepCard({ step, planMode }: { step: WorkflowStep; planMode: boolean })
 	const isContext = step.kind === "context";
 	const statusLabel =
 		step.status === "running" && step.phase === "judge" ? "judging" : (step.status ?? "pending");
-	const delegated = !isContext && step.useSubagent !== false;
-	const inline = !isContext && step.useSubagent === false;
+	const command = step.kind === "command";
+	// A command step runs its pipeline: it is neither delegated to a subagent nor done inline by the session.
+	const delegated = !isContext && !command && step.useSubagent !== false;
+	const inline = !isContext && !command && step.useSubagent === false;
 	const maxRetries = step.maxRetries ?? 0;
 	const retryCount = step.retryCount ?? 0;
 	const cardClass = [
@@ -57,6 +59,7 @@ function StepCard({ step, planMode }: { step: WorkflowStep; planMode: boolean })
 				step.manualReview ||
 				delegated ||
 				inline ||
+				command ||
 				step.manualRun ||
 				(step.durationMs != null && (step.status === "done" || step.status === "failed"))) && (
 				<div className="step-card__meta">
@@ -69,6 +72,11 @@ function StepCard({ step, planMode }: { step: WorkflowStep; planMode: boolean })
 						</span>
 					) : null}
 					{step.manualReview ? <span className="step-card__meta-item">manual review</span> : null}
+					{command ? (
+						<span className="step-card__meta-item" data-step-command>
+							{`Pipeline: ${step.pipeline?.name ?? step.pipelineId ?? "pipeline"}`}
+						</span>
+					) : null}
 					{delegated ? <span className="step-card__meta-item">subagent</span> : null}
 					{inline ? <span className="step-card__meta-item">inline</span> : null}
 					{step.manualRun ? <span className="step-card__meta-item">manual run</span> : null}

@@ -120,8 +120,12 @@ export interface WorkflowStep {
 	judged: "pass" | "fail" | null;
 	manualReview: boolean;
 	hasAcceptanceCriteria: boolean;
-	/** "context" for the hub-owned context step, "task" for everything else. */
-	kind?: "context" | "task";
+	/** "context" for the hub-owned context step, "command" for a pipeline step, "task" for everything else. */
+	kind?: "context" | "task" | "command";
+	/** The pipeline a command step runs. */
+	pipelineId?: string | null;
+	pipelineInputs?: Record<string, string>;
+	pipeline?: { id: string; name: string } | null;
 	/** Which job a `running` step is on — "judge" is what turns the circle on. */
 	phase?: "exec" | "judge";
 	acceptanceCriteria?: string | null;
@@ -555,6 +559,8 @@ export interface TemplateStepNote {
 }
 
 export interface TemplateStep {
+	/** "command" runs a pipeline; anything else (or absent) is an agent step. */
+	kind?: "task" | "command";
 	description: string;
 	acceptanceCriteria: string | null;
 	manualReview: boolean;
@@ -562,6 +568,49 @@ export interface TemplateStep {
 	maxRetries: number;
 	retryIntervalSeconds: number;
 	notes?: TemplateStepNote[];
+	pipelineId?: string | null;
+	pipelineInputs?: Record<string, string>;
+	pipeline?: { id: string; name: string } | null;
+}
+
+/** One YAML job definition stored on this server. `source` is the YAML text. */
+export interface Pipeline {
+	id: string;
+	name: string;
+	tags: string[];
+	source: string;
+	sourceHash: string;
+	syncRoleIds?: string[];
+	createdAt: string;
+	updatedAt: string;
+}
+
+export interface PipelineInput {
+	source: string;
+	tags: string[];
+	syncRoleIds?: string[];
+}
+
+export interface PipelineError {
+	line: number | null;
+	path: string;
+	message: string;
+}
+
+/** The answer of POST /api/pipelines/validate. `inputs` are the declared ones, for a command step's fields. */
+export interface PipelineValidation {
+	ok: boolean;
+	name?: string;
+	inputs?: Array<{ name: string; required: boolean; default: string | null }>;
+	errors: PipelineError[];
+}
+
+export interface PipelinesResponse {
+	pipelines: Pipeline[];
+}
+
+export interface PipelineResponse {
+	pipeline: Pipeline;
 }
 
 export interface TcpSelection {

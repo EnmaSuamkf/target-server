@@ -211,6 +211,10 @@ const RESOURCE_CAPABILITIES = Joi.object({
 	templates: Joi.boolean().default(false),
 	tcp_tools: Joi.boolean().default(false),
 	resource_sets: Joi.boolean().default(false),
+	// A hub that runs pipelines (docs/pipelines.md). Without it the server sends
+	// no pipeline and no command step. Listed here, or Joi would strip it on
+	// register and the gate would never open.
+	pipelines: Joi.boolean().default(false),
 }).optional();
 
 const CAPABILITIES = Joi.object({
@@ -265,6 +269,11 @@ const COMMAND_PAYLOADS = {
 		retry_interval_seconds: Joi.number().integer().min(0).optional(),
 		order_index: Joi.number().integer().min(0).optional(),
 		notes: Joi.array().items(TEMPLATE_STEP_NOTE).optional(),
+		// A command step (docs/pipelines.md). Without these keys Joi would strip
+		// `kind` and the hub would create an agent step, so they are listed here.
+		kind: Joi.string().valid("command").optional(),
+		pipeline_id: STRING.optional(),
+		pipeline_inputs: Joi.object().pattern(Joi.string(), Joi.string().allow("")).optional(),
 	}),
 	"command.step.edit": Joi.object({
 		step_key: STEP_KEY.required(),
@@ -406,7 +415,19 @@ const SYNC_EVENT_ITEM = Joi.object({
 
 const TAGS = Joi.array().items(Joi.string().trim().allow(""));
 const SYNC_ROLE_IDS = Joi.array().items(Joi.string().trim().min(1)).optional();
-const TEMPLATE_STEP = Joi.object({
+// A template step is either an agent step (below) or a command step: it runs a
+// pipeline on the hub, with no agent (docs/pipelines.md). The command shape is
+// tried FIRST. An agent schema would otherwise match a command step that has a
+// description and quietly strip `kind` and `pipelineId`, turning it into an agent
+// step. A command step's description is optional: the template save fills it
+// from the pipeline's name.
+const TEMPLATE_STEP_COMMAND = Joi.object({
+	kind: Joi.string().valid("command").required(),
+	pipelineId: STRING.required(),
+	pipelineInputs: Joi.object().pattern(Joi.string(), Joi.string().allow("")).optional(),
+	description: OPTIONAL_STRING.optional(),
+});
+const TEMPLATE_STEP_AGENT = Joi.object({
 	description: STRING.required(),
 	acceptanceCriteria: OPTIONAL_STRING.allow(null).optional(),
 	manualReview: Joi.boolean().optional(),
@@ -415,6 +436,7 @@ const TEMPLATE_STEP = Joi.object({
 	retryIntervalSeconds: Joi.number().integer().min(0).optional(),
 	notes: Joi.array().items(TEMPLATE_STEP_NOTE).optional(),
 });
+const TEMPLATE_STEP = Joi.alternatives().try(TEMPLATE_STEP_COMMAND, TEMPLATE_STEP_AGENT);
 const TEMPLATE_CREATE = Joi.object({
 	name: STRING.required(),
 	tags: TAGS.optional(),
@@ -481,6 +503,33 @@ const TCP_IMPORT = Joi.alternatives()
 		}),
 		TCP_CREATE,
 		Joi.array().items(TCP_CREATE).min(1),
+	)
+	.required();
+
+// Pipelines (docs/pipelines.md). The YAML is validated by pipeline-yaml.mjs at
+// save time, not here: a bad document must come back as 400 invalid_pipeline
+// with line numbers, which a Joi error cannot carry. So `source` is only
+// required to be text (empty text is reported by the parser, too).
+const PIPELINE_CREATE = Joi.object({
+	source: Joi.string().allow("").required(),
+	tags: TAGS.optional(),
+	syncRoleIds: SYNC_ROLE_IDS,
+});
+const PIPELINE_UPDATE = Joi.object({
+	source: Joi.string().allow("").optional(),
+	tags: TAGS.optional(),
+	syncRoleIds: SYNC_ROLE_IDS,
+});
+const PIPELINE_IMPORT = Joi.alternatives()
+	.try(
+		Joi.object({
+			kind: Joi.string().valid("target.pipelines").required(),
+			schemaVersion: Joi.number().integer().min(1).optional(),
+			exportedAt: OPTIONAL_STRING.optional(),
+			pipelines: Joi.array().items(PIPELINE_CREATE).min(1).required(),
+		}),
+		PIPELINE_CREATE,
+		Joi.array().items(PIPELINE_CREATE).min(1),
 	)
 	.required();
 
@@ -736,6 +785,9 @@ export const BLUEPRINTS = {
 	"catalog.tcp.create": TCP_CREATE,
 	"catalog.tcp.update": TCP_UPDATE,
 	"catalog.tcps.import": TCP_IMPORT,
+	"catalog.pipeline.create": PIPELINE_CREATE,
+	"catalog.pipeline.update": PIPELINE_UPDATE,
+	"catalog.pipelines.import": PIPELINE_IMPORT,
 	"catalog.resource_set.create": RESOURCE_SET_CREATE,
 	"catalog.resource_set.update": RESOURCE_SET_UPDATE,
 	"catalog.resource_sets.import": RESOURCE_SET_IMPORT,

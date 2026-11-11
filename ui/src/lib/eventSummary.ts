@@ -90,6 +90,7 @@ const LABELS: Record<string, string> = {
 	os: "OS",
 	output_tokens: "Output tokens",
 	phase: "Phase",
+	pipeline_id: "Pipeline",
 	queue_pending: "Queued jobs",
 	retry_count: "Retries",
 	retryable: "Retryable",
@@ -112,7 +113,18 @@ function labelFor(key: string): string {
 }
 
 /** Ids are mono and shortened; so is anything that looks like one. */
-const MONO_KEYS = new Set(["step_id", "session_id", "workflow_id", "instance_id", "model", "agent_name", "image", "os", "version"]);
+const MONO_KEYS = new Set([
+	"step_id",
+	"session_id",
+	"workflow_id",
+	"instance_id",
+	"pipeline_id",
+	"model",
+	"agent_name",
+	"image",
+	"os",
+	"version",
+]);
 
 /**
  * One payload value, printed the way its name says it should be: `*_ms` is a
@@ -222,6 +234,35 @@ function planBlock(raw: unknown): PlanBlock | null {
 	return { summary, steps };
 }
 
+/**
+ * A command step's `job_steps`, one line per job step: its name, how it ended and
+ * how long it took. Only names, statuses and durations; a run's log is never in
+ * the event, so none is shown here.
+ */
+function jobStepsBlock(raw: unknown): PlanBlock | null {
+	if (!Array.isArray(raw) || raw.length === 0) return null;
+	const counts = new Map<string, number>();
+	const steps: PlanStepLine[] = [];
+	raw.forEach((entry, index) => {
+		if (!isRecord(entry)) return;
+		const rawStatus = asStr(entry.status) ?? "pending";
+		// The job's own words for its outcome, in the feed's vocabulary for the dots.
+		const status = rawStatus === "success" ? "done" : rawStatus === "failure" ? "failed" : rawStatus;
+		counts.set(status, (counts.get(status) ?? 0) + 1);
+		const ms = asNum(entry.duration_ms);
+		steps.push({
+			key: `job-${index}`,
+			num: String(index + 1),
+			status,
+			description: asStr(entry.name) ?? `Job step ${index + 1}`,
+			note: ms != null ? formatDuration(ms) : null,
+		});
+	});
+	if (steps.length === 0) return null;
+	const parts = [...counts.entries()].map(([status, n]) => `${n} ${status}`);
+	return { summary: `${steps.length} job ${steps.length === 1 ? "step" : "steps"} · ${parts.join(" · ")}`, steps };
+}
+
 /** A payload with nothing in it at all. */
 const EMPTY: EventSummary = { headline: null, tone: null, text: null, facts: [], plan: null };
 
@@ -300,11 +341,13 @@ export function summarizeEvent(kind: string, data: Record<string, unknown> | nul
 			take("phase", "attempt", "max_retries");
 			break;
 		}
-		case "step.done": {
+		case "step.done":
+		case "step.completed": {
 			const ms = asNum(data.duration_ms);
 			headline = `${step} finished${ms != null ? ` in ${formatDuration(ms)}` : ""}`;
 			tone = "success";
-			take("duration_ms");
+			take("duration_ms", "job_steps");
+			plan = jobStepsBlock(data.job_steps);
 			break;
 		}
 		case "step.failed": {
@@ -312,7 +355,8 @@ export function summarizeEvent(kind: string, data: Record<string, unknown> | nul
 			const aborted = data.aborted === true;
 			headline = `${step} ${aborted ? "aborted" : "failed"}${ms != null ? ` after ${formatDuration(ms)}` : ""}`;
 			tone = "danger";
-			take("duration_ms", "aborted", "error", "phase");
+			take("duration_ms", "aborted", "error", "phase", "job_steps");
+			plan = jobStepsBlock(data.job_steps);
 			if (isRecord(data.error)) {
 				// The error object is nested, so `restFacts` never sees it: lift the
 				// message into the event's own words and the rest into facts.

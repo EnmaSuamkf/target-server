@@ -103,6 +103,7 @@ test("getPermissionCatalog groups the closed vocabulary by server and client sco
 		"client.templates",
 		"client.tcp",
 		"client.rci",
+		"client.pipelines",
 	]);
 	for (const group of catalog.groups) {
 		assert.ok(group.scope === "server" || group.scope === "client");
@@ -160,7 +161,29 @@ const CATALOG_SYNC_PERMISSIONS = [
 		label: "Sync RCI resources",
 		description: "Pull server catalog RCI resources onto a linked hub",
 	},
+	{
+		id: "client.pipelines.sync",
+		group: "client.pipelines",
+		label: "Sync pipelines",
+		description: "Pull server catalog pipelines onto a linked hub",
+	},
 ];
+
+test("pipelines have the six client.pipelines.* IDs, mirroring client.tcp-tools.*", () => {
+	const actions = ["create", "edit", "delete", "import", "export", "sync"];
+	for (const action of actions) {
+		const id = `client.pipelines.${action}`;
+		const entry = PERMISSION_CATALOG.find((item) => item.id === id);
+		assert.ok(entry, `missing ${id}`);
+		assert.equal(entry.scope, "client");
+		assert.equal(entry.group, "client.pipelines");
+		assert.ok(PERMISSIONS.includes(id));
+	}
+	assert.equal(PERMISSION_CATALOG.filter((item) => item.group === "client.pipelines").length, actions.length);
+	const group = getPermissionCatalog().groups.find((item) => item.id === "client.pipelines");
+	assert.equal(group.label, "Pipelines");
+	assert.equal(group.description, "Manage pipelines on a connected Target hub");
+});
 
 test("catalog includes client sync permissions in the matching resource groups", () => {
 	const catalog = getPermissionCatalog();

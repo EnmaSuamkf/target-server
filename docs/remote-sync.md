@@ -142,7 +142,8 @@ negotiation. A compatible client advertises all of:
       "version": 2,
       "templates": true,
       "tcp_tools": true,
-      "resource_sets": true
+      "resource_sets": true,
+      "pipelines": true
     },
     "commands": [
       "template.upsert",
@@ -178,7 +179,8 @@ enqueuing a command.
 
 The server stores a separate mirror for each `(client_id, domain, resource_id)`
 in SQLite table `remote_resources`. Domains in storage are `templates`,
-`tcp_tools`, and `resource_sets`.
+`tcp_tools`, and `resource_sets`. Pipelines are not mirrored there: they have
+their own `pipelines` table (see [`pipelines.md`](pipelines.md)).
 
 The resource payload is deliberately schema-forward-compatible:
 
@@ -577,8 +579,11 @@ allowlist = admins only. See [rbac.md](rbac.md#catalog-sync-allowlists).
 }
 ```
 
-`allowed` is the owner's three `client.*.sync` flags (true/false even when the
-arrays are empty). Template `tcpSelections` / `resourceSelections` are
+`allowed` is the owner's four `client.*.sync` flags: `templates`, `tcp_tools`,
+`resource_sets` and `pipelines` (true/false even when the arrays are empty).
+`allowed.pipelines` is `true` only when the hub also advertises
+`resources.pipelines`. A hub without that capability gets no `pipelines` array,
+and no template with a command step. See [`pipelines.md`](pipelines.md). Template `tcpSelections` / `resourceSelections` are
 filtered to TCP and RCI ids that appear in the **same** response. TCP `tokens`
 use the same shape as a workflow attach / `catalogTcpToResource` upsert — they
 are not redacted the way dashboard export bundles are. `syncRoleIds` is never

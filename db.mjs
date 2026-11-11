@@ -16,6 +16,7 @@ import { resolve as resolvePath } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { validateCommand } from "./blueprint.mjs";
 import { stepCostDeltas } from "./estimates.mjs";
+import { parsePipeline, sourceHash } from "./pipeline-yaml.mjs";
 import { priceSession, sumCosts } from "./pricing.mjs";
 import { decryptSecret, encryptSecret, maskSecret, SecretsError, secretsAvailable } from "./secrets.mjs";
 import {
@@ -103,6 +104,7 @@ export const PERMISSION_GROUPS = Object.freeze([
 	{ id: "client.templates", scope: "client", label: "Templates", description: "Manage templates on a connected Target hub" },
 	{ id: "client.tcp", scope: "client", label: "TCP tools", description: "Manage TCP tools on a connected Target hub" },
 	{ id: "client.rci", scope: "client", label: "RCI", description: "Manage RCI resource sets on a connected Target hub" },
+	{ id: "client.pipelines", scope: "client", label: "Pipelines", description: "Manage pipelines on a connected Target hub" },
 ]);
 
 /**
@@ -165,6 +167,12 @@ export const PERMISSION_CATALOG = Object.freeze([
 	{ id: "client.rci.import", label: "Import RCI resources", description: "Import client RCI resources", scope: "client", group: "client.rci" },
 	{ id: "client.rci.export", label: "Export RCI resources", description: "Export client RCI resources", scope: "client", group: "client.rci" },
 	{ id: "client.rci.sync", label: "Sync RCI resources", description: "Pull server catalog RCI resources onto a linked hub", scope: "client", group: "client.rci" },
+	{ id: "client.pipelines.create", label: "Create pipelines", description: "Create client pipelines (YAML job definitions a hub runs as command steps)", scope: "client", group: "client.pipelines" },
+	{ id: "client.pipelines.edit", label: "Edit pipelines", description: "Edit client pipelines", scope: "client", group: "client.pipelines" },
+	{ id: "client.pipelines.delete", label: "Delete pipelines", description: "Delete client pipelines", scope: "client", group: "client.pipelines" },
+	{ id: "client.pipelines.import", label: "Import pipelines", description: "Import client pipelines", scope: "client", group: "client.pipelines" },
+	{ id: "client.pipelines.export", label: "Export pipelines", description: "Export client pipelines", scope: "client", group: "client.pipelines" },
+	{ id: "client.pipelines.sync", label: "Sync pipelines", description: "Pull server catalog pipelines onto a linked hub", scope: "client", group: "client.pipelines" },
 ]);
 export const PERMISSIONS = Object.freeze(PERMISSION_CATALOG.map(({ id }) => id));
 export const ADMIN_ROLE_ID = "admin";
@@ -505,7 +513,7 @@ function openOrgFile(dbPath) {
 		);
 		CREATE TABLE IF NOT EXISTS remote_resources (
 			client_id     TEXT NOT NULL,
-			domain        TEXT NOT NULL CHECK (domain IN ('templates', 'tcp_tools', 'resource_sets')),
+			domain        TEXT NOT NULL CHECK (domain IN ('templates', 'tcp_tools', 'resource_sets', 'pipelines')),
 			resource_id   TEXT NOT NULL,
 			name          TEXT NOT NULL,
 			resource_json TEXT NOT NULL,
@@ -524,6 +532,7 @@ function openOrgFile(dbPath) {
 	migrateRbacSchema(db);
 	migrateDeviceLinkSchema(db);
 	migrateCatalogSchema(db);
+	ensureRemoteResourceDomains(db);
 	migratePricingSchema(db);
 	migrateOtelSchema(db);
 	adoptJwtSecretFromOrgHandle(db);
@@ -588,7 +597,7 @@ function migrateSyncSchema(database) {
 	database.exec(`
 		CREATE TABLE IF NOT EXISTS remote_resources (
 			client_id     TEXT NOT NULL,
-			domain        TEXT NOT NULL CHECK (domain IN ('templates', 'tcp_tools', 'resource_sets')),
+			domain        TEXT NOT NULL CHECK (domain IN ('templates', 'tcp_tools', 'resource_sets', 'pipelines')),
 			resource_id   TEXT NOT NULL,
 			name          TEXT NOT NULL,
 			resource_json TEXT NOT NULL,
@@ -643,8 +652,17 @@ function migrateCatalogSchema(database) {
 			created_at  TEXT NOT NULL,
 			updated_at  TEXT NOT NULL
 		);
+		CREATE TABLE IF NOT EXISTS pipelines (
+			id           TEXT PRIMARY KEY,
+			name         TEXT NOT NULL,
+			tags         TEXT NOT NULL DEFAULT '[]',
+			source       TEXT NOT NULL,
+			source_hash  TEXT NOT NULL,
+			created_at   TEXT NOT NULL,
+			updated_at   TEXT NOT NULL
+		);
 		CREATE TABLE IF NOT EXISTS catalog_sync_roles (
-			domain      TEXT NOT NULL CHECK (domain IN ('templates', 'tcps', 'resource_sets')),
+			domain      TEXT NOT NULL CHECK (domain IN ('templates', 'tcps', 'resource_sets', 'pipelines')),
 			resource_id TEXT NOT NULL,
 			role_id     TEXT NOT NULL,
 			PRIMARY KEY (domain, resource_id, role_id)
@@ -652,6 +670,80 @@ function migrateCatalogSchema(database) {
 		CREATE INDEX IF NOT EXISTS idx_catalog_sync_roles_role
 			ON catalog_sync_roles(role_id);
 	`);
+	// A database created before `pipelines` existed still has the old CHECK on
+	// catalog_sync_roles; CREATE TABLE IF NOT EXISTS does not touch it.
+	ensureCheckedDomains(database, {
+		table: "catalog_sync_roles",
+		domains: ["templates", "tcps", "resource_sets", "pipelines"],
+		createSql: (name) => `
+			CREATE TABLE ${name} (
+				domain      TEXT NOT NULL CHECK (domain IN (${CATALOG_SYNC_ROLE_DOMAINS_SQL})),
+				resource_id TEXT NOT NULL,
+				role_id     TEXT NOT NULL,
+				PRIMARY KEY (domain, resource_id, role_id)
+			)`,
+		columns: ["domain", "resource_id", "role_id"],
+		indexes: [
+			"CREATE INDEX IF NOT EXISTS idx_catalog_sync_roles_role ON catalog_sync_roles(role_id)",
+		],
+	});
+}
+
+const CATALOG_SYNC_ROLE_DOMAINS_SQL = "'templates', 'tcps', 'resource_sets', 'pipelines'";
+const REMOTE_RESOURCE_DOMAINS_SQL = "'templates', 'tcp_tools', 'resource_sets', 'pipelines'";
+
+/**
+ * Rebuilds a table whose CHECK on `domain` does not yet list `pipelines`.
+ * SQLite cannot alter a CHECK in place, so: create the new table, copy every
+ * row, drop the old table, rename, recreate the indexes. All inside one
+ * transaction, so a failure leaves the old table untouched. It runs only when
+ * the stored CREATE statement lacks `'pipelines'`, so once applied (or on a
+ * fresh database) a second call does nothing.
+ */
+function ensureCheckedDomains(database, { table, domains, createSql, columns, indexes }) {
+	const row = database.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
+	if (!row) return false;
+	const sql = row.sql ?? "";
+	if (domains.every((domain) => sql.includes(`'${domain}'`))) return false;
+	const next = `${table}__next`;
+	const cols = columns.join(", ");
+	database.exec("BEGIN IMMEDIATE");
+	try {
+		database.exec(`DROP TABLE IF EXISTS ${next}`);
+		database.exec(`${createSql(next)};`);
+		database.exec(`INSERT INTO ${next} (${cols}) SELECT ${cols} FROM ${table};`);
+		database.exec(`DROP TABLE ${table};`);
+		database.exec(`ALTER TABLE ${next} RENAME TO ${table};`);
+		for (const indexSql of indexes) database.exec(`${indexSql};`);
+		database.exec("COMMIT");
+	} catch (err) {
+		database.exec("ROLLBACK");
+		throw err;
+	}
+	return true;
+}
+
+/** remote_resources: the mirror of hub-published resources, one table for every domain. */
+function ensureRemoteResourceDomains(database) {
+	return ensureCheckedDomains(database, {
+		table: "remote_resources",
+		domains: ["templates", "tcp_tools", "resource_sets", "pipelines"],
+		createSql: (name) => `
+			CREATE TABLE ${name} (
+				client_id     TEXT NOT NULL,
+				domain        TEXT NOT NULL CHECK (domain IN (${REMOTE_RESOURCE_DOMAINS_SQL})),
+				resource_id   TEXT NOT NULL,
+				name          TEXT NOT NULL,
+				resource_json TEXT NOT NULL,
+				revision      INTEGER NOT NULL DEFAULT 1,
+				updated_at    TEXT NOT NULL,
+				PRIMARY KEY (client_id, domain, resource_id)
+			)`,
+		columns: ["client_id", "domain", "resource_id", "name", "resource_json", "revision", "updated_at"],
+		indexes: [
+			"CREATE INDEX IF NOT EXISTS idx_remote_resources_client_domain ON remote_resources(client_id, domain)",
+		],
+	});
 }
 
 /**
@@ -3360,6 +3452,7 @@ export function workflowDetail(workflowId, { ownerUserId } = {}) {
 			acc = {
 				stepId,
 				kind: "task",
+				pipelineId: null,
 				orderIndex: null,
 				description: null,
 				status: "pending",
@@ -3385,6 +3478,12 @@ export function workflowDetail(workflowId, { ownerUserId } = {}) {
 		// `use_subagent` has always ridden along in step.started and was simply
 		// never read — the canvas needs it to know whether to draw the box.
 		if (typeof data.use_subagent === "boolean") acc.useSubagent = data.use_subagent;
+		// A command step names its pipeline on every step event; that is what marks it.
+		if (typeof data.pipeline_id === "string" && data.pipeline_id) {
+			acc.kind = "command";
+			acc.pipelineId = data.pipeline_id;
+			acc.useSubagent = false;
+		}
 		// Rows arrive oldest-first, so each kind overwrites what it knows and the
 		// latest event of that kind wins.
 		if (r.kind === "step.added") {
@@ -3428,9 +3527,12 @@ export function workflowDetail(workflowId, { ownerUserId } = {}) {
 		}
 	}
 
+	// The pipeline a command step runs, named for the card: its name in this server's
+	// catalog when it is there, else its id.
+	const pipelineRef = (id) => (id ? { id, name: getPipeline(id)?.name ?? id } : null);
 	const folded = [...steps.values()]
 		.sort((a, b) => (a.orderIndex ?? Number.MAX_SAFE_INTEGER) - (b.orderIndex ?? Number.MAX_SAFE_INTEGER) || a.seq - b.seq)
-		.map(({ seq, ...step }) => step);
+		.map(({ seq, ...step }) => ({ ...step, pipeline: pipelineRef(step.pipelineId) }));
 
 	const plan = latestPlans([workflowId], ownerUserId).get(workflowId) ?? null;
 	const byId = new Map(folded.map((s) => [s.stepId, s]));
@@ -3441,9 +3543,13 @@ export function workflowDetail(workflowId, { ownerUserId } = {}) {
 				.filter((s) => s && typeof s.step_id === "string")
 				.map((s) => {
 					const past = byId.get(s.step_id) ?? {};
+					const pipelineId = typeof s.pipeline_id === "string" && s.pipeline_id ? s.pipeline_id : (past.pipelineId ?? null);
+					const command = s.kind === "command" || pipelineId !== null;
 					return {
 						stepId: s.step_id,
-						kind: s.kind === "context" ? "context" : "task",
+						kind: s.kind === "context" ? "context" : command ? "command" : "task",
+						pipelineId: command ? pipelineId : null,
+						pipeline: command ? pipelineRef(pipelineId) : null,
 						orderIndex: typeof s.order_index === "number" ? s.order_index : null,
 						description: s.description ?? past.description ?? null,
 						status: s.status ?? "pending",
@@ -3458,7 +3564,7 @@ export function workflowDetail(workflowId, { ownerUserId } = {}) {
 						manualReview: s.manual_review === true,
 						hasAcceptanceCriteria: !!s.acceptance_criteria,
 						acceptanceCriteria: s.acceptance_criteria ?? null,
-						useSubagent: s.use_subagent !== false,
+						useSubagent: command ? false : s.use_subagent !== false,
 						manualRun: s.manual_run === true,
 						selected: s.selected === true,
 					};
@@ -3682,7 +3788,7 @@ export function listOnlineClients(ttlMs = SYNC_CLIENT_ONLINE_TTL_MS) {
 	return listClients().filter((c) => isSyncClientOnline(c, now, ttlMs));
 }
 
-export const REMOTE_RESOURCE_DOMAINS = Object.freeze(["templates", "tcp_tools", "resource_sets"]);
+export const REMOTE_RESOURCE_DOMAINS = Object.freeze(["templates", "tcp_tools", "resource_sets", "pipelines"]);
 
 function assertRemoteResourceDomain(domain) {
 	if (!REMOTE_RESOURCE_DOMAINS.includes(domain)) throw rbacError("invalid_resource_domain", "unknown remote resource domain");
@@ -4287,9 +4393,9 @@ export function mirrorSyncEventToPlan({ remoteId, type, payload = {} }) {
  * Non-resource types (including the schedule/archive events) return false.
  */
 export function mirrorResourceSyncEvent({ clientId, type, payload = {} }) {
-	const match = /^(template|tcp-tool|resource-set)\.(upserted|deleted)$/.exec(type);
+	const match = /^(template|tcp-tool|resource-set|pipeline)\.(upserted|deleted)$/.exec(type);
 	if (!match) return false;
-	const domain = { template: "templates", "tcp-tool": "tcp_tools", "resource-set": "resource_sets" }[match[1]];
+	const domain = { template: "templates", "tcp-tool": "tcp_tools", "resource-set": "resource_sets", pipeline: "pipelines" }[match[1]];
 	if (match[2] === "upserted" && payload.resource?.id && payload.resource?.name) {
 		upsertRemoteResource({ clientId, domain, resource: payload.resource });
 		return true;
@@ -4961,11 +5067,40 @@ function normalizeCatalogTemplateStepNotes(notes) {
 		.filter((note) => note !== null);
 }
 
+/**
+ * A command step keeps its pipeline reference and inputs. It never has an
+ * acceptance criterion, a subagent or a manual review: the hub would not run
+ * those for a command, and storing them would make the template say something
+ * the hub does not do. Its description is filled from the pipeline's name when
+ * the template is saved (resolveTemplateCommandSteps), so it is kept even when
+ * empty here.
+ */
+function normalizeCatalogCommandStep(obj) {
+	const pipelineInputs = {};
+	if (obj.pipelineInputs && typeof obj.pipelineInputs === "object" && !Array.isArray(obj.pipelineInputs)) {
+		for (const [key, value] of Object.entries(obj.pipelineInputs)) {
+			if (typeof value === "string") pipelineInputs[key] = value;
+		}
+	}
+	return {
+		kind: "command",
+		pipelineId: typeof obj.pipelineId === "string" ? obj.pipelineId.trim() : "",
+		pipelineInputs,
+		description: typeof obj.description === "string" ? obj.description.trim() : "",
+		acceptanceCriteria: null,
+		manualReview: false,
+		useSubagent: false,
+		maxRetries: 0,
+		retryIntervalSeconds: 0,
+	};
+}
+
 function normalizeCatalogTemplateSteps(steps) {
 	if (!Array.isArray(steps)) return [];
 	return steps
 		.map((raw) => {
 			const obj = raw ?? {};
+			if (obj.kind === "command") return normalizeCatalogCommandStep(obj);
 			const description = typeof obj.description === "string" ? obj.description.trim() : "";
 			const acceptanceCriteria =
 				typeof obj.acceptanceCriteria === "string" && obj.acceptanceCriteria.trim() !== ""
@@ -4982,7 +5117,50 @@ function normalizeCatalogTemplateSteps(steps) {
 				...(notes.length > 0 ? { notes } : {}),
 			};
 		})
-		.filter((step) => step.description !== "");
+		// A command step is never dropped here: an empty pipeline id is refused at
+		// save, instead of quietly deleting a step from the template.
+		.filter((step) => step.kind === "command" || step.description !== "");
+}
+
+/**
+ * Checks every command step of a template against the org's pipelines: the
+ * pipeline must exist, and the step's inputs must match the pipeline's declared
+ * inputs (no unknown key, every required input given). The same rule as the
+ * hub's pipelineInputProblems. Fills an empty description with the pipeline's
+ * name. Throws a 422 with the problems, so nothing is saved half-checked.
+ */
+function resolveTemplateCommandSteps(steps) {
+	const problems = [];
+	const resolved = steps.map((step, index) => {
+		if (step.kind !== "command") return step;
+		const path = `steps[${index}]`;
+		const pipeline = getPipeline(step.pipelineId);
+		if (!pipeline) {
+			problems.push({ path: `${path}.pipelineId`, message: `unknown pipeline "${step.pipelineId}"` });
+			return step;
+		}
+		const parsed = parsePipeline(pipeline.source);
+		const declared = parsed.ok ? parsed.pipeline.inputs : {};
+		for (const key of Object.keys(step.pipelineInputs)) {
+			if (!Object.hasOwn(declared, key)) {
+				problems.push({ path: `${path}.pipelineInputs.${key}`, message: `unknown input "${key}"` });
+			}
+		}
+		for (const [name, spec] of Object.entries(declared)) {
+			if (spec.required && spec.default === null && !Object.hasOwn(step.pipelineInputs, name)) {
+				problems.push({ path: `${path}.pipelineInputs`, message: `missing input "${name}"` });
+			}
+		}
+		return { ...step, description: step.description || pipeline.name };
+	});
+	if (problems.length > 0) {
+		const err = new Error("invalid_template_step");
+		err.statusCode = 422;
+		err.code = "invalid_template_step";
+		err.errors = problems;
+		throw err;
+	}
+	return resolved;
 }
 
 function resolveCatalogTemplateSelections(input, existing = null) {
@@ -5004,6 +5182,7 @@ const CATALOG_SYNC_PERMISSIONS = Object.freeze({
 	templates: "client.templates.sync",
 	tcps: "client.tcp-tools.sync",
 	resource_sets: "client.rci.sync",
+	pipelines: "client.pipelines.sync",
 });
 
 function unknownRoleError(roleId) {
@@ -5047,6 +5226,11 @@ function deleteCatalogSyncRolesForResource(domain, resourceId) {
 	open().prepare("DELETE FROM catalog_sync_roles WHERE domain = ? AND resource_id = ?").run(domain, resourceId);
 }
 
+/** The pipelines a template's command steps run, each once, in step order. */
+function pipelineIdsOfSteps(steps) {
+	return [...new Set(steps.filter((step) => step.kind === "command").map((step) => step.pipelineId))];
+}
+
 function rowToCatalogTemplate(row) {
 	const tags = Array.isArray(parseCatalogJson(row.tags, [])) ? parseCatalogJson(row.tags, []).map((tag) => String(tag)) : [];
 	const payload = parseCatalogJson(row.payload, {}) ?? {};
@@ -5064,6 +5248,8 @@ function rowToCatalogTemplate(row) {
 		steps,
 		tcpIds: tcpSelections.map((selection) => selection.tcpId),
 		tcpSelections,
+		// The pipelines this template runs, the way tcpIds lists its TCPs.
+		pipelineIds: pipelineIdsOfSteps(steps),
 		resourceSelections,
 		syncRoleIds: listCatalogSyncRoleIds("templates", row.id),
 		createdAt: row.created_at,
@@ -5096,12 +5282,14 @@ export function createTemplate(input = {}) {
 	const syncRoleIds = resolveCatalogSyncRoleIds(input.syncRoleIds) ?? [];
 	const now = new Date().toISOString();
 	const selections = resolveCatalogTemplateSelections(input);
+	const steps = resolveTemplateCommandSteps(normalizeCatalogTemplateSteps(input.steps));
 	const template = {
 		id: randomUUID(),
 		name: normalizeCatalogName(input.name),
 		tags: normalizeCatalogTags(input.tags),
-		steps: normalizeCatalogTemplateSteps(input.steps),
+		steps,
 		...selections,
+		pipelineIds: pipelineIdsOfSteps(steps),
 		syncRoleIds,
 		createdAt: now,
 		updatedAt: now,
@@ -5118,12 +5306,17 @@ export function updateTemplate(id, input = {}) {
 	if (!existing) return null;
 	const incomingSyncRoleIds = resolveCatalogSyncRoleIds(input.syncRoleIds);
 	const selections = resolveCatalogTemplateSelections(input, existing);
+	const steps =
+		input.steps !== undefined
+			? resolveTemplateCommandSteps(normalizeCatalogTemplateSteps(input.steps))
+			: existing.steps;
 	const template = {
 		...existing,
 		name: input.name !== undefined ? normalizeCatalogName(input.name) : existing.name,
 		tags: input.tags !== undefined ? normalizeCatalogTags(input.tags) : existing.tags,
-		steps: input.steps !== undefined ? normalizeCatalogTemplateSteps(input.steps) : existing.steps,
+		steps,
 		...selections,
+		pipelineIds: pipelineIdsOfSteps(steps),
 		syncRoleIds: incomingSyncRoleIds ?? existing.syncRoleIds,
 		updatedAt: new Date().toISOString(),
 	};
@@ -5258,6 +5451,132 @@ export function deleteTcp(id) {
 	const deleted = open().prepare("DELETE FROM tcps WHERE id = ?").run(id).changes > 0;
 	if (deleted) deleteCatalogSyncRolesForResource("tcps", id);
 	return deleted;
+}
+
+// --- Pipelines (docs/pipelines.md, "Phase 2") --------------------------------
+// Stored as the raw YAML source. Every save runs pipeline-yaml.mjs (the port of
+// the hub's validator) and refuses a document with errors, so the server never
+// holds a pipeline the hub would reject. The name is the YAML `name`, not an
+// input. Pipelines are never run here; the hub runs them.
+
+export const PIPELINE_BUNDLE_KIND = "target.pipelines";
+
+/** A save or delete that the store refuses. `code` is the HTTP error code. */
+export class PipelineStoreError extends Error {
+	constructor(code, { errors = [], index = null, templates = [] } = {}) {
+		super(code);
+		this.name = "PipelineStoreError";
+		this.code = code;
+		this.errors = errors;
+		this.index = index;
+		this.templates = templates;
+	}
+}
+
+function rowToPipeline(row) {
+	const tags = parseCatalogJson(row.tags, []);
+	return {
+		id: row.id,
+		name: row.name,
+		tags: Array.isArray(tags) ? tags.map((tag) => String(tag)) : [],
+		source: row.source,
+		sourceHash: row.source_hash,
+		syncRoleIds: listCatalogSyncRoleIds("pipelines", row.id),
+		createdAt: row.created_at,
+		updatedAt: row.updated_at,
+	};
+}
+
+/** Validates a YAML source and returns its name. Throws `invalid_pipeline` with the parser's errors. */
+export function checkPipelineSource(source, index = null) {
+	const result = parsePipeline(typeof source === "string" ? source : "");
+	if (!result.ok) throw new PipelineStoreError("invalid_pipeline", { errors: result.errors, index });
+	return result.pipeline.name;
+}
+
+export function listPipelines() {
+	return open()
+		.prepare("SELECT * FROM pipelines ORDER BY created_at DESC, rowid DESC")
+		.all()
+		.map(rowToPipeline);
+}
+
+export function getPipeline(id) {
+	const row = open().prepare("SELECT * FROM pipelines WHERE id = ?").get(id);
+	return row ? rowToPipeline(row) : null;
+}
+
+export function createPipeline(input = {}) {
+	const source = typeof input.source === "string" ? input.source : "";
+	const name = checkPipelineSource(source);
+	const syncRoleIds = resolveCatalogSyncRoleIds(input.syncRoleIds) ?? [];
+	const now = new Date().toISOString();
+	const id = randomUUID();
+	const tags = normalizeCatalogTags(input.tags);
+	open()
+		.prepare(
+			"INSERT INTO pipelines (id, name, tags, source, source_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		)
+		.run(id, name, JSON.stringify(tags), source, sourceHash(source), now, now);
+	writeCatalogSyncRoles("pipelines", id, syncRoleIds);
+	return getPipeline(id);
+}
+
+export function updatePipeline(id, input = {}) {
+	const existing = getPipeline(id);
+	if (!existing) return null;
+	const incomingSyncRoleIds = resolveCatalogSyncRoleIds(input.syncRoleIds);
+	const source = input.source !== undefined ? input.source : existing.source;
+	const name = input.source !== undefined ? checkPipelineSource(source) : existing.name;
+	const tags = input.tags !== undefined ? normalizeCatalogTags(input.tags) : existing.tags;
+	const now = new Date().toISOString();
+	open()
+		.prepare("UPDATE pipelines SET name = ?, tags = ?, source = ?, source_hash = ?, updated_at = ? WHERE id = ?")
+		.run(name, JSON.stringify(tags), source, sourceHash(source), now, id);
+	if (incomingSyncRoleIds !== undefined) writeCatalogSyncRoles("pipelines", id, incomingSyncRoleIds);
+	return getPipeline(id);
+}
+
+/** Templates whose stored steps name this pipeline. Scans the raw payload, so it holds for any step shape. */
+export function pipelineReferences(id) {
+	return open()
+		.prepare("SELECT id, name, payload FROM templates ORDER BY created_at DESC, rowid DESC")
+		.all()
+		.filter((row) => {
+			const steps = parseCatalogJson(row.payload, {})?.steps;
+			return Array.isArray(steps) && steps.some((step) => step?.pipelineId === id);
+		})
+		.map((row) => ({ id: row.id, name: row.name }));
+}
+
+export function deletePipeline(id) {
+	const templates = pipelineReferences(id);
+	if (templates.length > 0) throw new PipelineStoreError("in_use", { templates });
+	const deleted = open().prepare("DELETE FROM pipelines WHERE id = ?").run(id).changes > 0;
+	if (deleted) deleteCatalogSyncRolesForResource("pipelines", id);
+	return deleted;
+}
+
+/** Validates every item before writing any, so a bad bundle leaves nothing behind. */
+export function importPipelines(items) {
+	items.forEach((item, index) => {
+		checkPipelineSource(item.source, index);
+		resolveCatalogSyncRoleIds(item.syncRoleIds);
+	});
+	return items.map((item) => createPipeline({ source: item.source, tags: item.tags, syncRoleIds: item.syncRoleIds }));
+}
+
+export function catalogPipelineBundle(pipelines) {
+	return {
+		kind: PIPELINE_BUNDLE_KIND,
+		schemaVersion: CATALOG_BUNDLE_SCHEMA_VERSION,
+		exportedAt: new Date().toISOString(),
+		pipelines: pipelines.map((pipeline) => ({
+			name: pipeline.name,
+			tags: pipeline.tags,
+			source: pipeline.source,
+		})),
+	};
 }
 
 /** Keeps a bundled file path inside its resource folder; `..` segments empty the path. */
@@ -5411,7 +5730,7 @@ export function deleteResourceSet(id) {
  * An empty allowlist means nobody except admin.
  */
 export function listSyncableCatalog(ownerUserId) {
-	const empty = { templates: [], tcps: [], resourceSets: [] };
+	const empty = { templates: [], tcps: [], resourceSets: [], pipelines: [] };
 	const user = getAuthUserById(ownerUserId);
 	if (!user) return empty;
 	const permissions = getAuthUserPermissions(user);
@@ -5425,6 +5744,7 @@ export function listSyncableCatalog(ownerUserId) {
 		templates: allow("templates", listTemplates()),
 		tcps: allow("tcps", listTcps()),
 		resourceSets: allow("resource_sets", listResourceSets()),
+		pipelines: allow("pipelines", listPipelines()),
 	};
 }
 

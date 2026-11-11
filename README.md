@@ -120,6 +120,9 @@ database is opened. Resource domains use `create` / `edit` / `delete` /
 `remote.tcp-tools.manage` or `remote.rci.manage`.
 Linked hubs pull a role-filtered catalog through `GET /api/sync/catalog`
 (`catalog-sync/v1`); see [Catalog pull](docs/remote-sync.md#catalog-pull-catalog-syncv1).
+Pipelines (YAML jobs that a hub runs as command steps in a workflow) are stored in
+the catalog and synced to hubs that advertise the `pipelines` capability; see
+[`docs/pipelines.md`](docs/pipelines.md).
 
 Token cost reporting (per-organization price table, estimated cost per workflow,
 Settings tab) is documented in [`docs/pricing.md`](docs/pricing.md).
