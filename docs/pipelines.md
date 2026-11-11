@@ -79,11 +79,33 @@ with its own `allowed.pipelines` flag.
   capability, and with `409 pipeline_not_synced` (listing `pipelineIds`) when a
   pipeline is not granted to the hub's owner. Nothing is queued.
 - **Command step on the wire.** A hub receives `step.add` with `kind: "command"`,
-  `pipeline_id`, `pipeline_inputs`, `use_subagent: false` and no acceptance
-  criteria. Without `kind`, an older hub would create an agent step.
+  `pipeline_id`, `pipeline_inputs`, `max_retries`, `retry_interval_seconds`,
+  `use_subagent: false` and no acceptance criteria, plus `on_success_task` and
+  `on_failure_task` when the step has branch agents. Without `kind`, an older hub
+  would create an agent step.
 
 The hub decides what to do with each pipeline (trust, revocation, the local-row
 rule). That is in the hub design doc, under Phase 2.
+
+## Branch agents
+
+A template's command step can hold two agents (the hub design doc, "Branch
+agents"): `onSuccessTask` runs when the pipeline passes, and `onFailureTask`
+after each failed run, before the next retry. Each is only a task, with no
+acceptance criteria and no judge. Blank means no agent, and the key is left out.
+
+- The template store keeps both tasks and the command step's `maxRetries` and
+  `retryIntervalSeconds` (it used to force the retries to 0). The template
+  schema (`blueprint.mjs`) lists all four keys, because `stripUnknown` would
+  otherwise drop them.
+- The template editor shows "Agent on success" and "Agent on failure" under the
+  pipeline fields.
+- `step.add` and `step.edit` carry `on_success_task` and `on_failure_task`. A hub
+  that predates branch agents ignores them and runs the pipeline alone.
+- The workflow detail reads `on_success_task`, `on_failure_task` and
+  `branch_failed` from the hub's `workflow.plan`, and keeps the phases
+  `on_success` and `on_failure` (it used to fold every phase but `judge` into
+  `exec`).
 
 ## Migrations
 
@@ -100,6 +122,13 @@ nothing. `test/pipelines-migration.test.mjs` covers this with a legacy database.
 - The workflow canvas draws a command step as its own card: a terminal glyph and
   `Pipeline: <name>`. It never draws a subagent or judge node, whatever
   `useSubagent` or the acceptance criteria say.
+- Its branch agents are drawn on the right of the card, where a judge would sit:
+  a green-edged box for the on-success agent and a red-edged one for the
+  on-failure agent, with a dashed retry loop from the failure box back into the
+  card when the step has retries. A box lights while its agent runs, and the
+  failure box shows the retry count. The step list shows the same two agents
+  inside the card, and the status reads "agent: on success" or "agent: on
+  failure" while one runs.
 - The event feed summarises `step.started`, `step.completed` and `step.failed`
   for command steps. It shows the pipeline name, the conclusion and each job step's
   name, status and duration. It never shows log content.
@@ -114,9 +143,15 @@ nothing. `test/pipelines-migration.test.mjs` covers this with a legacy database.
   the two fixture copies.
 - `test/catalog-sync.test.mjs`: the capability gate, including the whole-template
   rule and a hub without the capability.
+- `test/branch-agents.test.mjs`: the template keeps the branch tasks and the
+  retries, the schemas keep them, `step.add` carries them, and the workflow
+  detail exposes them from the plan.
 
 ## Limitations
 
+- `workflow.create_with_steps` and the remote-step table carry no command fields,
+  so a remote workflow's draft preview draws a command step as an agent step
+  until the hub reports its plan.
 - The sync-role picker (`GET /api/catalog/sync-roles`) lists roles only for
   `templates.edit`, `tcp-tools.edit` or `rci.edit`. An editor holding only the
   pipeline rights cannot choose sync roles. An admin can.
