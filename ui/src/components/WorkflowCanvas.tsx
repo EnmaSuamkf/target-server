@@ -60,6 +60,9 @@ function toCanvasStep(step: WorkflowStep, fallbackOrder: number, planMode: boole
 		maxRetries: step.maxRetries ?? 0,
 		retryCount: step.retryCount ?? 0,
 		selected: step.selected === true,
+		onSuccessTask: step.onSuccessTask ?? null,
+		onFailureTask: step.onFailureTask ?? null,
+		branchFailed: step.branchFailed === true,
 	};
 }
 
@@ -164,6 +167,8 @@ export function WorkflowCanvas({
 								<JudgeCircle key={node.id} node={node} planMode={planMode} />
 							) : node.kind === "subagent" ? (
 								<SubagentBox key={node.id} node={node} planMode={planMode} />
+							) : node.kind === "branch_success" || node.kind === "branch_failure" ? (
+								<BranchBox key={node.id} node={node} planMode={planMode} />
 							) : (
 								<StepCard key={node.id} node={node} planMode={planMode} />
 							),
@@ -180,6 +185,12 @@ export function WorkflowCanvas({
 					<li><span className="wf-swatch wf-swatch--failed" aria-hidden="true" /> failed</li>
 					<li><span className="wf-swatch wf-swatch--judge" aria-hidden="true" /> judged step</li>
 					<li><span className="wf-swatch wf-swatch--subagent" aria-hidden="true" /> runs in a subagent</li>
+					{graph.nodes.some((n) => n.kind === "branch_success") ? (
+						<li><span className="wf-swatch wf-swatch--branch-success" aria-hidden="true" /> agent if the pipeline passes</li>
+					) : null}
+					{graph.nodes.some((n) => n.kind === "branch_failure") ? (
+						<li><span className="wf-swatch wf-swatch--branch-failure" aria-hidden="true" /> agent if the pipeline fails</li>
+					) : null}
 				</ul>
 			)}
 		</div>
@@ -190,7 +201,14 @@ function EdgeLine({ edge }: { edge: CanvasEdge }) {
 	return (
 		<path
 			d={edgePath(edge)}
-			className={cls("wf-edge", `wf-edge--${edge.state}`, edge.kind === "retry" && "wf-edge--retry")}
+			className={cls(
+				"wf-edge",
+				`wf-edge--${edge.state}`,
+				edge.kind === "retry" && "wf-edge--retry",
+				// A branch arrow keeps its meaning (pass / fail) until the run reaches it.
+				edge.state === "pending" && edge.kind === "success" && "wf-edge--success",
+				edge.state === "pending" && edge.kind === "failure" && "wf-edge--failure",
+			)}
 			markerEnd={`url(#wf-arrow-${edge.state})`}
 			fill="none"
 		/>
@@ -257,6 +275,40 @@ function SubagentBox({ node, planMode }: { node: CanvasNode; planMode: boolean }
 			</svg>
 			<span className="wf-subagent-label">subagent</span>
 			{!planMode && isLiveState(node.state) ? <span className="wf-dot" aria-hidden="true" /> : null}
+		</div>
+	);
+}
+
+/**
+ * A command step's branch agent: the box on the right of its card that runs when
+ * the pipeline passes (green edge) or fails (red edge). No judge hangs off it.
+ * The failure box carries the pipeline's retry count, since each retry follows
+ * its turn.
+ */
+function BranchBox({ node, planMode }: { node: CanvasNode; planMode: boolean }) {
+	const success = node.kind === "branch_success";
+	const when = success ? "when the pipeline passes" : "when the pipeline fails, before each retry";
+	return (
+		<div
+			data-canvas-node={node.id}
+			data-canvas-branch={success ? "success" : "failure"}
+			className={cls(
+				"wf-branch",
+				success ? "wf-branch--success" : "wf-branch--failure",
+				planMode ? "wf-state--pending" : `wf-state--${node.state}`,
+			)}
+			style={{ left: node.x, top: node.y, width: node.width, height: node.height }}
+			title={`Agent ${when}: ${node.description}`}
+		>
+			<span className="wf-branch-head">
+				<span className="wf-branch-mark" aria-hidden="true">
+					{success ? "✓" : "✗"}
+				</span>
+				<span className="wf-branch-label">agent · {node.label}</span>
+				{!planMode && isLiveState(node.state) ? <span className="wf-dot" aria-hidden="true" /> : null}
+				{node.retries ? <span className="wf-branch-retries mono">{`${node.retries.count}/${node.retries.max}`}</span> : null}
+			</span>
+			<span className="wf-branch-task">{node.description}</span>
 		</div>
 	);
 }

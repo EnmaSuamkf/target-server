@@ -126,13 +126,18 @@ export interface WorkflowStep {
 	pipelineId?: string | null;
 	pipelineInputs?: Record<string, string>;
 	pipeline?: { id: string; name: string } | null;
-	/** Which job a `running` step is on — "judge" is what turns the circle on. */
-	phase?: "exec" | "judge";
+	/** Which job a `running` step is on — "judge" is what turns the circle on; `on_success` / `on_failure` a command step's branch agent. */
+	phase?: "exec" | "judge" | "on_success" | "on_failure";
 	acceptanceCriteria?: string | null;
 	useSubagent?: boolean;
 	manualRun?: boolean;
 	maxRetries?: number | null;
 	selected?: boolean;
+	/** A command step's branch agents, from the hub's plan. Null = none. */
+	onSuccessTask?: string | null;
+	onFailureTask?: string | null;
+	/** The branch agent itself failed (not the pipeline). */
+	branchFailed?: boolean;
 	/** Sticky notes reconstructed from step.note.* events. */
 	notes?: StepNote[];
 }
@@ -571,6 +576,9 @@ export interface TemplateStep {
 	pipelineId?: string | null;
 	pipelineInputs?: Record<string, string>;
 	pipeline?: { id: string; name: string } | null;
+	/** A command step's branch-agent tasks: no criteria, no judge. Absent = no agent. */
+	onSuccessTask?: string | null;
+	onFailureTask?: string | null;
 }
 
 /** One YAML job definition stored on this server. `source` is the YAML text. */

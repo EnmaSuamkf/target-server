@@ -25,7 +25,12 @@
  *                         │  ◀─────────────────────────┘   (dashed = the retry it can force)
  *                  ┌──────▼───────┐
  *                  │  2  step     │        no box on the left: this one runs inline
- *                  └──────────────┘
+ *                  └──────┬───────┘
+ *                  ┌──────▼───────┐ ✓     ┌──────────┐
+ *                  │  3  command  │──────▶│ agent ✓  │   a command step's branch agents:
+ *                  │   pipeline   │ ✗     ├──────────┤   one runs when the pipeline passes,
+ *                  │              │──────▶│ agent ✗  │   the other when it fails, before
+ *                  └──────────────┘ ◀ ─ ─ └──────────┘   the retry (dashed) re-runs it
  *
  * The two side branches are the two questions the list answers in words and the
  * canvas answers in shape: WHO does the work (the box on the left — a subagent,
@@ -61,9 +66,18 @@ export interface CanvasStep {
 	maxRetries?: number;
 	retryCount?: number;
 	selected?: boolean;
+	/** A command step's branch-agent tasks (the hub's docs/pipelines.md, "Branch agents"). */
+	onSuccessTask?: string | null;
+	onFailureTask?: string | null;
+	/** The branch agent itself failed (the hub's plan says so), as opposed to the pipeline staying red. */
+	branchFailed?: boolean;
 }
 
-export type CanvasNodeKind = "context" | "step" | "judge" | "subagent";
+/**
+ * - `branch_success` / `branch_failure`: a command step's branch agent, the box
+ *   on the right of its card that runs when the pipeline passes or fails.
+ */
+export type CanvasNodeKind = "context" | "step" | "judge" | "subagent" | "branch_success" | "branch_failure";
 
 /**
  * What a node is doing, in one vocabulary shared by cards and circles so the
@@ -87,7 +101,7 @@ export type CanvasEdgeState = "done" | "active" | "pending";
  * - `subagent` — out of the box on the left and into the step: this step's work
  *   is handed to a subagent rather than done in the shared conversation.
  */
-export type CanvasEdgeKind = "flow" | "judge" | "retry" | "subagent";
+export type CanvasEdgeKind = "flow" | "judge" | "retry" | "subagent" | "success" | "failure";
 
 export interface CanvasPoint {
 	x: number;
@@ -171,6 +185,14 @@ export const SUBAGENT_GAP = 48;
 export const ROW_GAP = 62;
 /** How far below a card the retry loop runs before turning back up into it. */
 const RETRY_DROP = 26;
+/**
+ * A command step's branch agents, stacked in the judge's column (a command step
+ * never has a judge): the success agent above, the failure agent below.
+ */
+export const BRANCH_WIDTH = 176;
+export const BRANCH_HEIGHT = 52;
+/** Gap between the two branch boxes. */
+export const BRANCH_GAP = 12;
 
 /** A step in flight, in either of its two senses. */
 const IN_FLIGHT = new Set(["running", "queued"]);
@@ -210,6 +232,30 @@ function isCommand(step: CanvasStep): boolean {
 /** The name a command card shows: the pipeline's name, else its id, else a plain label. */
 function commandName(step: CanvasStep): string {
 	return step.pipeline?.name ?? step.pipelineId ?? "pipeline";
+}
+
+/** The success agent's state: lit only while it is the step's live phase, then the step's outcome. */
+function successBranchState(step: CanvasStep): CanvasNodeState {
+	if (step.phase !== "on_success") return "pending";
+	if (step.status === "running" || step.status === "queued") return "running";
+	if (step.status === "done" || step.status === "waiting") return "done";
+	if (step.status === "failed") return "failed";
+	return "pending";
+}
+
+/**
+ * The failure agent's state. It has run if the step is in (or settled in) its
+ * phase, or if the pipeline has already been retried: each retry follows it.
+ * It is `failed` only when the agent itself failed; a pipeline still red after
+ * the agent's turn is the card's failure, not the agent's.
+ */
+function failureBranchState(step: CanvasStep): CanvasNodeState {
+	if (step.phase === "on_failure") {
+		if (step.status === "running" || step.status === "queued") return "running";
+		if (step.status === "failed") return step.branchFailed ? "failed" : "done";
+		return "done";
+	}
+	return (step.retryCount ?? 0) > 0 ? "done" : "pending";
 }
 
 function hasJudge(step: CanvasStep): boolean {
@@ -296,6 +342,77 @@ export function layoutWorkflow(steps: readonly CanvasStep[]): CanvasGraph {
 			command: isCommand(step) ? { name: commandName(step) } : null,
 			retries: max > 0 ? { count: step.retryCount ?? 0, max } : null,
 		});
+
+		// A command step's branch agents, on the right. Each gets its own arrow out
+		// of the card; the failure agent also loops back (dashed) into the card when
+		// there is a retry budget, because that is what happens after its turn.
+		if (isCommand(step)) {
+			const boxX = x + CARD_WIDTH + COLUMN_GAP;
+			const stackTop = y + (CARD_HEIGHT - (BRANCH_HEIGHT * 2 + BRANCH_GAP)) / 2;
+			const branches = [
+				{ kind: "branch_success" as const, task: step.onSuccessTask, top: stackTop, nodeState: successBranchState(step), edge: "success" as const },
+				{
+					kind: "branch_failure" as const,
+					task: step.onFailureTask,
+					top: stackTop + BRANCH_HEIGHT + BRANCH_GAP,
+					nodeState: failureBranchState(step),
+					edge: "failure" as const,
+				},
+			];
+			for (const branch of branches) {
+				const task = (branch.task ?? "").trim();
+				if (!task) continue;
+				const id = `${step.id}:${branch.kind === "branch_success" ? "on-success" : "on-failure"}`;
+				const midY = branch.top + BRANCH_HEIGHT / 2;
+				nodes.push({
+					id,
+					stepId: step.id,
+					kind: branch.kind,
+					state: branch.nodeState,
+					label: branch.kind === "branch_success" ? "on success" : "on failure",
+					description: task,
+					x: boxX,
+					y: branch.top,
+					width: BRANCH_WIDTH,
+					height: BRANCH_HEIGHT,
+					selected: false,
+					manualReview: false,
+					inline: false,
+					subagent: false,
+					command: null,
+					retries: branch.kind === "branch_failure" && max > 0 ? { count: step.retryCount ?? 0, max } : null,
+				});
+				edges.push({
+					id: `${id}:in`,
+					from: step.id,
+					to: id,
+					kind: branch.edge,
+					state: branch.nodeState === "running" ? "active" : branch.nodeState === "pending" ? "pending" : "done",
+					points: [
+						{ x: x + CARD_WIDTH, y: midY },
+						{ x: boxX, y: midY },
+					],
+				});
+				if (branch.kind === "branch_failure" && max > 0) {
+					const dropY = y + CARD_HEIGHT + RETRY_DROP;
+					const reentryX = x + CARD_WIDTH * 0.78;
+					const retried = (step.retryCount ?? 0) > 0;
+					edges.push({
+						id: `${id}:retry`,
+						from: id,
+						to: step.id,
+						kind: "retry",
+						state: retried && IN_FLIGHT.has(step.status) && (step.phase ?? "exec") === "exec" ? "active" : retried ? "done" : "pending",
+						points: [
+							{ x: boxX + BRANCH_WIDTH / 2, y: branch.top + BRANCH_HEIGHT },
+							{ x: boxX + BRANCH_WIDTH / 2, y: dropY },
+							{ x: reentryX, y: dropY },
+							{ x: reentryX, y: y + CARD_HEIGHT },
+						],
+					});
+				}
+			}
+		}
 
 		// The box on the left, and the arrow out of it into the step. Drawn only
 		// for a delegated step: an inline step is done by the session itself, and
