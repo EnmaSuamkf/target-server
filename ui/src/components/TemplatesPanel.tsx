@@ -203,8 +203,6 @@ function toPayloadStep(step: TemplateStep, pipelines: Pipeline[]): TemplateStep 
 			useSubagent: false,
 			maxRetries: step.maxRetries,
 			retryIntervalSeconds: step.retryIntervalSeconds,
-			onSuccessTask: step.onSuccessTask?.trim() || null,
-			onFailureTask: step.onFailureTask?.trim() || null,
 			...notes,
 		};
 	}
@@ -411,7 +409,7 @@ function TemplateEditor({
 										index,
 										event.target.value === "command"
 											? { kind: "command", useSubagent: false, acceptanceCriteria: null }
-											: { kind: "task", useSubagent: true, onSuccessTask: null, onFailureTask: null },
+											: { kind: "task", useSubagent: true },
 									)
 								}
 							>

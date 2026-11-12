@@ -92,34 +92,6 @@ export function CommandStepFields({
 					/>
 				</label>
 			))}
-			{/* The branch agents (the hub's docs/pipelines.md, "Branch agents"): only a
-			    task each, no acceptance criteria, no judge. Empty = no agent. */}
-			<div className="command-step__branches">
-				<label className="catalog-field command-step__branch command-step__branch--success">
-					<span>Agent on success (optional)</span>
-					<textarea
-						className="input"
-						rows={2}
-						disabled={disabled}
-						value={step.onSuccessTask ?? ""}
-						placeholder="What an agent does after the pipeline passes"
-						onChange={(event) => onChange({ onSuccessTask: event.target.value || null })}
-					/>
-					<small className="hint">Runs with the pipeline report. No acceptance criteria, no judge.</small>
-				</label>
-				<label className="catalog-field command-step__branch command-step__branch--failure">
-					<span>Agent on failure (optional)</span>
-					<textarea
-						className="input"
-						rows={2}
-						disabled={disabled}
-						value={step.onFailureTask ?? ""}
-						placeholder="What an agent does after the pipeline fails, e.g. fix the cause"
-						onChange={(event) => onChange({ onFailureTask: event.target.value || null })}
-					/>
-					<small className="hint">Runs after every failed run, before the next retry. No acceptance criteria, no judge.</small>
-				</label>
-			</div>
 		</div>
 	);
 }

@@ -274,9 +274,6 @@ const COMMAND_PAYLOADS = {
 		kind: Joi.string().valid("command").optional(),
 		pipeline_id: STRING.optional(),
 		pipeline_inputs: Joi.object().pattern(Joi.string(), Joi.string().allow("")).optional(),
-		// A command step's branch agents (the hub's docs/pipelines.md, "Branch agents").
-		on_success_task: Joi.string().allow("", null).optional(),
-		on_failure_task: Joi.string().allow("", null).optional(),
 	}),
 	"command.step.edit": Joi.object({
 		step_key: STEP_KEY.required(),
@@ -286,8 +283,6 @@ const COMMAND_PAYLOADS = {
 		use_subagent: Joi.boolean().optional(),
 		max_retries: Joi.number().integer().min(0).optional(),
 		retry_interval_seconds: Joi.number().integer().min(0).optional(),
-		on_success_task: Joi.string().allow("", null).optional(),
-		on_failure_task: Joi.string().allow("", null).optional(),
 	}).min(2),
 	"command.step.remove": Joi.object({
 		step_key: STEP_KEY.required(),
@@ -431,12 +426,6 @@ const TEMPLATE_STEP_COMMAND = Joi.object({
 	pipelineId: STRING.required(),
 	pipelineInputs: Joi.object().pattern(Joi.string(), Joi.string().allow("")).optional(),
 	description: OPTIONAL_STRING.optional(),
-	// The hub re-runs the whole pipeline on a failure while retries last.
-	maxRetries: Joi.number().integer().min(0).optional(),
-	retryIntervalSeconds: Joi.number().integer().min(0).optional(),
-	// The branch agents: a task each, no criteria, no judge. Blank or null = none.
-	onSuccessTask: Joi.string().allow("", null).optional(),
-	onFailureTask: Joi.string().allow("", null).optional(),
 });
 const TEMPLATE_STEP_AGENT = Joi.object({
 	description: STRING.required(),

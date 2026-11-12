@@ -3494,8 +3494,7 @@ export function workflowDetail(workflowId, { ownerUserId } = {}) {
 			acc.status = "running";
 			// Which job is in flight: exec, or the judge evaluating the result. This
 			// is what lights the judge circle instead of the card.
-			// A command step's branch agent (on_success / on_failure) is its own phase too.
-			acc.phase = STEP_PHASES.has(data.phase) ? data.phase : "exec";
+			acc.phase = data.phase === "judge" ? "judge" : "exec";
 			acc.statusAt = r.createdAt;
 			if (typeof data.acceptance_criteria === "string" && data.acceptance_criteria) {
 				acc.acceptanceCriteria = data.acceptance_criteria;
@@ -3554,7 +3553,7 @@ export function workflowDetail(workflowId, { ownerUserId } = {}) {
 						orderIndex: typeof s.order_index === "number" ? s.order_index : null,
 						description: s.description ?? past.description ?? null,
 						status: s.status ?? "pending",
-						phase: STEP_PHASES.has(s.phase) ? s.phase : "exec",
+						phase: s.phase === "judge" ? "judge" : "exec",
 						statusAt: past.statusAt ?? null,
 						durationMs: past.durationMs ?? null,
 						retryAt: typeof s.retry_at === "string" && s.retry_at ? s.retry_at : null,
@@ -3569,11 +3568,6 @@ export function workflowDetail(workflowId, { ownerUserId } = {}) {
 						useSubagent: command ? false : s.use_subagent !== false,
 						manualRun: s.manual_run === true,
 						selected: s.selected === true,
-						// A command step's branch agents (the hub's docs/pipelines.md,
-						// "Branch agents"). Absent from an older hub's plan: no agents drawn.
-						onSuccessTask: command && typeof s.on_success_task === "string" && s.on_success_task ? s.on_success_task : null,
-						onFailureTask: command && typeof s.on_failure_task === "string" && s.on_failure_task ? s.on_failure_task : null,
-						branchFailed: command && s.branch_failed === true,
 					};
 				})
 				.sort((a, b) => (a.orderIndex ?? Number.MAX_SAFE_INTEGER) - (b.orderIndex ?? Number.MAX_SAFE_INTEGER))
@@ -3595,10 +3589,6 @@ export function workflowDetail(workflowId, { ownerUserId } = {}) {
 		events: recentEvents({ workflowId, limit: 50, ownerUserId }),
 	};
 }
-
-
-/** The phases a step can be in on the wire: its work, its judge, or a command step's branch agent. */
-const STEP_PHASES = new Set(["exec", "judge", "on_success", "on_failure"]);
 
 // --- Remote sync layer (docs/remote-sync.md) --------------------------------
 
@@ -5085,11 +5075,6 @@ function normalizeCatalogTemplateStepNotes(notes) {
  * the hub does not do. Its description is filled from the pipeline's name when
  * the template is saved (resolveTemplateCommandSteps), so it is kept even when
  * empty here.
- *
- * It does keep its retry budget (the hub re-runs the whole pipeline) and its two
- * branch agents (the hub's docs/pipelines.md, "Branch agents"): `onSuccessTask`
- * runs when the pipeline passes, `onFailureTask` after each failed run. Each is
- * only a task; blank means no agent, and the key is then left out.
  */
 function normalizeCatalogCommandStep(obj) {
 	const pipelineInputs = {};
@@ -5106,16 +5091,9 @@ function normalizeCatalogCommandStep(obj) {
 		acceptanceCriteria: null,
 		manualReview: false,
 		useSubagent: false,
-		maxRetries: Math.max(0, Math.floor(Number(obj.maxRetries ?? 0)) || 0),
-		retryIntervalSeconds: Math.max(0, Math.floor(Number(obj.retryIntervalSeconds ?? 0)) || 0),
-		...branchTask("onSuccessTask", obj.onSuccessTask),
-		...branchTask("onFailureTask", obj.onFailureTask),
+		maxRetries: 0,
+		retryIntervalSeconds: 0,
 	};
-}
-
-/** `{ [key]: task }` for a non-blank task, `{}` otherwise, so a template without branch agents keeps its old shape. */
-function branchTask(key, value) {
-	return typeof value === "string" && value.trim() !== "" ? { [key]: value.trim() } : {};
 }
 
 function normalizeCatalogTemplateSteps(steps) {

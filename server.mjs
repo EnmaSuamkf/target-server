@@ -2104,15 +2104,11 @@ export function templateStepToAddPayload(step, stepKey) {
 			description: step.description,
 			manual_review: false,
 			use_subagent: false,
-			max_retries: step.maxRetries ?? 0,
-			retry_interval_seconds: step.retryIntervalSeconds ?? 0,
+			max_retries: 0,
+			retry_interval_seconds: 0,
 			kind: "command",
 			pipeline_id: step.pipelineId,
 			pipeline_inputs: { ...(step.pipelineInputs ?? {}) },
-			// The branch agents (the hub's docs/pipelines.md, "Branch agents"). A hub
-			// that predates them ignores both keys and runs the pipeline alone.
-			...(step.onSuccessTask ? { on_success_task: step.onSuccessTask } : {}),
-			...(step.onFailureTask ? { on_failure_task: step.onFailureTask } : {}),
 		};
 	}
 	const payload = {
