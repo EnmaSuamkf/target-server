@@ -128,6 +128,8 @@ export interface WorkflowStep {
 	pipeline?: { id: string; name: string } | null;
 	/** Which job a `running` step is on — "judge" is what turns the circle on. */
 	phase?: "exec" | "judge";
+	/** When a failed step's next attempt is due (ISO-8601). Optional: an older hub does not send it. Read only for a `pending` step. */
+	retryAt?: string | null;
 	acceptanceCriteria?: string | null;
 	useSubagent?: boolean;
 	manualRun?: boolean;

@@ -3554,6 +3554,7 @@ export function workflowDetail(workflowId, { ownerUserId } = {}) {
 						description: s.description ?? past.description ?? null,
 						status: s.status ?? "pending",
 						phase: s.phase === "judge" ? "judge" : "exec",
+						retryAt: typeof s.retry_at === "string" && s.retry_at ? s.retry_at : null,
 						statusAt: past.statusAt ?? null,
 						durationMs: past.durationMs ?? null,
 						retryCount: typeof s.retry_count === "number" ? s.retry_count : (past.retryCount ?? null),
