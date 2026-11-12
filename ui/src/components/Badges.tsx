@@ -66,6 +66,8 @@ const STATUS_TONES: Record<string, string> = {
 	failed: "badge badge--danger",
 	draft: "badge badge--neutral",
 	pending: "badge badge--neutral",
+	// A step waiting to retry: a pending step with a retry time. Its own warning tone, dashed (see global.css).
+	retrying: "badge badge--retrying",
 	deleting: "badge badge--warn",
 };
 
@@ -161,13 +163,19 @@ export function StepClientBadge({
 	);
 }
 
-/** Workflow/step run state → the badge tone the hub gives that state. */
-export function StatusBadge({ status }: { status: WorkflowStatus | StepStatus | null }) {
+/**
+ * Workflow/step run state → the badge tone the hub gives that state.
+ * `label` is the text to show when it is not the status itself (a retry wait
+ * shows its countdown, but keeps the `retrying` tone).
+ */
+export function StatusBadge({ status, label }: { status: WorkflowStatus | StepStatus | null; label?: string }) {
 	const tone = (status && STATUS_TONES[status]) || "badge badge--neutral";
 	return (
 		<span className={tone}>
 			{status === "running" ? <span className="badge__dot" /> : null}
-			{status ?? "unknown"}
+			{/* A retry wait has a steady dot: the pulse means "running now", and a retry is not running yet. */}
+			{status === "retrying" ? <span className="badge__dot badge__dot--steady" /> : null}
+			{label ?? status ?? "unknown"}
 		</span>
 	);
 }

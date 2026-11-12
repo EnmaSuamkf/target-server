@@ -60,6 +60,8 @@ export interface CanvasStep {
 	status: string;
 	/** Which job a `running` step is on — "judge" is what turns the circle on. */
 	phase?: string;
+	/** When a failed step's next attempt is due (ISO-8601). Read only for a `pending` step: see cardState. */
+	retryAt?: string | null;
 	acceptanceCriteria?: string | null;
 	manualReview?: boolean;
 	useSubagent?: boolean;
@@ -87,7 +89,7 @@ export type CanvasNodeKind = "context" | "step" | "judge" | "subagent" | "branch
  * instead of "running") and the canvas makes in shape: the work is done and the
  * circle is deciding whether it counts.
  */
-export type CanvasNodeState = "pending" | "queued" | "running" | "judging" | "waiting" | "done" | "failed";
+export type CanvasNodeState = "pending" | "retrying" | "queued" | "running" | "judging" | "waiting" | "done" | "failed";
 
 /** How far along the flow an arrow is: already travelled, being travelled, or not yet. */
 export type CanvasEdgeState = "done" | "active" | "pending";
@@ -197,11 +199,17 @@ export const BRANCH_GAP = 12;
 /** A step in flight, in either of its two senses. */
 const IN_FLIGHT = new Set(["running", "queued"]);
 
-const CARD_STATES = new Set<string>(["pending", "queued", "running", "waiting", "done", "failed"]);
+const CARD_STATES = new Set<string>(["pending", "retrying", "queued", "running", "waiting", "done", "failed"]);
 
-/** The card's own state: the step's status, except that judging is its own word. */
+/**
+ * The card's own state: the step's status, except that judging is its own word
+ * and a pending step with a retry time is `retrying`. The status stays `pending`
+ * in the data; the time is what makes the wait visible. Once the time has passed
+ * it is still `retrying` (drawn as "due") until the attempt starts.
+ */
 function cardState(step: CanvasStep): CanvasNodeState {
 	if (step.status === "running" && step.phase === "judge") return "judging";
+	if (step.status === "pending" && step.retryAt) return "retrying";
 	// A status this UI doesn't know (an older or newer hub) draws as pending
 	// rather than as an unstyled card with no state class at all.
 	return CARD_STATES.has(step.status) ? (step.status as CanvasNodeState) : "pending";
@@ -221,7 +229,8 @@ function judgeState(step: CanvasStep): CanvasNodeState {
 
 /** Whether a node's state means "there is a job on this right now". */
 function isLive(state: CanvasNodeState): boolean {
-	return state === "running" || state === "queued" || state === "judging" || state === "waiting";
+	// `retrying` is a job that will run (steady dot, live edge), not a `running` one: it does not pulse.
+	return state === "running" || state === "queued" || state === "judging" || state === "waiting" || state === "retrying";
 }
 
 /** A command step runs its pipeline and is never judged: its pass or fail is the pipeline's own conclusion. */
@@ -446,7 +455,7 @@ export function layoutWorkflow(steps: readonly CanvasStep[]): CanvasGraph {
 				from: `${step.id}:subagent`,
 				to: step.id,
 				kind: "subagent",
-				state: IN_FLIGHT.has(step.status) ? "active" : state === "done" ? "done" : "pending",
+				state: IN_FLIGHT.has(step.status) || state === "retrying" ? "active" : state === "done" ? "done" : "pending",
 				points: [
 					{ x: CANVAS_PADDING + SUBAGENT_WIDTH, y: midY },
 					{ x, y: midY },
@@ -502,7 +511,8 @@ export function layoutWorkflow(steps: readonly CanvasStep[]): CanvasGraph {
 					from: `${step.id}:judge`,
 					to: step.id,
 					kind: "retry",
-					state: retried && IN_FLIGHT.has(step.status) ? "active" : retried ? "done" : "pending",
+					state:
+						retried && (IN_FLIGHT.has(step.status) || state === "retrying") ? "active" : retried ? "done" : "pending",
 					points: [
 						{ x: judgeX + JUDGE_SIZE / 2, y: judgeY + JUDGE_SIZE },
 						{ x: judgeX + JUDGE_SIZE / 2, y: dropY },
@@ -565,8 +575,9 @@ export function focusNodeId(nodes: readonly CanvasNode[]): string | null {
 	const cards = nodes.filter((n) => n.kind === "context" || n.kind === "step");
 	const byState = (...states: CanvasNodeState[]): CanvasNode | undefined =>
 		cards.find((n) => states.includes(n.state));
+	// A retrying step sits in the pending tier: it was pending before this state existed, so it keeps its place.
 	const node =
-		byState("running", "judging") ?? byState("queued") ?? byState("waiting") ?? byState("pending") ?? null;
+		byState("running", "judging") ?? byState("queued") ?? byState("waiting") ?? byState("pending", "retrying") ?? null;
 	return node?.id ?? null;
 }
 

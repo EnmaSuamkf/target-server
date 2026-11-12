@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import type { WorkflowStep } from "../api/types.ts";
 import type { CanvasEdge, CanvasNode, CanvasStep } from "../lib/canvasLayout.ts";
 import { edgePath, layoutWorkflow } from "../lib/canvasLayout.ts";
+import { retryCanvasLabel } from "../lib/retryCountdown.ts";
 
 /**
  * The operator's canvas, redrawn from reported data.
@@ -54,6 +55,8 @@ function toCanvasStep(step: WorkflowStep, fallbackOrder: number, planMode: boole
 		// Spread rather than assigned: under `exactOptionalPropertyTypes` an
 		// optional field may be absent, but not explicitly `undefined`.
 		...(step.phase ? { phase: step.phase } : {}),
+		// Plan mode forces every status to pending, so it must not turn a retry wait into a retrying card.
+		retryAt: planMode ? null : (step.retryAt ?? null),
 		acceptanceCriteria: step.acceptanceCriteria ?? null,
 		manualReview: step.manualReview,
 		useSubagent: step.useSubagent !== false,
@@ -78,6 +81,16 @@ export function WorkflowCanvas({
 	const zoom = ZOOM_STEPS[zoomIndex] ?? 1;
 	const graph = useMemo(
 		() => layoutWorkflow((steps ?? []).map((s, i) => toCanvasStep(s, i, planMode))),
+		[steps, planMode],
+	);
+	// The retry time of each step in its wait, by step id: the layout knows only the state, the card needs the time.
+	const retryAtByStep = useMemo(
+		() =>
+			new Map(
+				(steps ?? []).flatMap((s) =>
+					!planMode && s.status === "pending" && s.retryAt ? [[s.stepId, s.retryAt] as const] : [],
+				),
+			),
 		[steps, planMode],
 	);
 
@@ -170,7 +183,12 @@ export function WorkflowCanvas({
 							) : node.kind === "branch_success" || node.kind === "branch_failure" ? (
 								<BranchBox key={node.id} node={node} planMode={planMode} />
 							) : (
-								<StepCard key={node.id} node={node} planMode={planMode} />
+								<StepCard
+									key={node.id}
+									node={node}
+									planMode={planMode}
+									retryAt={node.state === "retrying" ? (retryAtByStep.get(node.stepId) ?? null) : null}
+								/>
 							),
 						)}
 					</div>
@@ -215,8 +233,23 @@ function EdgeLine({ edge }: { edge: CanvasEdge }) {
 	);
 }
 
-function StepCard({ node, planMode }: { node: CanvasNode; planMode: boolean }) {
+/** The local clock time of a retry, or null when the stored time cannot be read. */
+function clockTime(iso: string): string | null {
+	const ms = Date.parse(iso);
+	return Number.isFinite(ms) ? new Date(ms).toLocaleTimeString() : null;
+}
+
+function StepCard({ node, planMode, retryAt }: { node: CanvasNode; planMode: boolean; retryAt: string | null }) {
 	const isContext = node.kind === "context";
+	// A step in its retry wait names its countdown, with the same words as the step list.
+	const stateText = retryAt !== null ? retryCanvasLabel(retryAt, Date.now()) : node.state;
+	const nextAt = retryAt !== null ? clockTime(retryAt) : null;
+	const subtitle =
+		nextAt === null
+			? null
+			: node.retries
+				? `retry ${node.retries.count}/${node.retries.max} · next at ${nextAt}`
+				: `next at ${nextAt}`;
 	return (
 		<div
 			data-canvas-node={node.id}
@@ -229,6 +262,7 @@ function StepCard({ node, planMode }: { node: CanvasNode; planMode: boolean }) {
 			)}
 			style={{ left: node.x, top: node.y, width: node.width, height: node.height }}
 			title={node.description}
+			aria-label={retryAt !== null ? `Step ${node.label}: ${stateText}` : undefined}
 		>
 			<span className="wf-card-head">
 				<span className="wf-card-index mono">{node.label}</span>
@@ -242,14 +276,17 @@ function StepCard({ node, planMode }: { node: CanvasNode; planMode: boolean }) {
 				) : null}
 				{planMode ? null : (
 					<span className="wf-card-state">
-						{isLiveState(node.state) && <span className="wf-dot" aria-hidden="true" />}
-						{node.state}
+						{isLiveState(node.state) && (
+							<span className={cls("wf-dot", node.state === "retrying" && "wf-dot--steady")} aria-hidden="true" />
+						)}
+						{stateText}
 					</span>
 				)}
 			</span>
 			<span className="wf-card-body">{node.description}</span>
-			{!isContext && (node.manualReview || node.inline || node.selected) && (
+			{!isContext && (node.manualReview || node.inline || node.selected || subtitle !== null) && (
 				<span className="wf-card-foot">
+					{subtitle !== null && <span className="wf-card-sub">{subtitle}</span>}
 					{node.selected && <span className="wf-flag">selected</span>}
 					{node.manualReview && <span className="wf-flag">manual review</span>}
 					{node.inline && <span className="wf-flag">inline</span>}
@@ -274,7 +311,9 @@ function SubagentBox({ node, planMode }: { node: CanvasNode; planMode: boolean }
 				<circle cx="6" cy="18" r="2" />
 			</svg>
 			<span className="wf-subagent-label">subagent</span>
-			{!planMode && isLiveState(node.state) ? <span className="wf-dot" aria-hidden="true" /> : null}
+			{!planMode && isLiveState(node.state) ? (
+				<span className={cls("wf-dot", node.state === "retrying" && "wf-dot--steady")} aria-hidden="true" />
+			) : null}
 		</div>
 	);
 }
@@ -332,5 +371,6 @@ function JudgeCircle({ node, planMode }: { node: CanvasNode; planMode: boolean }
 }
 
 function isLiveState(state: CanvasNode["state"]): boolean {
-	return state === "running" || state === "queued" || state === "judging" || state === "waiting";
+	// `retrying` is live for the dot (a job that will run), drawn steady: see wf-dot--steady.
+	return state === "running" || state === "queued" || state === "judging" || state === "waiting" || state === "retrying";
 }

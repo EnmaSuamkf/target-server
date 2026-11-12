@@ -3557,6 +3557,7 @@ export function workflowDetail(workflowId, { ownerUserId } = {}) {
 						phase: STEP_PHASES.has(s.phase) ? s.phase : "exec",
 						statusAt: past.statusAt ?? null,
 						durationMs: past.durationMs ?? null,
+						retryAt: typeof s.retry_at === "string" && s.retry_at ? s.retry_at : null,
 						retryCount: typeof s.retry_count === "number" ? s.retry_count : (past.retryCount ?? null),
 						maxRetries: typeof s.max_retries === "number" ? s.max_retries : (past.maxRetries ?? null),
 						startedAt: s.started_at ?? past.startedAt ?? null,

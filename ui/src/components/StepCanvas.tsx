@@ -1,5 +1,6 @@
 import type { WorkflowStep } from "../api/types.ts";
 import { formatDuration } from "../lib/format.ts";
+import { retryListLabel } from "../lib/retryCountdown.ts";
 import { StatusBadge } from "./Badges.tsx";
 import { StepTimeline } from "./StepTimeline.tsx";
 
@@ -43,10 +44,13 @@ function StepCard({ step, planMode }: { step: WorkflowStep; planMode: boolean })
 	const inline = !isContext && !command && step.useSubagent === false;
 	const maxRetries = step.maxRetries ?? 0;
 	const retryCount = step.retryCount ?? 0;
+	// A pending step with a retry time is waiting to run again: it keeps its status and shows the wait.
+	const retryAt = step.status === "pending" && step.retryAt ? step.retryAt : null;
 	const cardClass = [
 		"step-card",
 		!planMode && step.status === "running" ? "step-card--running" : "",
 		!planMode && step.status === "waiting" ? "step-card--waiting" : "",
+		!planMode && retryAt !== null ? "step-card--retrying" : "",
 	]
 		.filter(Boolean)
 		.join(" ");
@@ -56,7 +60,11 @@ function StepCard({ step, planMode }: { step: WorkflowStep; planMode: boolean })
 			<div className="step-card__head">
 				<span className="step-card__index">{isContext ? "ctx" : (step.orderIndex ?? 0) + 1}</span>
 				<p className="step-card__desc">{step.description ?? "(no description reported)"}</p>
-				{planMode ? null : <StatusBadge status={statusLabel} />}
+				{planMode ? null : retryAt !== null ? (
+					<StatusBadge status="retrying" label={retryListLabel(retryAt, Date.now())} />
+				) : (
+					<StatusBadge status={statusLabel} />
+				)}
 			</div>
 
 			{isContext ? (

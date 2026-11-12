@@ -500,6 +500,25 @@ workflow, event kind) in its filter bar; every panel answers the filtered query.
 "Workflows" panel lists the aggregate rows above and expands into a per-workflow step
 canvas (status dots down a vertical rail) with that workflow's recent events.
 
+### The `workflow.plan` snapshot and retry waits
+
+A Target hub sends a `workflow.plan` event with the workflow's steps. The server reads the newest
+one for the step list and the canvas, and `GET /api/workflows/:id` returns those steps. A step may
+carry one optional field, `retry_at`:
+
+- `retry_at` is the time (ISO-8601, UTC) of the step's next attempt. A hub sends it while a failed
+  step waits to retry. Older hubs never send it, and it is `null` in the API when absent.
+- A `pending` step with a `retry_at` is in a **retry wait**. The server shows it as `retrying`:
+  in the step list as `retry in 45s` (or `retry due` once the time has passed), and on the
+  canvas as `retrying · 45s` (or `retrying · due`). The countdown is computed in the browser from
+  `retry_at` and the local clock; the snapshot carries no remaining time.
+- The status stays `pending`. `retry_at` is the only signal of the wait, so a retry wait is never
+  shown as `running` or `waiting`.
+- `retry_at` is read only for a `pending` step. Any other status ignores it, and the API still
+  returns the value as `retryAt` on that step.
+- A snapshot without `retry_at` renders exactly as before: a plain `pending` step, and no retry
+  state.
+
 ## Storage
 
 `node:sqlite` with two tables: `instances` (identity + version + last seen) and
