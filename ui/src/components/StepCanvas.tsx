@@ -28,16 +28,24 @@ export function StepCanvas({
 
 function StepCard({ step, planMode }: { step: WorkflowStep; planMode: boolean }): React.JSX.Element {
 	const isContext = step.kind === "context";
-	const statusLabel =
-		step.status === "running" && step.phase === "judge" ? "judging" : (step.status ?? "pending");
-	// A pending step with a retry time is waiting to run again: it keeps its status and shows the wait.
-	const retryAt = step.status === "pending" && step.retryAt ? step.retryAt : null;
+	const running = step.status === "running";
+	const statusLabel = !running
+		? (step.status ?? "pending")
+		: step.phase === "judge"
+			? "judging"
+			: step.phase === "on_success"
+				? "agent: on success"
+				: step.phase === "on_failure"
+					? "agent: on failure"
+					: step.status;
 	const command = step.kind === "command";
 	// A command step runs its pipeline: it is neither delegated to a subagent nor done inline by the session.
 	const delegated = !isContext && !command && step.useSubagent !== false;
 	const inline = !isContext && !command && step.useSubagent === false;
 	const maxRetries = step.maxRetries ?? 0;
 	const retryCount = step.retryCount ?? 0;
+	// A pending step with a retry time is waiting to run again: it keeps its status and shows the wait.
+	const retryAt = step.status === "pending" && step.retryAt ? step.retryAt : null;
 	const cardClass = [
 		"step-card",
 		!planMode && step.status === "running" ? "step-card--running" : "",
@@ -93,6 +101,36 @@ function StepCard({ step, planMode }: { step: WorkflowStep; planMode: boolean })
 					) : null}
 				</div>
 			)}
+
+			{command && (step.onSuccessTask || step.onFailureTask) ? (
+				<ul className="step-card__branches" aria-label="Agents inside this command step">
+					{(
+						[
+							["on_success", "On success", step.onSuccessTask],
+							["on_failure", "On failure", step.onFailureTask],
+						] as const
+					).map(([phase, label, task]) =>
+						task ? (
+							<li
+								key={phase}
+								className={[
+									"step-card__branch",
+									phase === "on_success" ? "step-card__branch--success" : "step-card__branch--failure",
+									!planMode && running && step.phase === phase ? "step-card__branch--active" : "",
+								]
+									.filter(Boolean)
+									.join(" ")}
+							>
+								<span className="step-card__branch-label">
+									Agent · {label}
+									{!planMode && running && step.phase === phase ? " · running" : ""}
+								</span>
+								<span className="step-card__branch-task">{task}</span>
+							</li>
+						) : null,
+					)}
+				</ul>
+			) : null}
 
 			{step.acceptanceCriteria ? (
 				<div className="step-card__criteria">
