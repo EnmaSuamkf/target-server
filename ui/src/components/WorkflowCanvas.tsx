@@ -267,7 +267,7 @@ function StepCard({ node, planMode, retryAt }: { node: CanvasNode; planMode: boo
 			<span className="wf-card-head">
 				<span className="wf-card-index mono">{node.label}</span>
 				{node.command ? (
-					<span className="wf-card-command" data-canvas-command title={`Runs the pipeline “${node.command.name}”`}>
+					<span className="wf-card-command" data-canvas-command title={node.command.title}>
 						<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true" focusable="false">
 							<path d="M2.5 4l3.5 3.5L2.5 11M7.5 12h6" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
 						</svg>

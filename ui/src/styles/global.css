@@ -505,11 +505,14 @@ tbody tr.wf-row--selected, tbody tr.wf-row--selected:hover { background: var(--a
 	margin: 0;
 	padding: 0;
 	display: grid;
+	grid-template-columns: minmax(0, 1fr);
 	gap: var(--space-3);
 }
 
 .step-card {
 	display: grid;
+	grid-template-columns: minmax(0, 1fr);
+	min-width: 0;
 	gap: var(--space-2);
 	padding: var(--space-3);
 	border: 1px solid var(--border);
@@ -574,6 +577,7 @@ tbody tr.wf-row--selected, tbody tr.wf-row--selected:hover { background: var(--a
 
 .step-card__meta {
 	display: flex;
+	min-width: 0;
 	flex-wrap: wrap;
 	align-items: center;
 	gap: var(--space-3);
@@ -586,6 +590,13 @@ tbody tr.wf-row--selected, tbody tr.wf-row--selected:hover { background: var(--a
 	gap: var(--space-1);
 	font-size: var(--text-xs);
 	color: var(--text-muted);
+}
+
+/* A command step's pipeline line stays inside the card: the name is cut with an ellipsis, the id is in the tooltip. */
+.step-card__command { min-width: 0; max-width: 100%; }
+.step-card__command-name {
+	min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+	font-family: var(--font-mono);
 }
 
 .step-card__retries {
@@ -931,7 +942,7 @@ tbody tr.wf-row--selected, tbody tr.wf-row--selected:hover { background: var(--a
 
 /* --- step cards --- */
 .wf-card {
-	position: absolute; display: grid; grid-template-rows: auto 1fr auto; gap: var(--space-1);
+	position: absolute; display: grid; grid-template-rows: auto 1fr auto; grid-template-columns: minmax(0, 1fr); gap: var(--space-1);
 	padding: var(--space-3);
 	border: 1px solid var(--border); border-left: 3px solid var(--gray-300);
 	border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow-sm);
@@ -941,7 +952,8 @@ tbody tr.wf-row--selected, tbody tr.wf-row--selected:hover { background: var(--a
 /* A step ticked for the next run. A ring rather than a fill: the card's own
    colour is its status, and the two must not compete. */
 .wf-card--selected { box-shadow: var(--ring), var(--shadow-sm); }
-.wf-card-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
+/* min-width: 0 lets the head shrink to the card, so the command line can cut its name with an ellipsis. */
+.wf-card-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); min-width: 0; max-width: 100%; }
 .wf-card-index {
 	display: inline-flex; align-items: center; justify-content: center;
 	min-width: 1.5rem; height: 1.5rem; padding: 0 var(--space-1);
@@ -1624,7 +1636,7 @@ tbody tr.wf-row--selected, tbody tr.wf-row--selected:hover { background: var(--a
 /* Command steps on the canvas: the card keeps its status colour; the accent marks "runs a pipeline". */
 .wf-card--command { border-left-color: var(--accent-500); }
 .wf-card-command {
-	display: inline-flex; align-items: center; gap: var(--space-1); min-width: 0; flex: 1 1 auto;
+	display: inline-flex; align-items: center; gap: var(--space-1); min-width: 0; max-width: 100%; flex: 1 1 auto;
 	color: var(--accent-600); font-size: var(--text-xs); font-weight: 600;
 }
 .wf-card-command svg { flex: none; }

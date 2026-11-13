@@ -52,9 +52,9 @@ export interface CanvasStep {
 	id: string;
 	/** "context" for the hub-owned context step, "command" for a step that runs a pipeline, "task" for everything else. */
 	kind?: string;
-	/** The pipeline a command step runs. Its name is what the card says; the id stands in when no name came with it. */
+	/** The pipeline a command step runs. Its name is what the card says; the id is only in the tooltip. */
 	pipelineId?: string | null;
-	pipeline?: { id: string; name: string } | null;
+	pipeline?: { id: string; name: string | null } | null;
 	orderIndex: number;
 	description: string;
 	status: string;
@@ -134,7 +134,7 @@ export interface CanvasNode {
 	/** The step is delegated to a subagent — the box drawn on its left. */
 	subagent: boolean;
 	/** The step runs a pipeline: no subagent, no judge, and the card says which pipeline. Null for every other node. */
-	command: { name: string } | null;
+	command: { name: string; title: string } | null;
 	/** Retry budget of the judged step, or null when it has none to spend. */
 	retries: { count: number; max: number } | null;
 }
@@ -238,9 +238,19 @@ function isCommand(step: CanvasStep): boolean {
 	return step.kind === "command";
 }
 
-/** The name a command card shows: the pipeline's name, else its id, else a plain label. */
-function commandName(step: CanvasStep): string {
-	return step.pipeline?.name ?? step.pipelineId ?? "pipeline";
+/** What a command step says about its pipeline: the fields that name it, on a canvas step or a step-list step. */
+export type PipelineFields = Pick<CanvasStep, "pipelineId" | "pipeline">;
+
+/** The name a command card shows: the pipeline's name, else a plain label. The id is never the name. */
+export function commandName(step: PipelineFields): string {
+	return step.pipeline?.name ?? "pipeline";
+}
+
+/** The tooltip of a command card: the pipeline's name when it is known, and its id, which the card does not show. */
+export function commandTitle(step: PipelineFields): string {
+	const id = step.pipelineId ?? step.pipeline?.id ?? null;
+	const what = step.pipeline?.name ? `Runs the pipeline “${step.pipeline.name}”` : "Runs a pipeline";
+	return id ? `${what} (${id})` : what;
 }
 
 /** The success agent's state: lit only while it is the step's live phase, then the step's outcome. */
@@ -348,7 +358,7 @@ export function layoutWorkflow(steps: readonly CanvasStep[]): CanvasGraph {
 			// A command step is not "inline": the session does not do its work, the pipeline does.
 			inline: !isCommand(step) && step.useSubagent === false,
 			subagent: usesSubagent(step),
-			command: isCommand(step) ? { name: commandName(step) } : null,
+			command: isCommand(step) ? { name: commandName(step), title: commandTitle(step) } : null,
 			retries: max > 0 ? { count: step.retryCount ?? 0, max } : null,
 		});
 

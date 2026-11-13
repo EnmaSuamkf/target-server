@@ -122,6 +122,14 @@ nothing. `test/pipelines-migration.test.mjs` covers this with a legacy database.
 - The workflow canvas draws a command step as its own card: a terminal glyph and
   `Pipeline: <name>`. It never draws a subagent or judge node, whatever
   `useSubagent` or the acceptance criteria say.
+- The pipeline's name comes from the catalog when the server has the id, else from
+  `pipeline_name` as the hub reports it. The hub sends `pipeline_name` on every
+  command-step event (`data.pipeline_name`) and on each step of `workflow.plan`
+  (`pipeline_name`). The snapshot's value wins; the latest step event's value is
+  the fallback. A hub-local pipeline is not in the catalog, so its name is the
+  only one there is. A hub that predates the field sends none, and an unknown id
+  with no reported name gives `pipeline.name: null`. The server never puts the id
+  in `name`. The id stays in `pipeline.id`.
 - Its branch agents are drawn on the right of the card, where a judge would sit:
   a green-edged box for the on-success agent and a red-edged one for the
   on-failure agent, with a dashed retry loop from the failure box back into the
