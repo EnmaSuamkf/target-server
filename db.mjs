@@ -3453,6 +3453,7 @@ export function workflowDetail(workflowId, { ownerUserId } = {}) {
 				stepId,
 				kind: "task",
 				pipelineId: null,
+				pipelineName: null,
 				orderIndex: null,
 				description: null,
 				status: "pending",
@@ -3484,6 +3485,9 @@ export function workflowDetail(workflowId, { ownerUserId } = {}) {
 			acc.pipelineId = data.pipeline_id;
 			acc.useSubagent = false;
 		}
+		// The pipeline's name as the hub knows it: the only name for a hub-local
+		// pipeline, which is not in this server's catalog. An older hub sends none.
+		if (typeof data.pipeline_name === "string" && data.pipeline_name.trim()) acc.pipelineName = data.pipeline_name.trim();
 		// Rows arrive oldest-first, so each kind overwrites what it knows and the
 		// latest event of that kind wins.
 		if (r.kind === "step.added") {
@@ -3529,11 +3533,19 @@ export function workflowDetail(workflowId, { ownerUserId } = {}) {
 	}
 
 	// The pipeline a command step runs, named for the card: its name in this server's
-	// catalog when it is there, else its id.
-	const pipelineRef = (id) => (id ? { id, name: getPipeline(id)?.name ?? id } : null);
+	// catalog when the id is there, else the name the hub reported, else null. The id
+	// is never the name (the card keeps it in a tooltip), so a hub that echoes the id
+	// as its name is ignored too.
+	const pipelineRef = (id, reportedName) => {
+		if (!id) return null;
+		const named = [getPipeline(id)?.name, reportedName].find((c) => typeof c === "string" && c.trim() !== "" && c !== id);
+		return { id, name: named ?? null };
+	};
+	// `pipelineName` stays on these until the final mapping below: the plan snapshot
+	// reads it as its fallback.
 	const folded = [...steps.values()]
 		.sort((a, b) => (a.orderIndex ?? Number.MAX_SAFE_INTEGER) - (b.orderIndex ?? Number.MAX_SAFE_INTEGER) || a.seq - b.seq)
-		.map(({ seq, ...step }) => ({ ...step, pipeline: pipelineRef(step.pipelineId) }));
+		.map(({ seq, ...step }) => ({ ...step, pipeline: pipelineRef(step.pipelineId, step.pipelineName) }));
 
 	const plan = latestPlans([workflowId], ownerUserId).get(workflowId) ?? null;
 	const byId = new Map(folded.map((s) => [s.stepId, s]));
@@ -3545,12 +3557,14 @@ export function workflowDetail(workflowId, { ownerUserId } = {}) {
 				.map((s) => {
 					const past = byId.get(s.step_id) ?? {};
 					const pipelineId = typeof s.pipeline_id === "string" && s.pipeline_id ? s.pipeline_id : (past.pipelineId ?? null);
+					// The name the hub reports with the snapshot, else the one the step events reported.
+					const pipelineName = typeof s.pipeline_name === "string" && s.pipeline_name.trim() ? s.pipeline_name.trim() : (past.pipelineName ?? null);
 					const command = s.kind === "command" || pipelineId !== null;
 					return {
 						stepId: s.step_id,
 						kind: s.kind === "context" ? "context" : command ? "command" : "task",
 						pipelineId: command ? pipelineId : null,
-						pipeline: command ? pipelineRef(pipelineId) : null,
+						pipeline: command ? pipelineRef(pipelineId, pipelineName) : null,
 						orderIndex: typeof s.order_index === "number" ? s.order_index : null,
 						description: s.description ?? past.description ?? null,
 						status: s.status ?? "pending",
@@ -3580,7 +3594,8 @@ export function workflowDetail(workflowId, { ownerUserId } = {}) {
 		: folded;
 
 	const notesByStep = foldStepNotes(workflowId, ownerUserId);
-	const stepsWithNotes = orderedSteps.map((s) => ({
+	// The folded step's raw `pipelineName` is not part of the API: `pipeline` carries the name.
+	const stepsWithNotes = orderedSteps.map(({ pipelineName: _reported, ...s }) => ({
 		...s,
 		notes: notesByStep.get(s.stepId) ?? [],
 	}));

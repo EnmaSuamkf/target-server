@@ -125,7 +125,8 @@ export interface WorkflowStep {
 	/** The pipeline a command step runs. */
 	pipelineId?: string | null;
 	pipelineInputs?: Record<string, string>;
-	pipeline?: { id: string; name: string } | null;
+	/** The pipeline's name, or null when neither the server's catalog nor the hub gives one. Never the id. */
+	pipeline?: { id: string; name: string | null } | null;
 	/** Which job a `running` step is on — "judge" is what turns the circle on; `on_success` / `on_failure` a command step's branch agent. */
 	phase?: "exec" | "judge" | "on_success" | "on_failure";
 	acceptanceCriteria?: string | null;
@@ -577,7 +578,8 @@ export interface TemplateStep {
 	notes?: TemplateStepNote[];
 	pipelineId?: string | null;
 	pipelineInputs?: Record<string, string>;
-	pipeline?: { id: string; name: string } | null;
+	/** The pipeline's name, or null when neither the server's catalog nor the hub gives one. Never the id. */
+	pipeline?: { id: string; name: string | null } | null;
 	/** A command step's branch-agent tasks: no criteria, no judge. Absent = no agent. */
 	onSuccessTask?: string | null;
 	onFailureTask?: string | null;

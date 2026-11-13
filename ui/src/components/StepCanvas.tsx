@@ -1,4 +1,5 @@
 import type { WorkflowStep } from "../api/types.ts";
+import { commandName, commandTitle } from "../lib/canvasLayout.ts";
 import { formatDuration } from "../lib/format.ts";
 import { retryListLabel } from "../lib/retryCountdown.ts";
 import { StatusBadge } from "./Badges.tsx";
@@ -89,8 +90,8 @@ function StepCard({ step, planMode }: { step: WorkflowStep; planMode: boolean })
 					) : null}
 					{step.manualReview ? <span className="step-card__meta-item">manual review</span> : null}
 					{command ? (
-						<span className="step-card__meta-item" data-step-command>
-							{`Pipeline: ${step.pipeline?.name ?? step.pipelineId ?? "pipeline"}`}
+						<span className="step-card__meta-item step-card__command" data-step-command title={commandTitle(step)}>
+							<span className="step-card__command-name">{`Pipeline: ${commandName(step)}`}</span>
 						</span>
 					) : null}
 					{delegated ? <span className="step-card__meta-item">subagent</span> : null}
