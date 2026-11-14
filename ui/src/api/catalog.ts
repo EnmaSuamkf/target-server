@@ -11,6 +11,7 @@ import type {
 	Tcp,
 	TcpInput,
 	Template,
+	TemplateImportResponse,
 	TemplateInput,
 } from "./types.ts";
 
@@ -110,6 +111,15 @@ export async function exportCatalog(path: string, filenameFallback: string) {
 
 export async function importCatalog<T>(path: string, body: unknown) {
 	return sendJson<T>(path, "POST", body);
+}
+
+/**
+ * `POST /api/templates/import`: a version 1 or 2 bundle. The answer lists the templates,
+ * the pipelines the bundle used (each created or reused) and the warnings. A refused
+ * bundle keeps its code in `error`, and an invalid embedded pipeline lists its problems in `errors`.
+ */
+export function importTemplateBundle(body: unknown) {
+	return importCatalog<TemplateImportResponse>("/api/templates/import", body);
 }
 
 export function splitTags(value: string): string[] {

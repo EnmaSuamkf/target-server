@@ -466,18 +466,84 @@ const TEMPLATE_UPDATE = Joi.object({
 	resourceSelections: Joi.array().items(RESOURCE_SELECTION).optional(),
 	syncRoleIds: SYNC_ROLE_IDS,
 });
-const TEMPLATE_IMPORT = Joi.alternatives()
-	.try(
-		Joi.object({
-			kind: Joi.string().valid("target.templates").required(),
-			schemaVersion: Joi.number().integer().min(1).optional(),
-			exportedAt: OPTIONAL_STRING.optional(),
-			templates: Joi.array().items(TEMPLATE_CREATE).min(1).required(),
-		}),
-		TEMPLATE_CREATE,
-		Joi.array().items(TEMPLATE_CREATE).min(1),
-	)
-	.required();
+// The version of the template bundle envelope this server writes and reads
+// (docs/pipelines.md, "Templates"). The same number as the Target hub's
+// TEMPLATE_BUNDLE_SCHEMA_VERSION: 2 adds `pipelines[]` and `pipelineRef`.
+export const TEMPLATE_BUNDLE_SCHEMA_VERSION = 2;
+
+// The steps of a bundle, as the import reads them. A command step names its pipeline
+// by `pipelineRef` (version 2) or `pipelineId` (version 1), or by neither when the
+// exporter could not bind it, so both keys are optional here. The plain create
+// schema (TEMPLATE_CREATE) still requires `pipelineId`. Joi strips the keys a hub
+// step carries and this schema does not name (`acceptanceCriteria`, `notes`,
+// `kind: "task"` on an agent step, ...), so they never fail the import. What must
+// match is the step's SHAPE: an unbound command step from a hub has
+// `pipelineInputs: null`, which the command shape refuses. It would then fall to
+// the agent shape and silently lose its `kind`, so null is allowed here.
+const TEMPLATE_IMPORT_STEP_COMMAND = TEMPLATE_STEP_COMMAND.fork(["pipelineId"], (schema) =>
+	schema.optional().allow("", null),
+).keys({
+	pipelineRef: Joi.string().allow("", null).optional(),
+	pipelineInputs: Joi.object().pattern(Joi.string(), Joi.string().allow("")).allow(null).optional(),
+});
+const TEMPLATE_IMPORT_STEP = Joi.alternatives().try(TEMPLATE_IMPORT_STEP_COMMAND, TEMPLATE_STEP_AGENT);
+const TEMPLATE_IMPORT_CREATE = TEMPLATE_CREATE.keys({
+	steps: Joi.array().items(TEMPLATE_IMPORT_STEP).optional(),
+});
+// A pipeline embedded in a version 2 bundle. Its `name` and `sourceHash` are
+// informational: the import takes the name from the YAML and recomputes the hash.
+const TEMPLATE_BUNDLE_PIPELINE = Joi.object({
+	ref: STRING.required(),
+	name: OPTIONAL_STRING.optional(),
+	tags: TAGS.optional(),
+	source: Joi.string().allow("").required(),
+	sourceHash: OPTIONAL_STRING.optional(),
+});
+const TEMPLATE_IMPORT_SHAPE = Joi.alternatives().try(
+	Joi.object({
+		kind: Joi.string().valid("target.templates").required(),
+		schemaVersion: Joi.number().integer().min(1).max(TEMPLATE_BUNDLE_SCHEMA_VERSION).optional(),
+		exportedAt: OPTIONAL_STRING.optional(),
+		pipelines: Joi.array().items(TEMPLATE_BUNDLE_PIPELINE).optional(),
+		templates: Joi.array().items(TEMPLATE_IMPORT_CREATE).min(1).required(),
+	}),
+	TEMPLATE_IMPORT_CREATE,
+	Joi.array().items(TEMPLATE_IMPORT_CREATE).min(1),
+);
+function isNewerTemplateBundle(input) {
+	return (
+		input !== null &&
+		typeof input === "object" &&
+		!Array.isArray(input) &&
+		input.kind === "target.templates" &&
+		typeof input.schemaVersion === "number" &&
+		input.schemaVersion > TEMPLATE_BUNDLE_SCHEMA_VERSION
+	);
+}
+// The import blueprint. A bundle from a NEWER version is refused by name, before its
+// shape is read, with the hub's code (`unsupported_schema_version`). Joi answers such a
+// bundle with a generic `alternatives.match`, and cannot put a check in front of its
+// alternatives, so this wrapper gives `validate()` the same `{ value, error }` result
+// that Joi would. Every other input goes through the shape schema unchanged.
+const TEMPLATE_IMPORT = {
+	validate(input, options) {
+		if (isNewerTemplateBundle(input)) {
+			return {
+				value: input,
+				error: {
+					details: [
+						{
+							path: ["schemaVersion"],
+							type: "unsupported_schema_version",
+							message: "unsupported_schema_version",
+						},
+					],
+				},
+			};
+		}
+		return TEMPLATE_IMPORT_SHAPE.validate(input, options);
+	},
+};
 
 const TCP_TOOL_INPUT = Joi.object({
 	name: STRING.required(),

@@ -157,6 +157,8 @@ import {
 	updateResourceSet,
 	deleteResourceSet,
 	catalogTemplateBundle,
+	importTemplateBundle,
+	TemplateBundleError,
 	catalogTcpBundle,
 	catalogResourceSetBundle,
 	catalogPipelineBundle,
@@ -3490,19 +3492,8 @@ const SERVER_CATALOGS = {
 		update: updateTemplate,
 		remove: deleteTemplate,
 		bundle: catalogTemplateBundle,
-		importItems(value) {
-			const items = Array.isArray(value) ? value : value.templates ? value.templates : [value];
-			return items.map((item) =>
-				createTemplate({
-					name: item.name,
-					tags: item.tags,
-					steps: item.steps,
-					tcpIds: item.tcpIds,
-					tcpSelections: item.tcpSelections,
-					resourceSelections: item.resourceSelections,
-				}),
-			);
-		},
+		// Any version 1 or 2 bundle, with its embedded pipelines (db.mjs importTemplateBundle).
+		importBundle: importTemplateBundle,
 		exportName: "templates-export.json",
 		itemExportName: (id) => `template-${id}.json`,
 	},
@@ -3576,6 +3567,32 @@ function sendCatalogMutationError(res, err) {
 		return true;
 	}
 	return false;
+}
+
+/**
+ * Answers a template bundle import with `201 { templates, pipelines, warnings }`.
+ * `templates` is the list the route has always returned. Each `pipelines[]` entry is
+ * `{ ref, action, pipeline }` as the hub answers it: `action` is `created` (no sync
+ * roles yet) or `reused`, and `pipeline` is the local row. An unreadable bundle is
+ * `400 { error }`, and an invalid embedded pipeline is `400 invalid_pipeline` with
+ * `errors`. A template that does not pass the normal checks is `422`, and nothing is
+ * written by any of them.
+ */
+function sendBundleImport(res, spec, value) {
+	let result;
+	try {
+		result = spec.importBundle(value);
+	} catch (err) {
+		if (err instanceof TemplateBundleError) return sendJson(res, 400, { error: err.code });
+		if (sendPipelineStoreError(res, err)) return true;
+		if (sendCatalogMutationError(res, err)) return true;
+		throw err;
+	}
+	return sendJson(res, 201, {
+		[spec.listKey]: result.templates,
+		pipelines: result.pipelines.map((p) => ({ ref: p.ref, action: p.action, pipeline: getPipeline(p.pipelineId) })),
+		warnings: result.warnings,
+	});
 }
 
 async function handleCatalogSyncRolesRoute(req, res) {
@@ -3805,7 +3822,14 @@ async function handleCatalogRoute(req, res, pathname) {
 		const body = await readJson(req, res);
 		if (!body) return true;
 		const v = validate(spec.validateImport, body);
-		if (!v.ok) return sendJson(res, 422, { errors: v.errors });
+		if (!v.ok) {
+			// A bundle from a newer version gets the hub's answer, not a list of shape errors.
+			if (v.errors.some((e) => e.code === "unsupported_schema_version")) {
+				return sendJson(res, 400, { error: "unsupported_schema_version" });
+			}
+			return sendJson(res, 422, { errors: v.errors });
+		}
+		if (spec.importBundle) return sendBundleImport(res, spec, v.value);
 		const created = spec.importItems(v.value);
 		return sendJson(res, 201, { [spec.listKey]: created });
 	}
@@ -3933,7 +3957,13 @@ async function handlePipelineRoute(req, res, pathname) {
 		if (!v.ok) return sendJson(res, 422, { errors: v.errors });
 		const items = Array.isArray(v.value) ? v.value : v.value.pipelines ? v.value.pipelines : [v.value];
 		try {
-			return sendJson(res, 201, { pipelines: importPipelines(items) });
+			// `pipelines` keeps its shape for existing callers and lists every entry, reused ones
+			// included. `results` says, per entry in the same order, whether the row was `created` or `reused`.
+			const results = importPipelines(items);
+			return sendJson(res, 201, {
+				pipelines: results.map((r) => r.pipeline),
+				results: results.map((r) => ({ action: r.action, pipeline: r.pipeline })),
+			});
 		} catch (err) {
 			if (sendPipelineStoreError(res, err)) return true;
 			if (sendCatalogMutationError(res, err)) return true;

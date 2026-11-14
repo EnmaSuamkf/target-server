@@ -152,7 +152,7 @@ test("validate returns { ok, errors } with lines and saves nothing", async () =>
 	assert.equal(pipelineRows().length, before);
 });
 
-test("import then export round-trips the source, mints new ids, and refuses a bad bundle atomically", async () => {
+test("import then export round-trips the source, reuses identical text, and refuses a bad bundle atomically", async () => {
 	const admin = await login(base);
 	const seed = await createPipeline(admin, VERIFY, { tags: ["round"] });
 	const exported = await fetch(`${base}/api/pipelines/export`, { headers: { cookie: admin } });
@@ -169,22 +169,27 @@ test("import then export round-trips the source, mints new ids, and refuses a ba
 	assert.equal((await single.json()).pipelines[0].source, VERIFY);
 
 	const beforeImport = pipelineRows().length;
+	const idsBefore = pipelineRows().map((row) => row.id);
 	const imported = await fetch(`${base}/api/pipelines/import`, json("POST", { kind: "target.pipelines", pipelines: [{ source: VERIFY, tags: ["copy"] }] }, admin));
 	assert.equal(imported.status, 201);
-	const copy = (await imported.json()).pipelines[0];
-	assert.notEqual(copy.id, seed.id);
+	const importBody = await imported.json();
+	// Identical text is reused: the stored row answers, and no second copy is written.
+	assert.equal(importBody.results[0].action, "reused");
+	const copy = importBody.pipelines[0];
+	// Several rows may share this text (the earlier CRUD test stored it too); the server reuses the oldest.
+	assert.ok(idsBefore.includes(copy.id), "the reused row already existed: no new row was written");
 	assert.equal(copy.source, VERIFY);
-	assert.equal(pipelineRows().length, beforeImport + 1);
+	assert.equal(pipelineRows().length, beforeImport);
 
 	const refused = await fetch(
 		`${base}/api/pipelines/import`,
-		json("POST", { kind: "target.pipelines", pipelines: [{ source: VERIFY }, { source: INVALID }] }, admin),
+		json("POST", { kind: "target.pipelines", pipelines: [{ source: VERIFY.replace("name: verify", "name: never-stored") }, { source: INVALID }] }, admin),
 	);
 	assert.equal(refused.status, 400);
 	const refusedBody = await refused.json();
 	assert.equal(refusedBody.error, "invalid_pipeline");
 	assert.equal(refusedBody.index, 1);
-	assert.equal(pipelineRows().length, beforeImport + 1, "a bad bundle stores none of its items");
+	assert.equal(pipelineRows().length, beforeImport, "a bad bundle stores none of its items");
 });
 
 test("every client.pipelines.* ID gates exactly its route; no ID is a read-all", async () => {
