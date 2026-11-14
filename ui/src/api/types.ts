@@ -621,6 +621,15 @@ export interface PipelinesResponse {
 	pipelines: Pipeline[];
 }
 
+/** Whether a pipeline import created a row, or found the same text already here and reused it. */
+export type PipelineImportAction = "created" | "reused";
+
+/** `POST /api/pipelines/import`: `pipelines` lists every entry, and `results` says, in the same order, which were created. */
+export interface PipelineImportResponse {
+	pipelines: Pipeline[];
+	results: Array<{ action: PipelineImportAction; pipeline: Pipeline }>;
+}
+
 export interface PipelineResponse {
 	pipeline: Pipeline;
 }
@@ -660,6 +669,28 @@ export interface TemplateInput {
 
 export interface TemplatesResponse {
 	templates: Template[];
+}
+
+/** One embedded pipeline of a template import. `ref` is the name the bundle's steps used for it. */
+export interface TemplateImportPipeline {
+	ref: string;
+	action: PipelineImportAction;
+	pipeline: Pipeline;
+}
+
+/**
+ * Something a template import did not do exactly as written, though it did not refuse:
+ * a pipeline with the same name but other text, or a command step with no pipeline.
+ */
+export type TemplateImportWarning =
+	| { code: "pipeline_name_conflict"; ref: string; name: string }
+	| { code: "unresolved_pipeline"; template: string; stepIndex: number; reason: "missing_ref" | "unknown_id" };
+
+/** `POST /api/templates/import` (201): the templates made, the pipelines created or reused, and the warnings. */
+export interface TemplateImportResponse {
+	templates: Template[];
+	pipelines: TemplateImportPipeline[];
+	warnings: TemplateImportWarning[];
 }
 
 export interface TemplateResponse {

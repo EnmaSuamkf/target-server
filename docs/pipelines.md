@@ -56,6 +56,149 @@ Templates accept command steps: `{ "kind": "command", "pipelineId",
 organization and that its inputs match the declared ones. The rules are the
 same as the hub's.
 
+## Template bundles
+
+A template's command step names its pipeline by `pipelineId`, a row id that exists
+only on the server that made it. A template exported to another server or hub
+would therefore arrive with a dead reference. A **version 2** bundle carries the
+YAML of every pipeline its command steps use, so the import can resolve each one
+on the receiving side. `GET /api/templates/export` writes version 2.
+`POST /api/templates/import` (permission `templates.import`) reads version 1 and
+version 2. It is the bundle format the Target hub writes and reads. The
+Limitations below list where the server's answer differs from the hub's.
+
+### The version 2 shape
+
+```json
+{
+  "kind": "target.templates",
+  "schemaVersion": 2,
+  "exportedAt": "2026-11-13T10:00:00.000Z",
+  "pipelines": [
+    {
+      "ref": "p1",
+      "name": "verify",
+      "tags": ["ci"],
+      "source": "name: verify\nsteps:\n  - name: Install\n    run: npm ci\n",
+      "sourceHash": "<SHA-256 of source, 64 hex characters>"
+    }
+  ],
+  "templates": [
+    {
+      "name": "Release",
+      "tags": [],
+      "steps": [
+        { "kind": "command", "description": "Verify", "pipelineRef": "p1", "pipelineInputs": {} },
+        { "description": "Review the result", "acceptanceCriteria": "All checks pass" }
+      ],
+      "tcpIds": [],
+      "tcpSelections": [],
+      "resourceSelections": []
+    }
+  ]
+}
+```
+
+- `pipelines[]` lists each pipeline once, however many steps use it. `ref` is
+  local to the file: `p1`, `p2`, … in order of first use.
+- A command step carries `pipelineRef`, never `pipelineId`. The export drops
+  `pipelineId`, because that id means nothing on another server.
+- The export writes no `syncRoleIds`, organization id or server id.
+
+### Import: hash resolution and sync roles
+
+`POST /api/templates/import` reads every embedded pipeline before it writes
+anything, then creates or reuses them, then creates the templates. All of it runs
+in one transaction, so a refused bundle leaves nothing behind.
+
+- **The hash is recomputed.** The server takes each pipeline's SHA-256 from its
+  `source` text. The file's `sourceHash` is a label and is never trusted. The name
+  is read from the YAML, not from the file's `name`.
+- **An identical pipeline is reused.** A pipeline in the same organization with the
+  same hash is reused. Its row, and its sync roles, stay exactly as they are.
+- **Anything else is created with no sync roles.** The new pipeline has the text and
+  tags from the file and `syncRoleIds: []`. It reaches no hub until an admin assigns
+  roles to it. An import never grants roles.
+- **Another organization's pipelines are never reused.** Resolution only looks at
+  the importing organization's catalog.
+
+### Import: response and warnings
+
+`201 Created` returns:
+
+```json
+{
+  "templates": [ { "id": "…", "name": "Release", "steps": [ … ] } ],
+  "pipelines": [
+    { "ref": "p1", "action": "reused", "pipeline": { "id": "…", "name": "verify", … } },
+    { "ref": "p2", "action": "created", "pipeline": { "id": "…", "name": "other", "syncRoleIds": [], … } }
+  ],
+  "warnings": [
+    { "code": "unresolved_pipeline", "template": "Release", "stepIndex": 3, "reason": "missing_ref" }
+  ]
+}
+```
+
+- `templates` is the list of templates created, as before.
+- `pipelines` has one entry per embedded pipeline. `action` is `created` or
+  `reused`, and `pipeline` is the local row.
+- `warnings` do not stop the import. They say what it did not do exactly as written:
+
+| Code | Fields | Meaning |
+| --- | --- | --- |
+| `pipeline_name_conflict` | `ref`, `name` | A pipeline with the same name but different text already exists. The file's text is created as its own pipeline. |
+| `unresolved_pipeline` | `template`, `stepIndex`, `reason` | A command step has no pipeline. `missing_ref`: the step names no `pipelineRef`, or one missing from `pipelines[]`. `unknown_id`: a version 1 `pipelineId` is not in this organization. The template is still imported, and the step has no pipeline until one is chosen. `stepIndex` is the step's position in the bundle's `steps` array. |
+
+### Import: errors
+
+| Status | Body | Cause |
+| --- | --- | --- |
+| `400` | `{ "error": "invalid_pipeline", "errors": [ … ] }` | An embedded pipeline's YAML is not valid. Each problem has `line`, `path` (for example `pipelines[0].steps[0].shell`) and `message`. Nothing is written. |
+| `400` | `{ "error": "unsupported_schema_version" }` | `schemaVersion` is greater than 2. This server cannot read it. |
+| `422` | `{ "errors": [ … ] }` | The bundle does not match the template shape. |
+| `422` | `{ "error": "invalid_template_step", "errors": [ … ] }` | A template fails the normal checks, for example an input the pipeline does not declare. The whole import is rolled back. |
+
+### Version 1 compatibility
+
+A version 1 envelope, a bare array of templates and a bare template still import.
+They have no `pipelines[]`, so the rules above apply only to what they name:
+
+- A version 1 command step's `pipelineId` is kept only when that row exists in
+  this organization. A pipeline is never matched by name. Otherwise the step is
+  reported with `unresolved_pipeline` and reason `unknown_id`.
+- A version 2 step whose `pipelineRef` is missing from `pipelines[]` is reported
+  with reason `missing_ref`.
+
+### Standalone pipeline import
+
+`POST /api/pipelines/import` uses the same hash rule. An entry whose text is
+already in the organization is reused and is not copied again. Its response is:
+
+```json
+{
+  "pipelines": [ { "id": "…", "name": "verify", … } ],
+  "results": [ { "action": "reused", "pipeline": { "id": "…", "name": "verify", … } } ]
+}
+```
+
+`pipelines` lists every entry, in order, reused entries included, as before.
+`results` gives the same order, with `action` set to `created` or `reused`.
+A reused pipeline keeps its roles. The `syncRoleIds` in the request apply only to
+entries that are created.
+
+### Limitations of the bundle
+
+- An imported template keeps its name even when a template with that name already
+  exists, so the list can show two templates with the same name. The hub renames
+  such a copy `Clone - <name>`. The server does not.
+- The `pipeline` object in a response is the server's full pipeline, with `source`
+  and `syncRoleIds`. The hub returns a summary without them.
+- A template import and a standalone pipeline import answer `201 Created`. The hub
+  answers `200 OK` to both.
+- Each entry in an import answer's `templates` is the server's template object,
+  which carries `syncRoleIds` and `pipelineIds`. The hub returns a summary without
+  them.
+
 ## Catalog sync
 
 `GET /api/sync/catalog` (catalog-sync/v1) gains a fourth domain, `pipelines`,

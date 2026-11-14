@@ -1,0 +1,86 @@
+{
+  "kind": "target.templates",
+  "schemaVersion": 2,
+  "exportedAt": "2026-11-13T09:30:00.000Z",
+  "templates": [
+    {
+      "name": "Hub release",
+      "tags": ["release"],
+      "steps": [
+        {
+          "description": "Plan the release",
+          "kind": "task",
+          "pipelineInputs": null,
+          "acceptanceCriteria": "The plan lists every step",
+          "manualReview": true,
+          "useSubagent": true,
+          "maxRetries": 0,
+          "retryIntervalSeconds": 0,
+          "notes": [{ "id": "note-1", "content": "Check the changelog first", "theme": "warning" }]
+        },
+        {
+          "description": "Verify the build",
+          "kind": "command",
+          "pipelineInputs": { "package": "api" },
+          "onSuccessTask": "Post the verify summary",
+          "acceptanceCriteria": null,
+          "manualReview": false,
+          "useSubagent": false,
+          "maxRetries": 1,
+          "retryIntervalSeconds": 30,
+          "pipelineRef": "p1"
+        }
+      ],
+      "tcpIds": [],
+      "tcpSelections": [],
+      "resourceSelections": []
+    },
+    {
+      "name": "Hub nightly",
+      "tags": [],
+      "steps": [
+        {
+          "description": "Verify the nightly build",
+          "kind": "command",
+          "pipelineInputs": {},
+          "acceptanceCriteria": null,
+          "manualReview": false,
+          "useSubagent": false,
+          "maxRetries": 0,
+          "retryIntervalSeconds": 0,
+          "pipelineRef": "p1"
+        },
+        {
+          "description": "Lint the sources",
+          "kind": "command",
+          "pipelineInputs": {},
+          "acceptanceCriteria": null,
+          "manualReview": false,
+          "useSubagent": false,
+          "maxRetries": 0,
+          "retryIntervalSeconds": 0,
+          "pipelineRef": "p2"
+        }
+      ],
+      "tcpIds": [],
+      "tcpSelections": [],
+      "resourceSelections": []
+    }
+  ],
+  "pipelines": [
+    {
+      "ref": "p1",
+      "name": "hub-verify",
+      "tags": ["ci"],
+      "source": "name: hub-verify\ndescription: Install and test the package.\ninputs:\n  package:\n    default: hub\nsteps:\n  - name: Install\n    run: npm ci\n    working-directory: ${{ inputs.package }}\n",
+      "sourceHash": "802ac96db6f5cffb6fb5e952c5863a8fec8619022508de4d6121a2ac8ff8eeb9"
+    },
+    {
+      "ref": "p2",
+      "name": "hub-lint",
+      "tags": [],
+      "source": "name: hub-lint\nsteps:\n  - run: npm run lint\n",
+      "sourceHash": "05ede3fbd4318e6c0cbc3c9ec3f8a92c064c6fbbc6d3b5628fe7a300197aff9e"
+    }
+  ]
+}

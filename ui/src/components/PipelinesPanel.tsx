@@ -13,6 +13,7 @@ import type {
 	FieldError,
 	Pipeline,
 	PipelineError,
+	PipelineImportResponse,
 	PipelineValidation,
 	PipelinesResponse,
 } from "../api/types.ts";
@@ -110,12 +111,15 @@ export function PipelinesPanel({ actions }: { actions: CatalogActions }) {
 			setNotice("Import data must be valid JSON.");
 			return;
 		}
-		const result = await importCatalog<PipelinesResponse>("/api/pipelines/import", parsed);
+		const result = await importCatalog<PipelineImportResponse>("/api/pipelines/import", parsed);
 		if (!result.ok) {
 			setNotice(result.error);
 			return;
 		}
-		setNotice(`Imported ${result.data.pipelines.length} pipeline${result.data.pipelines.length === 1 ? "" : "s"}.`);
+		// A pipeline whose text is already here is reused, not copied: say which were new.
+		const total = result.data.results.length;
+		const reused = result.data.results.filter((entry) => entry.action === "reused").length;
+		setNotice(`Imported ${total} pipeline${total === 1 ? "" : "s"}: ${total - reused} created, ${reused} already here.`);
 		setImportOpen(false);
 		setImportText("");
 		setRefreshKey((key) => key + 1);

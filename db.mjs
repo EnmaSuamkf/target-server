@@ -14,7 +14,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { randomBytes, randomUUID, scryptSync } from "node:crypto";
 import { resolve as resolvePath } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { validateCommand } from "./blueprint.mjs";
+import { TEMPLATE_BUNDLE_SCHEMA_VERSION, validateCommand } from "./blueprint.mjs";
 import { stepCostDeltas } from "./estimates.mjs";
 import { parsePipeline, sourceHash } from "./pipeline-yaml.mjs";
 import { priceSession, sumCosts } from "./pricing.mjs";
@@ -5166,15 +5166,21 @@ function normalizeCatalogTemplateSteps(steps) {
  * inputs (no unknown key, every required input given). The same rule as the
  * hub's pipelineInputProblems. Fills an empty description with the pipeline's
  * name. Throws a 422 with the problems, so nothing is saved half-checked.
+ *
+ * `allowUnresolved` is for the bundle import only (importTemplateBundle): a step
+ * whose pipeline is not in this org is kept with no pipeline, and the import
+ * reports it, as the hub does. Every other caller keeps refusing it.
  */
-function resolveTemplateCommandSteps(steps) {
+function resolveTemplateCommandSteps(steps, { allowUnresolved = false } = {}) {
 	const problems = [];
 	const resolved = steps.map((step, index) => {
 		if (step.kind !== "command") return step;
 		const path = `steps[${index}]`;
 		const pipeline = getPipeline(step.pipelineId);
 		if (!pipeline) {
-			problems.push({ path: `${path}.pipelineId`, message: `unknown pipeline "${step.pipelineId}"` });
+			if (!allowUnresolved) {
+				problems.push({ path: `${path}.pipelineId`, message: `unknown pipeline "${step.pipelineId}"` });
+			}
 			return step;
 		}
 		const parsed = parsePipeline(pipeline.source);
@@ -5316,11 +5322,11 @@ export function getTemplate(id) {
 	return row ? rowToCatalogTemplate(row) : null;
 }
 
-export function createTemplate(input = {}) {
+export function createTemplate(input = {}, { allowUnresolved = false } = {}) {
 	const syncRoleIds = resolveCatalogSyncRoleIds(input.syncRoleIds) ?? [];
 	const now = new Date().toISOString();
 	const selections = resolveCatalogTemplateSelections(input);
-	const steps = resolveTemplateCommandSteps(normalizeCatalogTemplateSteps(input.steps));
+	const steps = resolveTemplateCommandSteps(normalizeCatalogTemplateSteps(input.steps), { allowUnresolved });
 	const template = {
 		id: randomUUID(),
 		name: normalizeCatalogName(input.name),
@@ -5544,6 +5550,17 @@ export function getPipeline(id) {
 	return row ? rowToPipeline(row) : null;
 }
 
+/**
+ * The oldest pipeline of this org whose text hashes to `hash`, or null. A bundle
+ * import reuses it rather than storing a second copy of the same text.
+ */
+export function findPipelineByHash(hash) {
+	const row = open()
+		.prepare("SELECT * FROM pipelines WHERE source_hash = ? ORDER BY created_at ASC, rowid ASC LIMIT 1")
+		.get(hash);
+	return row ? rowToPipeline(row) : null;
+}
+
 export function createPipeline(input = {}) {
 	const source = typeof input.source === "string" ? input.source : "";
 	const name = checkPipelineSource(source);
@@ -5595,13 +5612,27 @@ export function deletePipeline(id) {
 	return deleted;
 }
 
-/** Validates every item before writing any, so a bad bundle leaves nothing behind. */
+/**
+ * Imports pipeline entries into this organization. Every entry is checked before
+ * anything is written, so one bad entry writes nothing. An entry whose text is
+ * already here (same recomputed hash) is REUSED: the existing row keeps its sync
+ * roles, and the entry's own `syncRoleIds` do not change it. Any other entry is
+ * created with the roles it names. The writes run in one transaction. Returns one
+ * `{ pipeline, action }` per entry, in order, with `action` `created` or `reused`.
+ */
 export function importPipelines(items) {
 	items.forEach((item, index) => {
 		checkPipelineSource(item.source, index);
 		resolveCatalogSyncRoleIds(item.syncRoleIds);
 	});
-	return items.map((item) => createPipeline({ source: item.source, tags: item.tags, syncRoleIds: item.syncRoleIds }));
+	return inImmediateTransaction(() =>
+		items.map((item) => {
+			const existing = findPipelineByHash(sourceHash(item.source));
+			if (existing) return { pipeline: existing, action: "reused" };
+			const pipeline = createPipeline({ source: item.source, tags: item.tags, syncRoleIds: item.syncRoleIds });
+			return { pipeline, action: "created" };
+		}),
+	);
 }
 
 export function catalogPipelineBundle(pipelines) {
@@ -5791,20 +5822,249 @@ export const TCP_BUNDLE_KIND = "target.tcps";
 export const RESOURCE_SET_BUNDLE_KIND = "target-server.resource-sets";
 export const CATALOG_BUNDLE_SCHEMA_VERSION = 1;
 
+/**
+ * Wraps templates in a version 2 export, the same wire format the Target hub
+ * writes (docs/pipelines.md, "Templates"). Every command step's pipeline is
+ * embedded once in `pipelines[]`, however many steps use it, and the step carries
+ * `pipelineRef` instead of the local `pipelineId`. A step whose pipeline is gone
+ * gets neither, so the local id never leaves this server and the import reports
+ * the step. No sync roles, org ids or other server-internal ids are written.
+ */
 export function catalogTemplateBundle(templates) {
+	const embedded = [];
+	// Keyed by content hash: two rows with the same text are one pipeline in the file.
+	const refByHash = new Map();
 	return {
 		kind: TEMPLATE_BUNDLE_KIND,
-		schemaVersion: CATALOG_BUNDLE_SCHEMA_VERSION,
+		schemaVersion: TEMPLATE_BUNDLE_SCHEMA_VERSION,
 		exportedAt: new Date().toISOString(),
 		templates: templates.map((template) => ({
 			name: template.name,
 			tags: template.tags,
-			steps: template.steps,
+			steps: template.steps.map((step) => exportTemplateStep(step, embedded, refByHash)),
 			tcpIds: template.tcpIds,
 			tcpSelections: template.tcpSelections,
 			resourceSelections: template.resourceSelections,
 		})),
+		pipelines: embedded,
 	};
+}
+
+/** One step of a version 2 export: a command step names its embedded pipeline by `pipelineRef`. */
+function exportTemplateStep(step, embedded, refByHash) {
+	const { pipelineId, ...rest } = step;
+	// The step shape the hub writes: an agent step is a `task` with `pipelineInputs: null`, and an
+	// unbound command step has `pipelineInputs: null` too.
+	if (step.kind !== "command") return { ...rest, kind: "task", pipelineInputs: null };
+	if (!pipelineId) return { ...rest, pipelineInputs: null };
+	const pipeline = getPipeline(pipelineId);
+	if (!pipeline) return rest;
+	// Recomputed from the text rather than read from the row: the file's hash is only a label,
+	// and this keeps `sourceHash` and `source` in agreement with each other.
+	const hash = sourceHash(pipeline.source);
+	let ref = refByHash.get(hash);
+	if (ref === undefined) {
+		ref = `p${embedded.length + 1}`;
+		refByHash.set(hash, ref);
+		embedded.push({ ref, name: pipeline.name, tags: pipeline.tags, source: pipeline.source, sourceHash: hash });
+	}
+	return { ...rest, pipelineRef: ref };
+}
+
+/** A bundle the import refuses as a whole. `code` is the wire error the route answers with. */
+export class TemplateBundleError extends Error {
+	constructor(code) {
+		super(code);
+		this.name = "TemplateBundleError";
+		this.code = code;
+	}
+}
+
+/**
+ * Reads the envelope of a template bundle of any supported version: an envelope,
+ * a bare array of templates, or a bare single template. Refuses what it cannot
+ * read as a bundle, and a newer version, before anything is written.
+ */
+function readTemplateBundle(input) {
+	if (input === null || typeof input !== "object") throw new TemplateBundleError("invalid_bundle");
+	let rawTemplates;
+	let rawPipelines;
+	if (Array.isArray(input)) {
+		rawTemplates = input;
+	} else if ("templates" in input || "kind" in input) {
+		if (input.kind !== TEMPLATE_BUNDLE_KIND) throw new TemplateBundleError("unknown_kind");
+		// Absent reads as the current version, as the hub's parser does.
+		const version = input.schemaVersion === undefined ? TEMPLATE_BUNDLE_SCHEMA_VERSION : input.schemaVersion;
+		if (typeof version !== "number" || !Number.isInteger(version) || version < 1) {
+			throw new TemplateBundleError("invalid_bundle");
+		}
+		// Only a NEWER version is refused. An older one stays importable: its shape is a subset.
+		if (version > TEMPLATE_BUNDLE_SCHEMA_VERSION) throw new TemplateBundleError("unsupported_schema_version");
+		if (!Array.isArray(input.templates)) throw new TemplateBundleError("invalid_bundle");
+		rawTemplates = input.templates;
+		rawPipelines = input.pipelines;
+	} else {
+		rawTemplates = [input];
+	}
+	for (const raw of rawTemplates) {
+		if (raw === null || typeof raw !== "object" || Array.isArray(raw)) throw new TemplateBundleError("invalid_bundle");
+		// A nameless template is unusable, and the clearest sign the file is not one of ours.
+		if (typeof raw.name !== "string" || raw.name.trim() === "") throw new TemplateBundleError("invalid_bundle");
+	}
+	if (rawTemplates.length === 0) throw new TemplateBundleError("empty_bundle");
+	return { rawTemplates, rawPipelines };
+}
+
+/**
+ * Reads `pipelines[]`, validating every entry's text before anything is written:
+ * one invalid entry refuses the whole bundle, with every error listed. The name is
+ * taken from the YAML and the hash is recomputed later, never read from the file.
+ * A missing `pipelines` is an empty list (a version 1 bundle has none).
+ */
+function readBundlePipelines(raw) {
+	if (raw === undefined) return [];
+	if (!Array.isArray(raw)) throw new TemplateBundleError("invalid_bundle");
+	const parsed = [];
+	const refs = new Set();
+	const errors = [];
+	raw.forEach((item, index) => {
+		if (item === null || typeof item !== "object" || Array.isArray(item)) throw new TemplateBundleError("invalid_bundle");
+		// A duplicate ref would make two pipelines answer to one name: a broken file, not a pipeline problem.
+		if (typeof item.ref !== "string" || item.ref.trim() === "" || refs.has(item.ref)) {
+			throw new TemplateBundleError("invalid_bundle");
+		}
+		refs.add(item.ref);
+		if (typeof item.source !== "string") {
+			errors.push({ line: null, path: `pipelines[${index}].source`, message: "must be the pipeline's YAML text" });
+			return;
+		}
+		const result = parsePipeline(item.source);
+		if (!result.ok) {
+			for (const e of result.errors) {
+				errors.push({ ...e, path: `pipelines[${index}]${e.path ? `.${e.path}` : ""}` });
+			}
+			return;
+		}
+		parsed.push({
+			ref: item.ref,
+			name: result.pipeline.name,
+			tags: Array.isArray(item.tags) ? item.tags.map(String) : [],
+			source: item.source,
+		});
+	});
+	if (errors.length > 0) throw new PipelineStoreError("invalid_pipeline", { errors });
+	return parsed;
+}
+
+/**
+ * Resolves each embedded pipeline in this org. A pipeline whose recomputed hash
+ * matches one already here is reused, sync roles untouched. Anything else is
+ * created with NO sync roles, so it reaches no hub until an admin assigns some.
+ * A name conflict is decided against the pipelines that were already here, before
+ * this import writes anything, so a pipeline the import just created cannot make a
+ * later entry look conflicted.
+ */
+function resolveBundlePipelines(entries) {
+	const existing = listPipelines();
+	const conflictsBefore = entries.map(({ name, source }) => {
+		const hash = sourceHash(source);
+		return findPipelineByHash(hash) === null && existing.some((p) => p.name === name && p.sourceHash !== hash);
+	});
+	const imports = [];
+	const conflicts = [];
+	entries.forEach(({ ref, tags, source }, i) => {
+		const found = findPipelineByHash(sourceHash(source));
+		const pipeline = found ?? createPipeline({ source, tags, syncRoleIds: [] });
+		const action = found ? "reused" : "created";
+		imports.push({ ref, action, pipelineId: pipeline.id, name: pipeline.name });
+		if (action === "created" && conflictsBefore[i]) {
+			conflicts.push({ code: "pipeline_name_conflict", ref, name: pipeline.name });
+		}
+	});
+	return { imports, conflicts };
+}
+
+/**
+ * Rewrites each command step's pipeline reference to a local `pipelineId`, before
+ * the template is created. A version 2 `pipelineRef` is looked up in the pipelines
+ * this import resolved. A version 1 `pipelineId` is kept only when that row exists
+ * in this org, and is never matched by name. Anything that cannot be bound becomes
+ * `pipelineId: null`, is reported, and loses its inputs, as the step has no pipeline.
+ */
+function bindBundleSteps(rawSteps, localIdByRef, problems, templateIndex) {
+	if (!Array.isArray(rawSteps)) return rawSteps;
+	return rawSteps.map((step, stepIndex) => {
+		if (step === null || typeof step !== "object" || Array.isArray(step) || step.kind !== "command") return step;
+		let pipelineId = null;
+		if (step.pipelineRef !== undefined) {
+			pipelineId = typeof step.pipelineRef === "string" ? (localIdByRef.get(step.pipelineRef) ?? null) : null;
+			if (pipelineId === null) problems.push({ templateIndex, stepIndex, reason: "missing_ref" });
+		} else if (typeof step.pipelineId === "string" && step.pipelineId.trim() !== "") {
+			const id = step.pipelineId.trim();
+			if (getPipeline(id)) pipelineId = id;
+			else problems.push({ templateIndex, stepIndex, reason: "unknown_id" });
+		} else {
+			problems.push({ templateIndex, stepIndex, reason: "missing_ref" });
+		}
+		return pipelineId === null
+			? { ...step, pipelineId, pipelineInputs: {} }
+			: { ...step, pipelineId };
+	});
+}
+
+/** Runs `fn` inside one `BEGIN IMMEDIATE` transaction on this org's database: all of it, or nothing. */
+function inImmediateTransaction(fn) {
+	const database = open();
+	database.exec("BEGIN IMMEDIATE");
+	try {
+		const result = fn();
+		database.exec("COMMIT");
+		return result;
+	} catch (err) {
+		database.exec("ROLLBACK");
+		throw err;
+	}
+}
+
+/**
+ * Imports a template bundle of any supported version. The envelope and every
+ * embedded pipeline are checked before anything is written. Then the pipelines and
+ * the templates land in ONE transaction, so a failure (a template that does not
+ * pass the normal checks, for one) leaves nothing behind.
+ *
+ * Returns `{ templates, pipelines: [{ ref, action, pipelineId, name }], warnings }`.
+ * `action` is `created` or `reused`. The warnings use the hub's codes:
+ * `pipeline_name_conflict`, and `unresolved_pipeline` with reason `missing_ref` or
+ * `unknown_id`. A step the import cannot bind is kept with no pipeline and reported.
+ */
+export function importTemplateBundle(input) {
+	const { rawTemplates, rawPipelines } = readTemplateBundle(input);
+	const embedded = readBundlePipelines(rawPipelines);
+	return inImmediateTransaction(() => {
+		const { imports, conflicts } = resolveBundlePipelines(embedded);
+		const localIdByRef = new Map(imports.map((p) => [p.ref, p.pipelineId]));
+		const problems = [];
+		const templates = rawTemplates.map((raw, templateIndex) =>
+			createTemplate(
+				{
+					name: raw.name,
+					tags: raw.tags,
+					steps: bindBundleSteps(raw.steps, localIdByRef, problems, templateIndex),
+					tcpIds: raw.tcpIds,
+					tcpSelections: raw.tcpSelections,
+					resourceSelections: raw.resourceSelections,
+				},
+				{ allowUnresolved: true },
+			),
+		);
+		const unresolved = problems.map((p) => ({
+			code: "unresolved_pipeline",
+			template: templates[p.templateIndex].name,
+			stepIndex: p.stepIndex,
+			reason: p.reason,
+		}));
+		return { templates, pipelines: imports, warnings: [...conflicts, ...unresolved] };
+	});
 }
 
 export function catalogTcpBundle(tcps) {
