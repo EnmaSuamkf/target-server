@@ -1,9 +1,11 @@
 import { useRef, useState, type FormEvent } from "react";
-import { createTemplate, deleteTemplate, exportCatalog, importCatalog, splitTags, updateTemplate } from "../api/catalog.ts";
+import { createTemplate, deleteTemplate, exportCatalog, importTemplateBundle, splitTags, updateTemplate } from "../api/catalog.ts";
 import { CommandStepFields } from "./CommandStepFields.tsx";
 import { SyncRolesPicker, syncRolesCardMeta } from "./SyncRolesPicker.tsx";
 import type {
 	CatalogActions,
+	FieldError,
+	PipelineError,
 	ResourceSelection,
 	ResourceSet,
 	ResourceSetsResponse,
@@ -11,6 +13,7 @@ import type {
 	TcpSelection,
 	TcpsResponse,
 	Template,
+	TemplateImportWarning,
 	TemplateStep,
 	TemplatesResponse,
 	Pipeline,
@@ -26,6 +29,68 @@ const emptyStep = (): TemplateStep => ({
 	maxRetries: 0,
 	retryIntervalSeconds: 0,
 });
+
+/** What a template import made, for the report box. `warnings` are already written out in English. */
+interface ImportReport {
+	templates: number;
+	created: number;
+	reused: number;
+	warnings: string[];
+}
+
+/** One warning, in plain English, naming the template or the pipeline it is about. */
+function warningText(warning: TemplateImportWarning): string {
+	if (warning.code === "pipeline_name_conflict") {
+		return `Pipeline "${warning.name}" has the name of an existing pipeline but different text. It was imported as a separate pipeline.`;
+	}
+	const step = `Template "${warning.template}", step ${warning.stepIndex + 1}`;
+	return warning.reason === "missing_ref"
+		? `${step}: the bundle names no pipeline for this step, so the step has none.`
+		: `${step}: the pipeline it names is not in this organization, so the step has none.`;
+}
+
+/** Why a template import was refused. An invalid embedded pipeline names its first problem, so the author can find it. */
+function importFailureText(failure: { error: string; errors?: FieldError[] }): string {
+	if (failure.error === "invalid_pipeline") {
+		// The pipeline parser's problems carry a line and a path, not a field and code.
+		const problem = failure.errors?.[0] as Partial<PipelineError> | undefined;
+		const where = problem?.path ? `${problem.path}: ` : "";
+		return `A pipeline in the bundle is not valid, so nothing was imported. ${where}${problem?.message ?? ""}`.trim();
+	}
+	if (failure.error === "unsupported_schema_version") {
+		return "This bundle was made by a newer version of Target Server, so it cannot be imported here.";
+	}
+	return failure.error;
+}
+
+function ImportReportBox({ report, onDismiss }: { report: ImportReport; onDismiss: () => void }) {
+	return (
+		<section className="panel-note" aria-label="Import result">
+			<p>
+				Imported {report.templates} template{report.templates === 1 ? "" : "s"}. Pipelines: {report.created} created,{" "}
+				{report.reused} reused.
+			</p>
+			{report.created > 0 ? (
+				<p>
+					Created pipelines have no sync roles yet, so no hub receives them. Assign them roles to let hubs receive them.
+				</p>
+			) : null}
+			{report.warnings.length > 0 ? (
+				<>
+					<p>Check these after the import:</p>
+					<ul>
+						{report.warnings.map((text, index) => (
+							<li key={`${index}:${text}`}>{text}</li>
+						))}
+					</ul>
+				</>
+			) : null}
+			<button type="button" className="btn" onClick={onDismiss}>
+				Dismiss
+			</button>
+		</section>
+	);
+}
 
 export function TemplatesPanel({
 	actions,
@@ -50,6 +115,7 @@ export function TemplatesPanel({
 	const [notice, setNotice] = useState<string | null>(null);
 	const [importOpen, setImportOpen] = useState(false);
 	const [importText, setImportText] = useState("");
+	const [importReport, setImportReport] = useState<ImportReport | null>(null);
 	const fileRef = useRef<HTMLInputElement>(null);
 	const selected = selectedId && selectedId !== "new"
 		? (visibleTemplates.find((item) => item.id === selectedId) ?? (overlay?.id === selectedId ? overlay : null))
@@ -68,12 +134,21 @@ export function TemplatesPanel({
 			setNotice("Import data must be valid JSON.");
 			return;
 		}
-		const result = await importCatalog<TemplatesResponse>("/api/templates/import", parsed);
+		setImportReport(null);
+		const result = await importTemplateBundle(parsed);
 		if (!result.ok) {
-			setNotice(result.error);
+			setNotice(importFailureText(result));
 			return;
 		}
-		setNotice(`Imported ${result.data.templates.length} template${result.data.templates.length === 1 ? "" : "s"}.`);
+		const pipelines = result.data.pipelines;
+		const created = pipelines.filter((entry) => entry.action === "created").length;
+		setNotice(null);
+		setImportReport({
+			templates: result.data.templates.length,
+			created,
+			reused: pipelines.length - created,
+			warnings: result.data.warnings.map(warningText),
+		});
 		setImportOpen(false);
 		setImportText("");
 		setRefreshKey((key) => key + 1);
@@ -97,6 +172,7 @@ export function TemplatesPanel({
 				</button>
 			</div>
 			{notice ? <div className={notice.includes("Imported") || notice.startsWith("Downloaded") ? "panel-note" : "err"}>{notice}</div> : null}
+			{importReport ? <ImportReportBox report={importReport} onDismiss={() => setImportReport(null)} /> : null}
 			{error ? <div className="err">{`Could not load templates: ${error}`}</div> : null}
 			<div className="catalog-layout">
 				<div className="catalog-list" aria-label="Templates">
